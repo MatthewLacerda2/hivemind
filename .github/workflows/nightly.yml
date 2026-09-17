@@ -49,7 +49,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - run: rustup show active-toolchain || rustup toolchain install
+      - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
@@ -79,7 +79,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - run: rustup show active-toolchain || rustup toolchain install
+      - run: rustup toolchain install
       # Reporting only. Dependabot opens the actual PRs; this exists so a human
       # can see the whole picture in one place without cloning.
       - name: What would `cargo update` do

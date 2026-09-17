@@ -30,7 +30,7 @@ jobs:
 
       # No toolchain action: rust-toolchain.toml pins the compiler and rustup
       # honours it, so CI cannot drift from what developers run locally.
-      - run: rustup show active-toolchain || rustup toolchain install
+      - run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
 
@@ -64,7 +64,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - run: rustup show active-toolchain || rustup toolchain install
+      - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:

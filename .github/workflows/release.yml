@@ -37,7 +37,7 @@ jobs:
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
     steps:
       - uses: actions/checkout@v7
-      - run: rustup show active-toolchain || rustup toolchain install
+      - run: rustup toolchain install
       - run: rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
