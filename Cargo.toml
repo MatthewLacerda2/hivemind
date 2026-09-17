@@ -1,0 +1,52 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/MatthewLacerda2/hivemind"
+homepage = "https://github.com/MatthewLacerda2/hivemind"
+authors = ["The hivemind contributors"]
+keywords = ["claude", "mcp", "p2p", "messaging", "mail"]
+categories = ["command-line-utilities", "network-programming"]
+
+# Dependency versions are declared once here and inherited by every crate
+# (`foo.workspace = true`) so a major bump is a single-line change (SPEC §15).
+[workspace.dependencies]
+hivemind-core = { path = "crates/hivemind-core", version = "0.1.0" }
+hivemind-net = { path = "crates/hivemind-net", version = "0.1.0" }
+hivemind-api = { path = "crates/hivemind-api", version = "0.1.0" }
+hivemind-mcp = { path = "crates/hivemind-mcp", version = "0.1.0" }
+
+[workspace.lints.rust]
+# SPEC §13.1: no unsafe anywhere. If this ever needs an exception it gets an
+# ADR first, not an `#[allow]`.
+unsafe_code = "deny"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# SPEC §13.1 asks for a *curated* allow-list. Each entry needs a reason.
+# `hivemind_core::message::MessageId` is the idiomatic path here; renaming the
+# types to satisfy this lint would make them worse at their call sites.
+module_name_repetitions = "allow"
+# Fires on nearly every getter in a domain-type crate and adds no safety.
+must_use_candidate = "allow"
+# We return `Result` from anything fallible; this lint wants prose for errors
+# that are already named by their `thiserror` variants. Re-enable per-crate if
+# a public API ever grows a non-obvious failure mode.
+missing_panics_doc = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+
+[profile.dist]
+inherits = "release"
+lto = "fat"

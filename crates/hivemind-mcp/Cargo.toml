@@ -1,0 +1,17 @@
+[package]
+name = "hivemind-mcp"
+description = "MCP server exposing the hivemind inbox to Claude Code"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+hivemind-core.workspace = true
+
+[dev-dependencies]
+
+[lints]
+workspace = true

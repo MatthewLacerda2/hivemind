@@ -1,0 +1,12 @@
+# Stable options only: a `cargo fmt` that warns about unstable keys on every
+# invocation trains people to ignore its output.
+edition = "2024"
+style_edition = "2024"
+max_width = 100
+newline_style = "Unix"
+use_field_init_shorthand = true
+use_try_shorthand = true
+reorder_imports = true
+reorder_modules = true
+merge_derives = true
+match_arm_leading_pipes = "Never"

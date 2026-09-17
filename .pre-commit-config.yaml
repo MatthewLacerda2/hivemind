@@ -1,0 +1,50 @@
+# Install with: pip install pre-commit && pre-commit install --install-hooks
+#                                          && pre-commit install --hook-type commit-msg
+#
+# These hooks are a fast subset of `just ci`. They exist to catch the mistakes
+# that waste a CI round trip, not to replace CI (SPEC §13.3).
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: \.md$
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=512]
+
+  # CHANGELOG.md is generated from these by git-cliff (SPEC §13.5), so a commit
+  # that does not parse is a hole in the changelog.
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v3.6.0
+    hooks:
+      - id: conventional-pre-commit
+        stages: [commit-msg]
+
+  - repo: local
+    hooks:
+      - id: fmt
+        name: cargo fmt
+        entry: cargo fmt --all -- --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: clippy
+        name: cargo clippy
+        entry: cargo clippy --all-targets --all-features --workspace -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      # The whole suite, because it is seconds and "which crates did I stage"
+      # is a question nobody answers correctly under time pressure.
+      - id: nextest
+        name: cargo nextest
+        entry: cargo nextest run --workspace --all-features --no-tests=warn
+        language: system
+        types: [rust]
+        pass_filenames: false

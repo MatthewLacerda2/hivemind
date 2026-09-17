@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A superseded run tells you nothing. Cancel it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Every step below is a `just` recipe, and `just ci` runs the same list in the
+  # same order. If you add a step here that is not a recipe, that is the bug
+  # (SPEC §13.3).
+  check:
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      # No toolchain action: rust-toolchain.toml pins the compiler and rustup
+      # honours it, so CI cannot drift from what developers run locally.
+      - run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-nextest,cargo-deny
+
+      - name: Formatting
+        run: just fmt-check
+
+      - name: Clippy
+        run: just lint
+
+      - name: Docs
+        run: just doc
+
+      - name: Tests
+        run: just test
+
+      - name: Licences and advisories
+        run: just deny
+
+      - name: OpenAPI drift
+        run: just openapi-check
+
+      - name: Web UI
+        run: just web-build
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-nextest,cargo-llvm-cov
+
+      # Report-only until M1 puts code under test; then this becomes `cov-gate`
+      # and the 85% floor starts failing the build (SPEC §13.2, §14).
+      - name: Coverage
+        run: just cov
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo '### Coverage'
+            echo
+            echo '```'
+            cargo llvm-cov report --summary-only \
+              --ignore-filename-regex '(tests/|crates/hivemind-cli/)' || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lcov
+          path: lcov.info
+          if-no-files-found: ignore

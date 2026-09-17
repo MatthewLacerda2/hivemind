@@ -1,0 +1,18 @@
+[package]
+name = "hivemind-api"
+description = "axum routers, OpenAPI surface and embedded web UI for hivemind"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+hivemind-core.workspace = true
+hivemind-net.workspace = true
+
+[dev-dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,24 @@
+[package]
+name = "hivemind-cli"
+description = "The hivemind daemon and command-line client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "hivemind"
+path = "src/main.rs"
+
+[dependencies]
+hivemind-core.workspace = true
+hivemind-net.workspace = true
+hivemind-api.workspace = true
+hivemind-mcp.workspace = true
+
+[dev-dependencies]
+
+[lints]
+workspace = true

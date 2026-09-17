@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Template installed by `hivemind init` / `hivemind service install` to
+  ~/Library/LaunchAgents/dev.hivemind.daemon.plist (SPEC §2).
+
+  {{BINARY}} and {{HOME}} are substituted at install time; this file is not
+  usable as-is.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.hivemind.daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{BINARY}}</string>
+        <string>daemon</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <!-- Restart if it dies, but not if it exited cleanly (`service stop`). -->
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!-- The daemon writes its own structured log; these catch anything that
+         escapes the logger, such as a panic before tracing is initialised. -->
+    <key>StandardOutPath</key>
+    <string>{{HOME}}/.hivemind/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{HOME}}/.hivemind/launchd.err.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>{{HOME}}</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <!-- Give up restarting faster than this and launchd throttles us anyway. -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+</dict>
+</plist>

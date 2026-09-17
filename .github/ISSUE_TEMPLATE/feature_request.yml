@@ -1,0 +1,29 @@
+name: Feature request
+description: Suggest something hivemind should do
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        hivemind is deliberately a mail service, not an orchestrator. Requests
+        that turn it into a task queue or a workflow engine are out of scope by
+        design — see SPEC.md §1 and §12 for what is already reserved for v2.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that hivemind makes hard today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you have in mind
+      description: Optional. The problem matters more than the solution.
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: What you do instead today

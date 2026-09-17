@@ -1,0 +1,93 @@
+name: Nightly
+
+on:
+  schedule:
+    # 04:17 UTC — off the hour, so we are not queued behind everyone else's cron.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Fuzzing on every push would make pushes slow and flaky. Nightly with a short
+  # budget finds the same bugs a few hours later, which is soon enough (SPEC §13.2).
+  fuzz:
+    name: fuzz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Skip if there are no targets yet
+        id: probe
+        run: |
+          if [[ -d fuzz ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "fuzz targets land with the wire formats in M1 (SPEC §14)"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.probe.outputs.run == 'true'
+        run: rustup toolchain install nightly
+      - if: steps.probe.outputs.run == 'true'
+        uses: Swatinem/rust-cache@v2
+      - if: steps.probe.outputs.run == 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - name: Fuzz
+        if: steps.probe.outputs.run == 'true'
+        run: |
+          for target in $(cargo +nightly fuzz list); do
+            echo "::group::$target"
+            cargo +nightly fuzz run "$target" -- -max_total_time=120
+            echo "::endgroup::"
+          done
+
+  audit:
+    name: advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-audit
+      - run: just audit
+
+  msrv:
+    name: msrv
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml pins the compiler for everything else; here we
+      # deliberately step around it to prove `rust-version` in Cargo.toml is
+      # honest, because that is the number downstream users see.
+      - id: msrv
+        run: |
+          msrv=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["rust_version"])')
+          echo "version=$msrv" >> "$GITHUB_OUTPUT"
+          echo "declared MSRV: $msrv"
+      - run: rustup toolchain install ${{ steps.msrv.outputs.version }} --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo +${{ steps.msrv.outputs.version }} check --workspace --all-features --all-targets
+
+  outdated:
+    name: dependency report
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show active-toolchain || rustup toolchain install
+      # Reporting only. Dependabot opens the actual PRs; this exists so a human
+      # can see the whole picture in one place without cloning.
+      - name: What would `cargo update` do
+        run: |
+          {
+            echo '### `cargo update --dry-run`'
+            echo
+            echo '```'
+            cargo update --dry-run --verbose 2>&1 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

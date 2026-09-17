@@ -1,0 +1,95 @@
+name: Release
+
+# Tag-driven. Nothing here runs on a normal push, so this workflow is inert
+# until `v0.1.0` (SPEC §14, M6).
+#
+# M6 evaluates replacing the build matrix below with `cargo dist`'s generated
+# workflow. The handwritten version exists now so that a release is possible
+# from day one rather than being a thing we discover is broken at ship time.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show active-toolchain || rustup toolchain install
+      - run: rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build the web UI
+        run: |
+          if [[ -f web/package.json ]]; then
+            cd web && npm ci && npm run build
+          fi
+
+      - name: Build
+        run: cargo build --profile dist --target ${{ matrix.target }} -p hivemind-cli
+
+      # Ad-hoc signature only. It is not notarisation and does not make the
+      # binary trusted — it gives it a stable identity so macOS asks about the
+      # firewall once instead of after every rebuild (SPEC §13.4).
+      - name: Ad-hoc codesign
+        if: runner.os == 'macOS'
+        run: codesign --force --sign - target/${{ matrix.target }}/dist/hivemind
+
+      - name: Package
+        id: package
+        run: |
+          name="hivemind-${{ github.ref_name }}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp target/${{ matrix.target }}/dist/hivemind "dist/$name/"
+          cp README.md LICENSE-APACHE LICENSE-MIT "dist/$name/"
+          tar -czf "dist/$name.tar.gz" -C dist "$name"
+          shasum -a 256 "dist/$name.tar.gz" | awk '{print $1"  '"$name"'.tar.gz"}' > "dist/$name.tar.gz.sha256"
+          echo "archive=dist/$name.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Collect checksums
+        run: cat artifacts/*.sha256 > artifacts/SHA256SUMS
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
+            --notes-file <(awk '/^## /{if (seen) exit; seen=1} seen' CHANGELOG.md) \
+            artifacts/*.tar.gz artifacts/SHA256SUMS

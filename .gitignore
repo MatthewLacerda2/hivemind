@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+*.profraw
+/lcov.info
+/web/node_modules
+/web/dist
+.DS_Store

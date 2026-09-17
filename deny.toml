@@ -1,0 +1,45 @@
+# SPEC §13.3. Run with `just deny`; CI runs the same command.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+# An advisory against anything we ship fails the build. Accepting one means
+# adding it here with a comment saying why and what the exit plan is.
+ignore = []
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+]
+confidence-threshold = 0.93
+# The allow-list is written for the dependency tree SPEC §15 describes, so most
+# entries are unmatched until those crates land. Pruning it is a judgement call
+# for a human, not a warning on every run.
+unused-allowed-license = "allow"
+
+
+[bans]
+# "Where practical" (SPEC §13.3) is spelled out as: duplicates are a build
+# failure, and every one we accept lands in `skip` with a reason and an owner.
+# The list is empty today; M1 is when it earns its first entries.
+multiple-versions = "deny"
+wildcards = "deny"
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

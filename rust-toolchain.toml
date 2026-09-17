@@ -1,0 +1,9 @@
+# Pinned so every machine and every CI job builds with the same compiler.
+# Bumping this is a PR of its own: it is also the MSRV bump, and `rust-version`
+# in Cargo.toml must move with it (SPEC §13.1).
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy", "llvm-tools-preview"]
+# Cross-compilation targets are added by the release job, not here: pinning
+# darwin targets would make every Linux CI run download std it never links.
+profile = "minimal"
