@@ -15,11 +15,14 @@ on:
         description: Tag to build
         required: true
 
+# A tag push gets its own ref name; a manual dispatch has to be told. Everything
+# below reads this instead of `github.ref_name`, so the two paths cannot drift.
+env:
+  VERSION: ${{ inputs.tag || github.ref_name }}
+  CARGO_TERM_COLOR: always
+
 permissions:
   contents: write
-
-env:
-  CARGO_TERM_COLOR: always
 
 jobs:
   build:
@@ -33,7 +36,7 @@ jobs:
           - { os: macos-latest, target: x86_64-apple-darwin }
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: rustup show active-toolchain || rustup toolchain install
       - run: rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
@@ -58,8 +61,10 @@ jobs:
 
       - name: Package
         id: package
+        env:
+          VERSION: ${{ env.VERSION }}
         run: |
-          name="hivemind-${{ github.ref_name }}-${{ matrix.target }}"
+          name="hivemind-${VERSION}-${{ matrix.target }}"
           mkdir -p "dist/$name"
           cp target/${{ matrix.target }}/dist/hivemind "dist/$name/"
           cp README.md LICENSE-APACHE LICENSE-MIT "dist/$name/"
@@ -67,7 +72,7 @@ jobs:
           shasum -a 256 "dist/$name.tar.gz" | awk '{print $1"  '"$name"'.tar.gz"}' > "dist/$name.tar.gz.sha256"
           echo "archive=dist/$name.tar.gz" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.target }}
           path: |
@@ -78,8 +83,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v6
         with:
           path: artifacts
           merge-multiple: true
@@ -88,8 +93,9 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ env.VERSION }}
         run: |
-          gh release create "${{ github.ref_name }}" \
-            --title "${{ github.ref_name }}" \
+          gh release create "$VERSION" \
+            --title "$VERSION" \
             --notes-file <(awk '/^## /{if (seen) exit; seen=1} seen' CHANGELOG.md) \
             artifacts/*.tar.gz artifacts/SHA256SUMS

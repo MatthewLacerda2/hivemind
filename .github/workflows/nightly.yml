@@ -17,7 +17,7 @@ jobs:
     name: fuzz
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Skip if there are no targets yet
         id: probe
         run: |
@@ -48,7 +48,7 @@ jobs:
     name: advisories
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
@@ -60,7 +60,7 @@ jobs:
     name: msrv
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # rust-toolchain.toml pins the compiler for everything else; here we
       # deliberately step around it to prove `rust-version` in Cargo.toml is
       # honest, because that is the number downstream users see.
@@ -78,7 +78,7 @@ jobs:
     name: dependency report
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: rustup show active-toolchain || rustup toolchain install
       # Reporting only. Dependabot opens the actual PRs; this exists so a human
       # can see the whole picture in one place without cloning.
