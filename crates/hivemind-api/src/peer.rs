@@ -207,6 +207,67 @@ mod tests {
         serde_json::to_value(message).expect("serialise")
     }
 
+    /// Handshake as `friend` and confirm from this side.
+    async fn pair_with(service: &Arc<MailService>, friend: &Identity) {
+        let (status, _) = call(
+            service,
+            friend,
+            "/peer/v1/handshake",
+            &serde_json::to_value(Handshake {
+                id: friend.node_id().to_string(),
+                name: "friend".to_owned(),
+                owner: Some("friend".to_owned()),
+                version: "0.1.0".to_owned(),
+                callback_host: "127.0.0.1".to_owned(),
+                callback_port: 8400,
+                gossip: None,
+            })
+            .expect("serialise"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        service.confirm_pair(friend.node_id()).expect("confirm");
+    }
+
+    #[tokio::test]
+    async fn redelivering_a_message_neither_duplicates_it_nor_marks_it_unread() {
+        // SPEC §8: recipients dedupe on message id, so the sender can retry
+        // forever without having to know whether the last attempt landed.
+        let host = identity(13);
+        let friend = identity(14);
+        let (_dir, service) = service(&host);
+        pair_with(&service, &friend).await;
+
+        let message = message_from(&friend, host.node_id(), "say it twice");
+        let id: ulid::Ulid = message["id"]
+            .as_str()
+            .expect("an id")
+            .parse()
+            .expect("ulid");
+
+        let (first, _) = call(&service, &friend, "/peer/v1/messages", &message).await;
+        assert_eq!(first, StatusCode::ACCEPTED);
+        service.mark_read(id).expect("read it");
+
+        let (again, body) = call(&service, &friend, "/peer/v1/messages", &message).await;
+        assert_eq!(again, StatusCode::ACCEPTED, "a retry is a success");
+        assert_eq!(body["id"], message["id"]);
+
+        assert_eq!(
+            service.unread_count().expect("count"),
+            0,
+            "a redelivery must not drag a message back into the inbox"
+        );
+        assert_eq!(
+            service
+                .list(&hivemind_core::index::Query::default())
+                .expect("list")
+                .len(),
+            1,
+            "and must not leave two copies"
+        );
+    }
+
     #[tokio::test]
     async fn an_unpaired_caller_is_refused_with_not_paired() {
         // SPEC §6.2 step 3. Reaching the port is not being trusted (ADR 0010).
