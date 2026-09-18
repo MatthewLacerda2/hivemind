@@ -59,6 +59,17 @@ jobs:
       - name: Tests
         run: just test
 
+      - name: Scripts
+        run: just scripts
+
+      # The layering is a rule in SPEC §3.1 and §10. A rule written only in
+      # prose is true until somebody in a hurry writes the obvious line.
+      - name: Architectural boundaries
+        run: just boundaries
+
+      - name: Stale milestone markers
+        run: just markers
+
       - name: Licences and advisories
         run: just deny
 

@@ -205,4 +205,21 @@ the fix is almost never to update the vector.
 RFC 9457 `application/problem+json`, with stable `type` slugs enumerated in one
 Rust enum so the documentation cannot drift from the code.
 
-<!-- TODO(M1): the slug table, generated from that enum. -->
+| `type` | Meaning | Status |
+|---|---|---|
+| `/problems/message-not-found` | No such message | 404 |
+| `/problems/invalid-message` | Message is not acceptable | 422 |
+| `/problems/no-recipients` | Message has no recipients | 422 |
+| `/problems/not-paired` | Not paired | 403 |
+| `/problems/identity-mismatch` | Identity does not match the certificate | 400 |
+| `/problems/bad-signature` | Signature does not verify | 400 |
+| `/problems/peer-unreachable` | Peer could not be reached | 502 |
+| `/problems/blob-not-found` | No such attachment | 404 |
+| `/problems/blob-too-large` | Attachment is too large | 413 |
+| `/problems/unsafe-attachment-name` | Attachment name is not a file name | 422 |
+| `/problems/internal` | Internal error | 500 |
+
+A test in `hivemind-api` reads this file and fails if a `ProblemType` variant
+is missing from it, so a new failure cannot reach clients undocumented.
+
+`docs/openapi.json` carries the same list, generated from the same enum.

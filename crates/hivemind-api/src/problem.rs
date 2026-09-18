@@ -202,3 +202,80 @@ impl IntoResponse for ServiceError {
         Problem::from(self).into_response()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_problem_type_is_in_the_protocol_document() {
+        // The slugs are the API's contract (SPEC §7.3). A new failure reaching
+        // clients undocumented is the drift this catches; the table used to
+        // carry a `TODO(M1)` instead, four milestones after M1 shipped.
+        let doc = include_str!("../../../docs/protocol.md");
+
+        for kind in ProblemType::ALL {
+            let slug = format!("/problems/{}", kind.slug());
+            assert!(
+                doc.contains(&slug),
+                "{slug} is missing from docs/protocol.md — add a row for it"
+            );
+            assert!(
+                doc.contains(kind.title()),
+                "{:?}'s title is missing from docs/protocol.md",
+                kind.slug()
+            );
+        }
+    }
+
+    #[test]
+    fn the_document_lists_nothing_that_is_not_a_problem_type() {
+        // The other direction: a row for a slug the code cannot produce sends
+        // a client matching on something that will never arrive.
+        let doc = include_str!("../../../docs/protocol.md");
+        let known: Vec<String> = ProblemType::ALL
+            .iter()
+            .map(|kind| format!("/problems/{}", kind.slug()))
+            .collect();
+
+        for line in doc.lines() {
+            let Some(start) = line.find("`/problems/") else {
+                continue;
+            };
+            let rest = &line[start + 1..];
+            let Some(end) = rest.find('`') else { continue };
+            let slug = &rest[..end];
+            assert!(
+                known.iter().any(|k| k == slug),
+                "docs/protocol.md lists {slug}, which no ProblemType produces"
+            );
+        }
+    }
+
+    #[test]
+    fn a_problem_carries_its_status_in_the_body_and_the_response() {
+        // RFC 9457 says `status` duplicates the HTTP status. A client reading
+        // one and getting the other would be right to be confused.
+        for kind in ProblemType::ALL {
+            let problem = Problem::new(kind, "why");
+            assert_eq!(problem.status, kind.status().as_u16());
+            assert_eq!(problem.r#type, format!("/problems/{}", kind.slug()));
+        }
+    }
+
+    #[test]
+    fn slugs_are_unique_and_stable_looking() {
+        let mut slugs: Vec<&str> = ProblemType::ALL.iter().map(|k| k.slug()).collect();
+        slugs.sort_unstable();
+        let count = slugs.len();
+        slugs.dedup();
+        assert_eq!(slugs.len(), count, "two problem types share a slug");
+
+        for slug in &slugs {
+            assert!(
+                slug.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
+                "{slug} is not a stable kebab-case slug"
+            );
+        }
+    }
+}

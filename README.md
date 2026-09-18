@@ -74,7 +74,9 @@ Every message records whether a human or an agent wrote it (`sender_kind`), so
 Claude knows whether it is reading something a person typed or something another
 Claude sent. Full tool reference: [docs/mcp.md](docs/mcp.md).
 
-<!-- TODO(M5): screenshot of the web UI inbox at 127.0.0.1:8401 -->
+The same mail is at `http://127.0.0.1:8401/` — inbox, threads, compose with
+drag-and-drop attachments, and pairing with the fingerprints shown side by side.
+It reads without JavaScript.
 
 ## Configuration
 
@@ -82,8 +84,21 @@ Everything lives in `~/.hivemind/config.toml`, and every key can be overridden
 with a `HIVEMIND_`-prefixed environment variable. Configuration is validated at
 startup with messages that say what to fix.
 
-<!-- TODO(M1): generated key-by-key reference. Until the config type exists,
-     documenting its keys here would just be a second place to be wrong. -->
+| Key | Default | What it does |
+|---|---|---|
+| `name` | this machine's hostname | What peers show for this node |
+| `owner` | unset | Who owns it, so `hivemind send <owner>` reaches every machine they run |
+| `peer_port` | `8400` | Where other nodes connect. Bound on `0.0.0.0` |
+| `local_port` | `8401` | The loopback API and web UI. Never bound anywhere else |
+| `notifications` | `true` | A desktop notification when mail arrives |
+| `discovery` | `true` | Advertise and browse over mDNS. Off for a network you would rather not announce yourself on |
+| `prefetch` | `false` | Fetch large attachments on arrival rather than on first read |
+| `max_attachment_bytes` | `2 GiB` | The largest attachment this node accepts |
+| `inline_max_bytes` | `8 MiB` | At or below this, a file travels with its message |
+
+A test in `hivemind-core` reads this table and fails if a `Config` field is
+missing from it — the alternative is a second place to be wrong.
+
 
 | Path | What lives there |
 |---|---|

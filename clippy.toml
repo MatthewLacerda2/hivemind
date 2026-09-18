@@ -1,0 +1,10 @@
+# A failed `unwrap` in a test *is* the assertion, so `clippy::unwrap_used` —
+# denied for the workspace in Cargo.toml — steps aside inside test code. This is
+# clippy's own mechanism for the split, so a new test file gets the exemption
+# without anybody having to remember an attribute.
+#
+# The exemption reaches `#[test]` functions and `#[cfg(test)]` modules and no
+# further. A helper in `tests/` shared between tests is still held to
+# `expect("…")`, which is right: a helper fails a long way from the test that
+# called it, so its message is the only thing naming which one.
+allow-unwrap-in-tests = true

@@ -1,0 +1,37 @@
+# cargo-mutants: which changes to the code no test would notice.
+#
+# A signal, never a gate. It cannot fail a build and it does not hold a merge —
+# see `.claude/skills/ci-merge/SKILL.md` for how to read a report.
+#
+# It is the automatic form of something this repo already does by hand: when a
+# test passes the first time it is run, break the code and check the test
+# fails. That found real gaps during M3 through M6, and it found two tests that
+# were passing for the wrong reason. Doing it exhaustively is what this is.
+
+# Deleting a `Default` body or a getter produces a mutant nothing should be
+# expected to catch, and the noise buries the findings that matter.
+examine_globs = ["crates/*/src/**/*.rs"]
+exclude_globs = [
+    # Generated or vendored: not ours to test.
+    "crates/hivemind-api/src/openapi.rs",
+]
+
+exclude_re = [
+    # A `Display` that renders differently is caught by the golden vectors
+    # where it matters and by nothing where it does not; mutating format
+    # strings produces survivors that are all noise.
+    "impl Display",
+    # Tracing calls. A log line nothing asserts on is not a gap in the tests,
+    # it is a log line.
+    "tracing::",
+]
+
+# `cargo test` would rebuild the world per mutant. nextest is what CI runs and
+# what `just test` runs, so the mutants see the same suite everybody else does.
+test_tool = "nextest"
+
+# Integration tests spawn real daemons and bind real ports. Under a mutant that
+# breaks delivery they wait for the full retry backoff instead of failing, so
+# the timeout has to clear that rather than the usual case.
+timeout_multiplier = 5.0
+minimum_test_timeout = 120
