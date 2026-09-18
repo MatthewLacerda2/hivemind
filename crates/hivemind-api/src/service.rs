@@ -15,7 +15,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use chrono::{SubsecRound as _, Utc};
+use chrono::{DateTime, SubsecRound as _, Utc};
 use hivemind_core::crypto::{Signature, SigningKey};
 use hivemind_core::index::{Index, IndexError, Query, Summary};
 use hivemind_core::message::{CanonicalError, Kind, Message, MessageError, Recipient, SenderKind};
@@ -642,6 +642,79 @@ impl MailService {
         // message that does not exist (ADR 0002).
         self.store.put(mailbox, message)?;
         self.index()?.upsert(mailbox, message)?;
+        Ok(())
+    }
+
+    /// The certificate pinned for one peer, if we are paired with it.
+    ///
+    /// `None` also when the address book is unreadable, because "do not trust
+    /// this certificate" is the safe answer to "I cannot tell".
+    #[must_use]
+    pub fn certificate_of(&self, node: NodeId) -> Option<Vec<u8>> {
+        let peers = self.peers().ok()?;
+        peers
+            .peer(node)
+            .map(|peer| peer.certificate.as_bytes().to_vec())
+    }
+
+    /// Everything still awaiting delivery, oldest first (SPEC §8).
+    ///
+    /// # Errors
+    /// [`ServiceError::Store`] if the outbox cannot be read.
+    pub fn pending_outbound(&self) -> Result<Vec<Outbound>, ServiceError> {
+        Ok(self.store.list_outbound()?)
+    }
+
+    /// Where a peer might be reached, best guess first.
+    ///
+    /// Empty for a peer we are not paired with: an address without a pinned
+    /// certificate is not somewhere we will send mail.
+    ///
+    /// # Errors
+    /// [`ServiceError::Unavailable`] if the address book is poisoned.
+    pub fn peer_addresses(&self, node: NodeId) -> Result<Vec<String>, ServiceError> {
+        Ok(self.peers()?.peer(node).map_or_else(Vec::new, |peer| {
+            peer.addrs_by_preference()
+                .into_iter()
+                .map(PeerAddr::authority)
+                .collect()
+        }))
+    }
+
+    /// Write delivery progress back, finishing the message if it is complete.
+    ///
+    /// # Errors
+    /// [`ServiceError::Store`] or [`ServiceError::Index`].
+    pub fn save_outbound(&self, outbound: &Outbound) -> Result<(), ServiceError> {
+        if outbound.is_complete() {
+            self.complete_delivery(outbound)
+        } else {
+            self.store.put_outbound(outbound)?;
+            Ok(())
+        }
+    }
+
+    /// Record that a peer answered at this address, so it is tried first next
+    /// time (SPEC §5).
+    ///
+    /// # Errors
+    /// [`ServiceError::Unavailable`] if the address book is poisoned.
+    pub fn record_reached(
+        &self,
+        node: NodeId,
+        addr: &str,
+        at: DateTime<Utc>,
+    ) -> Result<(), ServiceError> {
+        let mut peers = self.peers()?;
+        let Some(peer) = peers.peer_mut(node) else {
+            return Ok(());
+        };
+        peer.mark_reached(addr, at);
+        // Best effort: losing the preference ordering costs a slow first
+        // attempt next time, and is not worth failing a delivery over.
+        if let Err(error) = peers.save() {
+            tracing::warn!(%error, "could not save the address book");
+        }
         Ok(())
     }
 

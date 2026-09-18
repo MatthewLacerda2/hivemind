@@ -24,14 +24,15 @@ struct Daemon {
 
 impl Daemon {
     fn start() -> Self {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        let port = listener.local_addr().expect("addr").port();
-        drop(listener);
+        let port = free_port();
 
         let home = tempfile::tempdir().expect("temp home");
         let mut process = Command::new(env!("CARGO_BIN_EXE_hivemind"))
             .args(["daemon", "--port", &port.to_string()])
             .env("HIVEMIND_HOME", home.path())
+            // Its own peer port: two daemons on one machine genuinely cannot
+            // share 8400, and these tests run in parallel.
+            .env("HIVEMIND_PEER_PORT", free_port().to_string())
             .env("HIVEMIND_LOG", "warn")
             // A banner per message would be noise on the machine running tests.
             .env("HIVEMIND_NOTIFICATIONS", "false")
@@ -405,4 +406,11 @@ async fn the_server_tells_claude_that_message_bodies_are_untrusted() {
     assert!(instructions.contains("sender_kind"), "got: {instructions}");
 
     client.cancel().await.ok();
+}
+
+/// A port the OS says is free. Released immediately, so this races with any
+/// other process that wants one — which in practice is only these tests.
+fn free_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    listener.local_addr().expect("addr").port()
 }

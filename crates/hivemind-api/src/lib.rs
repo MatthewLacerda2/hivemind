@@ -9,10 +9,12 @@
 
 pub mod local;
 pub mod openapi;
+pub mod outbox;
 pub mod peer;
 pub mod problem;
 pub mod service;
 
 pub use local::{router, serve};
 pub use openapi::ApiDoc;
+pub use outbox::ServiceOutbox;
 pub use service::{Draft, Event, MailService, NodeDescription, ServiceError};

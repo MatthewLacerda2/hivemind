@@ -87,10 +87,68 @@ pub(crate) async fn daemon(home: Option<&Path>, port: u16) -> Result<()> {
     let router = hivemind_api::router(Arc::clone(&service))
         .nest_service("/mcp", hivemind_mcp::http_service(Arc::clone(&service)));
 
-    axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown())
+    // One shutdown signal, three listeners. `shutdown()` can only be awaited
+    // once, so it is fanned out: a Ctrl-C that stopped the local API but left
+    // the peer port open would be worse than no graceful shutdown at all.
+    let (stopping, _) = tokio::sync::broadcast::channel::<()>(1);
+    tokio::spawn({
+        let stopping = stopping.clone();
+        async move {
+            shutdown().await;
+            let _ = stopping.send(());
+        }
+    });
+    let stop = || {
+        let mut rx = stopping.subscribe();
+        async move {
+            let _ = rx.recv().await;
+        }
+    };
+
+    let local = hivemind_net::tls::LocalIdentity::new(
+        identity.certificate_der().to_vec(),
+        identity
+            .private_key_pkcs8()
+            .context("could not read this node's private key")?,
+    );
+
+    // SPEC §6.3 and ADR 0010: the peer port admits any client that can
+    // complete a TLS handshake, and the router refuses anyone unpaired.
+    let peer_addr = std::net::SocketAddr::from(([0, 0, 0, 0], config.peer_port));
+    let peers = tokio::net::TcpListener::bind(peer_addr)
         .await
-        .context("the server stopped unexpectedly")
+        .with_context(|| format!("could not bind {peer_addr}"))?;
+    println!("  peers  https://{peer_addr}");
+
+    let peer_tls = hivemind_net::tls::peer_listener_config(&local)
+        .context("could not configure the peer listener")?;
+    let peer_router = hivemind_api::peer::router(Arc::clone(&service));
+    let peer_listener = tokio::spawn(hivemind_net::listener::serve(
+        peers,
+        peer_tls,
+        peer_router,
+        stop(),
+    ));
+
+    // SPEC §8: sending writes to out/ and returns; this is what empties it.
+    let courier = tokio::spawn({
+        let outbox = hivemind_api::ServiceOutbox::new(Arc::clone(&service));
+        let transport = hivemind_api::outbox::PeerTransport::new(Arc::clone(&service), local);
+        let stop = stop();
+        async move {
+            hivemind_net::delivery::run(&outbox, &transport, chrono::Utc::now, stop).await;
+        }
+    });
+
+    axum::serve(listener, router)
+        .with_graceful_shutdown(stop())
+        .await
+        .context("the server stopped unexpectedly")?;
+
+    // Both are driven by the same signal, so this is a join rather than a
+    // wait: it keeps the process alive until a delivery in flight finishes.
+    let _ = tokio::join!(peer_listener, courier);
+    Ok(())
 }
 
 /// Wait for whichever comes first: Ctrl-C from a terminal, or SIGTERM.

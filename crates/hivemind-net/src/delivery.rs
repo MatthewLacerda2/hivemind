@@ -151,9 +151,15 @@ mod backoff_tests {
 /// and then succeeds, which is tedious to arrange with real sockets and
 /// impossible to arrange quickly.
 pub trait Transport {
-    /// Hand `message` to whoever is at `addr`.
+    /// Hand `message` to `node`, which is expected to be at `addr`.
+    ///
+    /// The node is named as well as the address because delivery pins the
+    /// recipient's certificate. A client that merely trusted every paired peer
+    /// would hand one peer's mail to another that happened to answer on the
+    /// address we had for it.
     fn deliver(
         &self,
+        node: NodeId,
         addr: &str,
         message: &Message,
     ) -> impl std::future::Future<Output = Result<(), ClientError>> + Send;
@@ -222,7 +228,7 @@ where
         let mut last_error = None;
         let mut reached = None;
         for addr in known {
-            match transport.deliver(&addr, &outbound.message).await {
+            match transport.deliver(node, &addr, &outbound.message).await {
                 Ok(()) => {
                     reached = Some(addr);
                     break;
@@ -411,7 +417,12 @@ mod pass_tests {
     }
 
     impl Transport for Scripted {
-        async fn deliver(&self, addr: &str, message: &Message) -> Result<(), ClientError> {
+        async fn deliver(
+            &self,
+            _node: NodeId,
+            addr: &str,
+            message: &Message,
+        ) -> Result<(), ClientError> {
             self.seen
                 .lock()
                 .expect("lock")
@@ -722,7 +733,12 @@ mod worker_tests {
     }
 
     impl Transport for FailsThenWorks {
-        async fn deliver(&self, addr: &str, _message: &Message) -> Result<(), ClientError> {
+        async fn deliver(
+            &self,
+            _node: NodeId,
+            addr: &str,
+            _message: &Message,
+        ) -> Result<(), ClientError> {
             let mut remaining = self.remaining.lock().expect("lock");
             if *remaining == 0 {
                 return Ok(());

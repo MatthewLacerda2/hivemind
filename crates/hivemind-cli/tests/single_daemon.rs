@@ -32,6 +32,9 @@ impl Daemon {
         let mut process = Command::new(env!("CARGO_BIN_EXE_hivemind"))
             .args(["daemon", "--port", &port.to_string()])
             .env("HIVEMIND_HOME", home.path())
+            // Its own peer port: two daemons on one machine genuinely cannot
+            // share 8400, and these tests run in parallel.
+            .env("HIVEMIND_PEER_PORT", free_port().to_string())
             .env("HIVEMIND_LOG", "warn")
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
