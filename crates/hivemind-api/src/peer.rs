@@ -55,6 +55,10 @@ pub fn router(state: Arc<MailService>) -> Router {
     Router::new()
         .route("/peer/v1/handshake", post(handshake))
         .route("/peer/v1/messages", post(receive_message))
+        .route(
+            "/peer/v1/blobs/{sha}",
+            axum::routing::get(serve_blob).head(have_blob),
+        )
         .with_state(state)
 }
 
@@ -119,6 +123,133 @@ async fn receive_message(
 
     let id = service.receive(caller.node_id, message)?;
     Ok((StatusCode::ACCEPTED, Json(Delivered { id: id.to_string() })))
+}
+
+/// Where a range request wants to start.
+///
+/// Only `bytes=N-` is honoured, which is the one form resuming a download
+/// needs (SPEC §7.2). Anything else — multiple ranges, a suffix range, a
+/// closed range — is answered with the whole blob, which is a correct if
+/// unhelpful response and much less code to get wrong.
+fn resume_offset(headers: &axum::http::HeaderMap) -> Option<u64> {
+    headers
+        .get(axum::http::header::RANGE)?
+        .to_str()
+        .ok()?
+        .strip_prefix("bytes=")?
+        .strip_suffix('-')?
+        .parse()
+        .ok()
+}
+
+/// Do we still have this blob?
+///
+/// A recipient asks before resuming, so that a sender who has since deleted
+/// the file gives a clear answer rather than a stalled download.
+async fn have_blob(
+    State(service): State<Arc<MailService>>,
+    Extension(caller): Extension<CallerIdentity>,
+    axum::extract::Path(sha): axum::extract::Path<String>,
+) -> Result<axum::response::Response, Problem> {
+    let digest = paired_digest(&service, caller.node_id, &sha)?;
+    let size = service
+        .blobs()
+        .size_of(&digest)
+        .ok_or_else(|| Problem::new(ProblemType::BlobNotFound, "no such attachment here"))?;
+
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_LENGTH, size)
+        .header(axum::http::header::ACCEPT_RANGES, "bytes")
+        .body(axum::body::Body::empty())
+        .map_err(|_| Problem::new(ProblemType::Internal, "could not build a response"))
+}
+
+/// Stream a blob, honouring a resume offset.
+async fn serve_blob(
+    State(service): State<Arc<MailService>>,
+    Extension(caller): Extension<CallerIdentity>,
+    axum::extract::Path(sha): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Result<axum::response::Response, Problem> {
+    let digest = paired_digest(&service, caller.node_id, &sha)?;
+    let total = service
+        .blobs()
+        .size_of(&digest)
+        .ok_or_else(|| Problem::new(ProblemType::BlobNotFound, "no such attachment here"))?;
+
+    let path = service.blobs().path_of(&digest);
+    let mut file = tokio::fs::File::open(&path)
+        .await
+        .map_err(|_| Problem::new(ProblemType::BlobNotFound, "no such attachment here"))?;
+
+    let from = resume_offset(&headers).unwrap_or(0);
+    // A resume point past the end means the two sides disagree about the file.
+    // 416 tells the caller to start over rather than leaving it waiting.
+    if from > total {
+        return axum::response::Response::builder()
+            .status(StatusCode::RANGE_NOT_SATISFIABLE)
+            .header(
+                axum::http::header::CONTENT_RANGE,
+                format!("bytes */{total}"),
+            )
+            .body(axum::body::Body::empty())
+            .map_err(|_| Problem::new(ProblemType::Internal, "could not build a response"));
+    }
+
+    if from > 0 {
+        tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(from))
+            .await
+            .map_err(|_| Problem::new(ProblemType::Internal, "could not seek the attachment"))?;
+    }
+
+    let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file));
+    let status = if from > 0 {
+        StatusCode::PARTIAL_CONTENT
+    } else {
+        StatusCode::OK
+    };
+
+    let mut response = axum::response::Response::builder()
+        .status(status)
+        .header(axum::http::header::CONTENT_LENGTH, total - from)
+        .header(axum::http::header::ACCEPT_RANGES, "bytes")
+        .header(axum::http::header::CONTENT_TYPE, "application/octet-stream");
+    if from > 0 {
+        response = response.header(
+            axum::http::header::CONTENT_RANGE,
+            // An empty range has no last byte; `total - 1` would underflow.
+            format!("bytes {from}-{}/{total}", total.saturating_sub(1)),
+        );
+    }
+
+    response
+        .body(body)
+        .map_err(|_| Problem::new(ProblemType::Internal, "could not build a response"))
+}
+
+/// Check the caller may ask about blobs at all, and parse what it asked for.
+///
+/// Blobs are only ever fetched for a message the peer already received, so
+/// this needs the same pairing check as delivery. The digest is parsed rather
+/// than trusted: it arrives in a URL path from another machine.
+fn paired_digest(
+    service: &Arc<MailService>,
+    caller: hivemind_core::peer::NodeId,
+    sha: &str,
+) -> Result<hivemind_core::crypto::Sha256Digest, Problem> {
+    if !service.is_paired(caller)? {
+        return Err(Problem::new(
+            ProblemType::NotPaired,
+            "this node has not paired with you; run `hivemind pair` on both sides",
+        ));
+    }
+    sha.parse().map_err(|_| {
+        Problem::new(
+            ProblemType::BlobNotFound,
+            "that is not a SHA-256 digest, so there is no such attachment",
+        )
+    })
 }
 
 #[cfg(test)]
@@ -426,5 +557,196 @@ mod tests {
             "10.0.0.7:9000",
             "the callback address it gave should be what we record"
         );
+    }
+
+    /// GET or HEAD the peer blob route as `who`, with optional headers.
+    async fn fetch(
+        service: &Arc<MailService>,
+        who: &Identity,
+        method: &str,
+        sha: &str,
+        range: Option<&str>,
+    ) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+        let router = router(Arc::clone(service)).layer(Extension(caller(who)));
+        let mut request = Request::builder()
+            .method(method)
+            .uri(format!("/peer/v1/blobs/{sha}"));
+        if let Some(range) = range {
+            request = request.header("range", range);
+        }
+
+        let response = router
+            .oneshot(request.body(Body::empty()).expect("request"))
+            .await
+            .expect("response");
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes()
+            .to_vec();
+        (status, headers, bytes)
+    }
+
+    fn header(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(ToOwned::to_owned)
+    }
+
+    #[tokio::test]
+    async fn a_paired_peer_can_fetch_a_whole_blob() {
+        let host = identity(15);
+        let friend = identity(16);
+        let (_dir, service) = service(&host);
+        pair_with(&service, &friend).await;
+
+        let digest = service.blobs().put_bytes(b"attachment bytes").expect("put");
+
+        let (status, headers, body) = fetch(&service, &friend, "GET", &digest.to_hex(), None).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, b"attachment bytes");
+        assert_eq!(header(&headers, "accept-ranges").as_deref(), Some("bytes"));
+        assert_eq!(header(&headers, "content-length").as_deref(), Some("16"));
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_transfer_resumes_from_where_it_stopped() {
+        // SPEC §7.2: range requests supported (resume). This is the wire half
+        // of what the blob store does on disk.
+        let host = identity(17);
+        let friend = identity(18);
+        let (_dir, service) = service(&host);
+        pair_with(&service, &friend).await;
+
+        let content = b"0123456789abcdef";
+        let digest = service.blobs().put_bytes(content).expect("put");
+
+        let (status, headers, body) = fetch(
+            &service,
+            &friend,
+            "GET",
+            &digest.to_hex(),
+            Some("bytes=10-"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+        assert_eq!(body, b"abcdef", "only the part that was missing");
+        assert_eq!(
+            header(&headers, "content-range").as_deref(),
+            Some("bytes 10-15/16")
+        );
+        assert_eq!(header(&headers, "content-length").as_deref(), Some("6"));
+    }
+
+    #[tokio::test]
+    async fn resuming_past_the_end_says_so_rather_than_hanging() {
+        // The two sides disagree about the file. 416 tells the caller to start
+        // over; an empty 206 would leave it waiting for bytes never coming.
+        let host = identity(19);
+        let friend = identity(20);
+        let (_dir, service) = service(&host);
+        pair_with(&service, &friend).await;
+
+        let digest = service.blobs().put_bytes(b"short").expect("put");
+
+        let (status, headers, _) = fetch(
+            &service,
+            &friend,
+            "GET",
+            &digest.to_hex(),
+            Some("bytes=99-"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(
+            header(&headers, "content-range").as_deref(),
+            Some("bytes */5")
+        );
+    }
+
+    #[tokio::test]
+    async fn asking_whether_a_blob_is_still_there_does_not_send_it() {
+        let host = identity(21);
+        let friend = identity(22);
+        let (_dir, service) = service(&host);
+        pair_with(&service, &friend).await;
+
+        let digest = service.blobs().put_bytes(b"still here").expect("put");
+
+        let (status, headers, body) =
+            fetch(&service, &friend, "HEAD", &digest.to_hex(), None).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(header(&headers, "content-length").as_deref(), Some("10"));
+        assert!(body.is_empty(), "HEAD has no body");
+
+        let gone = hivemind_core::crypto::Sha256Digest::of(b"deleted since");
+        let (status, _, _) = fetch(&service, &friend, "HEAD", &gone.to_hex(), None).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "a sender that deleted the file should say so, not stall the download"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unpaired_peer_cannot_fetch_anything() {
+        // Blobs are only fetched for mail the peer already received, so this
+        // takes the same check as delivery.
+        let host = identity(23);
+        let stranger = identity(24);
+        let (_dir, service) = service(&host);
+
+        let digest = service.blobs().put_bytes(b"private").expect("put");
+
+        let (status, _, _) = fetch(&service, &stranger, "GET", &digest.to_hex(), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let (status, _, _) = fetch(&service, &stranger, "HEAD", &digest.to_hex(), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn a_digest_that_is_not_a_digest_cannot_name_a_file() {
+        // It arrives in a URL path from another machine.
+        let host = identity(25);
+        let friend = identity(26);
+        let (_dir, service) = service(&host);
+        pair_with(&service, &friend).await;
+
+        for attempt in ["..", "not-hex", "%2e%2e%2fpeers.toml"] {
+            let (status, _, _) = fetch(&service, &friend, "GET", attempt, None).await;
+            assert_eq!(
+                status,
+                StatusCode::NOT_FOUND,
+                "{attempt:?} should not name anything"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_resume_range_is_honoured() {
+        let range = |value: &str| {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert("range", value.parse().expect("header"));
+            resume_offset(&headers)
+        };
+
+        assert_eq!(range("bytes=1024-"), Some(1024));
+        assert_eq!(range("bytes=0-"), Some(0));
+        // Everything else gets the whole blob, which is correct if unhelpful.
+        assert_eq!(range("bytes=0-99"), None);
+        assert_eq!(range("bytes=-500"), None);
+        assert_eq!(range("bytes=0-10,20-30"), None);
+        assert_eq!(range("items=1-"), None);
+        assert_eq!(resume_offset(&axum::http::HeaderMap::new()), None);
     }
 }

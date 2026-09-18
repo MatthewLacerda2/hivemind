@@ -16,6 +16,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use chrono::{DateTime, SubsecRound as _, Utc};
+use hivemind_core::blobs::{BlobError, BlobStore};
 use hivemind_core::config::DEFAULT_PEER_PORT;
 use hivemind_core::crypto::{Signature, SigningKey};
 use hivemind_core::index::{Index, IndexError, Query, Summary};
@@ -117,6 +118,9 @@ pub enum ServiceError {
     /// The store said no.
     #[error(transparent)]
     Store(#[from] StoreError),
+    /// The blob store said no.
+    #[error(transparent)]
+    Blob(#[from] BlobError),
     /// The index said no.
     #[error(transparent)]
     Index(#[from] IndexError),
@@ -150,6 +154,7 @@ pub enum ServiceError {
 #[derive(Debug)]
 pub struct MailService {
     store: MailStore,
+    blobs: BlobStore,
     index: Mutex<Index>,
     peers: Mutex<PeerBook>,
     identity: NodeId,
@@ -196,6 +201,7 @@ impl MailService {
         signing_key: SigningKey,
     ) -> Result<Self, ServiceError> {
         let store = MailStore::open(root.join("mail"))?;
+        let blobs = BlobStore::open(root.join("blobs"))?;
         let mut index = Index::open(&root.join("index.db"))?;
         // Cheap when the index was already current, because it is only the
         // files that exist; correct when it was not.
@@ -205,6 +211,7 @@ impl MailService {
         let (events, _) = broadcast::channel(EVENT_BUFFER);
         Ok(Self {
             store,
+            blobs,
             index: Mutex::new(index),
             peers: Mutex::new(peers),
             identity: node.id,
@@ -825,6 +832,12 @@ impl MailService {
         peers
             .peer(node)
             .map(|peer| peer.certificate.as_bytes().to_vec())
+    }
+
+    /// The blob store, for handlers that stream attachments.
+    #[must_use]
+    pub fn blobs(&self) -> &BlobStore {
+        &self.blobs
     }
 
     /// Everything still awaiting delivery, oldest first (SPEC §8).
