@@ -1,9 +1,29 @@
 name: CI
 
+# CI speaks in two situations and no others: a pull request **claims to be
+# finished**, and `main` moves.
+#
+# The invariant it rests on: a ready pull request claims it passes; a draft
+# makes no such claim. CI's job is to check claims, so a red run always means a
+# claim was broken, which is worth an email every time. A draft is how work
+# survives a question that needs the user, a failure the agent could not
+# resolve, or a session that ended badly — none of those asserts anything, so
+# there is nothing to check.
+#
+# Silence on drafts is not leniency about unfinished work. It is having nothing
+# asserted to it.
+#
+# `ready_for_review` in `types:` is load-bearing and omitting it fails *open*:
+# it is not one of the defaults (`opened`, `synchronize`, `reopened`), so a
+# pull request drafted, finished, and marked ready with no further push would
+# get no run at all — and `just mergeable` would then refuse it, correctly but
+# confusingly. Every job below carries the draft condition spelled out, because
+# Actions has no workflow-level `if`.
 on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 # A superseded run tells you nothing. Cancel it.
 concurrency:
@@ -20,6 +40,7 @@ jobs:
   # (SPEC §13.3).
   check:
     name: check (${{ matrix.os }})
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -64,6 +85,10 @@ jobs:
 
       # The layering is a rule in SPEC §3.1 and §10. A rule written only in
       # prose is true until somebody in a hurry writes the obvious line.
+      # A ratchet: the limits only come down. See .github/scripts/size.py.
+      - name: File sizes
+        run: just size
+
       - name: Architectural boundaries
         run: just boundaries
 
@@ -86,6 +111,7 @@ jobs:
 
   coverage:
     name: coverage
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

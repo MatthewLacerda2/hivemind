@@ -124,6 +124,20 @@ a given build did not itself rebuild. The phantom failures waste an hour; the
 false *green* is the reason it is a rule, because it claims the gates passed on
 code that was never compiled.
 
+### A ready pull request claims it passes; a draft makes no such claim
+
+CI runs on ready pull requests and on `main`, nowhere else. So a red run always
+means a claim was broken, which is worth a notification every time.
+
+A draft is not decoration on unfinished work — it is **how work survives** a
+question that needs the user, a failure that could not be resolved, or a session
+that ended badly. None of those asserts anything, so there is nothing to check.
+The durable context is the issue, written to be read cold; never rely on a
+hand-back comment existing.
+
+**A red ready pull request stays ready** and is fixed forward. Draft is not
+where something goes because it failed once.
+
 ### Unattended work
 
 If in doubt mid-branch, leave a comment on the issue and carry on rather than
@@ -139,6 +153,7 @@ lean; keep CI fast. That is part of Craft, not a trade against it.
 
 | Recipe | What it holds |
 |---|---|
+| `just size` | No file over its line-of-code limit. A ratchet — see below |
 | `just boundaries` | The layering SPEC §3.1 and §10 describe |
 | `just markers` | A `TODO(Mn)` whose milestone has shipped |
 | `just scripts` | The Python under `.github/scripts`, stdlib `unittest` |
@@ -217,6 +232,28 @@ to undo a sabotage.** It reverts to the **committed** version, discarding
 anything uncommitted — including the test written minutes earlier. This has
 destroyed work three times in one session: `discovery.rs`, `CHANGELOG.md` and
 `config.rs`. Copy first, or commit first, and restore from the copy.
+
+## File size is a ratchet
+
+`just size` caps lines of code per file: **800 source, 600 test**, counted
+separately because most tests here live in the file they test.
+
+Blank lines and comments are free. `missing_docs` is a merge gate and the house
+style is to explain *why*, so a cap that counted prose would put those two
+rules in opposition and split files whose code was never the problem.
+
+**The numbers are measured, not chosen.** They started just *under* the largest
+file of each kind, so landing the gate cost two small splits — the peer
+commands out of `commands.rs`, and the blob tests out of `peer.rs` — rather
+than a refactor. A gate that passes on the day it arrives is a gate nobody
+knows works.
+
+**They only ever come down.** Lower them as files are split; never raise them
+to admit growth. `just size --report` lists what to split next, largest first —
+`service.rs` at 788 source lines is the standing answer.
+
+Split by concern and **group into a subfolder rather than adding a filename
+prefix**. A shared prefix on sibling files is a subfolder waiting to happen.
 
 ## Documentation that cannot drift
 

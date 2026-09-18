@@ -12,6 +12,7 @@ mod doctor;
 mod hooks;
 mod notify;
 mod paths;
+mod peers;
 mod service;
 
 use anyhow::Result;
@@ -274,22 +275,22 @@ async fn main() -> Result<()> {
             }
         },
         Command::Doctor { json } => doctor::run(cli.home.as_deref(), &cli.api, json).await,
-        Command::Join { host } => commands::join(&cli.api, &host).await,
+        Command::Join { host } => peers::join(&cli.api, &host).await,
         Command::Pair {
             id,
             yes,
             trust_network,
         } => match (trust_network, id) {
-            (true, _) => commands::trust_network(&cli.api, yes).await,
-            (false, Some(id)) => commands::pair(&cli.api, &id, yes).await,
+            (true, _) => peers::trust_network(&cli.api, yes).await,
+            (false, Some(id)) => peers::pair(&cli.api, &id, yes).await,
             (false, None) => {
                 anyhow::bail!("which peer? give a short id, or --trust-network to take them all")
             }
         },
         Command::Peers { action, json } => match action {
-            None => commands::peers(&cli.api, json).await,
-            Some(PeerCommand::Refresh) => commands::refresh_peers(&cli.api).await,
-            Some(PeerCommand::Remove { id }) => commands::remove_peer(&cli.api, &id).await,
+            None => peers::list(&cli.api, json).await,
+            Some(PeerCommand::Refresh) => peers::refresh(&cli.api).await,
+            Some(PeerCommand::Remove { id }) => peers::remove(&cli.api, &id).await,
         },
         Command::Hook(HookCommand::Check) => {
             commands::hook_check(cli.home.as_deref());

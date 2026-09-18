@@ -146,7 +146,8 @@ def judge(
     if pull.get("isDraft"):
         return False, [
             "the pull request is a draft.",
-            "A draft makes no claim to pass. Mark it ready and let CI answer.",
+            "CI does not run on drafts, so nothing here has checked it. A draft"
+            " makes no claim to pass; mark it ready and let CI answer.",
         ]
 
     if not runs:
