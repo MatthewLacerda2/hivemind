@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Peers — hivemind{% endblock %}
+{% block content %}
+<h1>Peers</h1>
+
+{% if let Some(problem) = problem %}
+  <p class="problem" role="alert">{{ problem }}</p>
+{% endif %}
+
+{% if !pending.is_empty() %}
+<section class="pending">
+  <h2>Waiting for you</h2>
+  <p class="help">
+    Check the fingerprint against what the other machine shows before confirming.
+    Nothing is trusted until both sides have.
+  </p>
+  <ul class="peers">
+  {% for peer in pending %}
+    <li>
+      <h3>{{ peer.name }}</h3>
+      <p class="meta">
+        {% if let Some(owner) = peer.owner %}<span class="who">{{ owner }}</span>{% endif %}
+        <span class="addr">{{ peer.addr }}</span>
+      </p>
+      <p class="fingerprint"><code>{{ peer.id }}</code></p>
+      <form method="post" action="/peers/{{ peer.id }}/pair">
+        <button type="submit">Confirm {{ peer.short_id }}</button>
+      </form>
+    </li>
+  {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+<section>
+  <h2>Paired</h2>
+  {% if paired.is_empty() %}
+    <p class="empty">Nobody yet. Run <code>hivemind join &lt;host&gt;</code> to meet a machine.</p>
+  {% else %}
+    <ul class="peers">
+    {% for peer in paired %}
+      <li>
+        <h3>{{ peer.name }}</h3>
+        <p class="meta">
+          {% if let Some(owner) = peer.owner %}<span class="who">{{ owner }}</span>{% endif %}
+          <span class="addr">{{ peer.addr }}</span>
+          {% if let Some(seen) = peer.last_seen %}<time>last seen {{ seen }}</time>{% endif %}
+        </p>
+        <p class="fingerprint"><code>{{ peer.id }}</code></p>
+        <form method="post" action="/peers/{{ peer.id }}/remove">
+          <button type="submit" class="danger">Forget {{ peer.short_id }}</button>
+        </form>
+      </li>
+    {% endfor %}
+    </ul>
+  {% endif %}
+</section>
+
+<form method="post" action="/peers/refresh">
+  <button type="submit">Look for peers now</button>
+</form>
+{% endblock %}

@@ -22,7 +22,9 @@ hivemind-api = { path = "crates/hivemind-api", version = "0.1.0" }
 hivemind-mcp = { path = "crates/hivemind-mcp", version = "0.1.0" }
 
 anyhow = "1"
+askama = "0.16"
 async-stream = "0.3"
+include_dir = "0.7"
 mdns-sd = "0.21"
 hyper = { version = "1", features = ["client", "server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["server", "server-auto", "tokio", "service"] }

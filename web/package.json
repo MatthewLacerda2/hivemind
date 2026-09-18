@@ -1,0 +1,15 @@
+{
+  "name": "hivemind-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The optional JavaScript layer for hivemind's web UI (SPEC §11)",
+  "license": "Apache-2.0 OR MIT",
+  "scripts": {
+    "build": "esbuild src/main.ts --bundle --minify --format=iife --target=es2022 --outfile=../crates/hivemind-api/assets/hivemind.js",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "typescript": "^5.7.0"
+  }
+}

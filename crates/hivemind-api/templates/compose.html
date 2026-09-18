@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Compose — hivemind{% endblock %}
+{% block content %}
+<h1>Compose</h1>
+
+{% if let Some(problem) = problem %}
+  <p class="problem" role="alert">{{ problem }}</p>
+{% endif %}
+
+<form class="compose" method="post" action="/compose" enctype="multipart/form-data">
+  <p>
+    <label for="to">To</label>
+    <input type="text" id="to" name="to" required value="{{ to }}"
+           list="recipients" autocomplete="off"
+           aria-describedby="to-help">
+    <datalist id="recipients">
+      <option value="everyone">
+      {% for peer in peers %}<option value="{{ peer.name }}">{% endfor %}
+    </datalist>
+    <span class="help" id="to-help">
+      A node id, an owner name, or <code>everyone</code>. Separate several with commas.
+    </span>
+  </p>
+
+  <p>
+    <label for="subject">Subject</label>
+    <input type="text" id="subject" name="subject" required maxlength="200" value="{{ subject }}">
+  </p>
+
+  <p>
+    <label for="body">Message</label>
+    <textarea id="body" name="body" rows="12" required>{{ body }}</textarea>
+  </p>
+
+  <p class="dropzone" id="dropzone">
+    <label for="files">Attachments</label>
+    <input type="file" id="files" name="files" multiple>
+    <span class="help">Drag files here, or choose them.</span>
+  </p>
+
+  <button type="submit">Send</button>
+</form>
+{% endblock %}

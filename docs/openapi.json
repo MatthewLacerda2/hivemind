@@ -745,13 +745,50 @@
           "id",
           "short_id",
           "version",
-          "unread"
+          "unread",
+          "name",
+          "peer_port",
+          "peers",
+          "pending_pairs",
+          "outbox"
         ],
         "properties": {
           "id": {
             "type": "string",
             "description": "This node's fingerprint, in its display form.",
             "example": "hm1:w2mq-xor2-seiv-lghq-ybqb-36iv-i24o-n5vk-dpww-736k-eici-imu3-bnwq"
+          },
+          "name": {
+            "type": "string",
+            "description": "The display name peers see."
+          },
+          "outbox": {
+            "type": "integer",
+            "description": "How many messages are still on their way out.",
+            "minimum": 0
+          },
+          "owner": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The human who owns this machine, if they said."
+          },
+          "peer_port": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The port the peer listener is on.",
+            "minimum": 0
+          },
+          "peers": {
+            "type": "integer",
+            "description": "How many peers are paired.",
+            "minimum": 0
+          },
+          "pending_pairs": {
+            "type": "integer",
+            "description": "How many introductions are waiting for a confirmation (SPEC §6.2).",
+            "minimum": 0
           },
           "short_id": {
             "type": "string",

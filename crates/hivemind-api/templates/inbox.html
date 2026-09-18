@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}{{ heading }} — hivemind{% endblock %}
+{% block content %}
+<h1>{{ heading }}</h1>
+
+<form class="search" method="get" action="{{ path }}" role="search">
+  <label for="q">Search</label>
+  <input type="search" id="q" name="q" value="{{ query }}" placeholder="subject or body">
+  {% if unread_only %}<input type="hidden" name="unread" value="true">{% endif %}
+  <button type="submit">Search</button>
+</form>
+
+{% if messages.is_empty() %}
+  <p class="empty">{{ empty }}</p>
+{% else %}
+  <ul class="messages" data-live="{{ live }}">
+  {% for message in messages %}
+    <li class="message{% if message.unread %} unread{% endif %}" id="m-{{ message.id }}">
+      <a href="/thread/{{ message.thread_id }}#m-{{ message.id }}">
+        <span class="subject">{{ message.subject }}</span>
+      </a>
+      <p class="meta">
+        <span class="who" title="{{ message.from }}">{{ message.from_short }}</span>
+        <span class="badge {{ message.sender_kind }}">{{ message.sender_kind }}</span>
+        {% if message.kind != "message" %}<span class="badge kind">{{ message.kind }}</span>{% endif %}
+        <time datetime="{{ message.sent_at }}">{{ message.when }}</time>
+        {% if !message.attachment_names.is_empty() %}
+          <span class="clip" title="{{ message.attachment_names|join(", ") }}">
+            {{ message.attachment_names.len() }} file{% if message.attachment_names.len() != 1 %}s{% endif %}
+          </span>
+        {% endif %}
+      </p>
+    </li>
+  {% endfor %}
+  </ul>
+{% endif %}
+{% endblock %}

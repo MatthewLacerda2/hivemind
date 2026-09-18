@@ -256,6 +256,12 @@ impl MailService {
         self.owner.as_deref()
     }
 
+    /// The port this node's peer listener is on.
+    #[must_use]
+    pub fn peer_port(&self) -> u16 {
+        self.peer_port
+    }
+
     /// This node's certificate, which peers pin.
     #[must_use]
     pub fn certificate(&self) -> &[u8] {

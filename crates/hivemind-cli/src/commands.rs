@@ -239,6 +239,12 @@ struct Me {
     short_id: String,
     version: String,
     unread: u64,
+    name: String,
+    owner: Option<String>,
+    peer_port: u16,
+    peers: usize,
+    pending_pairs: usize,
+    outbox: usize,
 }
 
 /// Is the daemon up, and what does it know (SPEC §10)?
@@ -248,17 +254,66 @@ pub(crate) async fn status(api: &str, json: bool) -> Result<()> {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "id": me.id, "short_id": me.short_id, "version": me.version, "unread": me.unread,
+                "id": me.id, "short_id": me.short_id, "version": me.version,
+                "unread": me.unread, "name": me.name, "owner": me.owner,
+                "peer_port": me.peer_port, "peers": me.peers,
+                "pending_pairs": me.pending_pairs, "outbox": me.outbox,
             }))?
         );
         return Ok(());
     }
 
-    println!("{} {}", "node".dimmed(), me.short_id.bold());
-    println!("{} {}", "  id  ".dimmed(), me.id);
-    println!("{} v{}", "  ver ".dimmed(), me.version);
-    println!("{} {}", "  mail".dimmed(), unread_phrase(me.unread));
+    println!("{} {}", me.name.bold(), me.short_id.dimmed());
+    if let Some(owner) = &me.owner {
+        println!("{} {owner}", "  owner ".dimmed());
+    }
+    println!("{} {}", "  id    ".dimmed(), me.id);
+    println!("{} v{}", "  ver   ".dimmed(), me.version);
+    println!("{} {}", "  local ".dimmed(), api);
+    println!("{} 0.0.0.0:{}", "  peers ".dimmed(), me.peer_port);
+    println!();
+    println!("{} {}", "  mail  ".dimmed(), unread_phrase(me.unread));
+    println!("{} {}", "  known ".dimmed(), peer_phrase(me.peers));
+
+    // These two are what a person is usually looking for when they run this:
+    // something is waiting on them, or something is waiting on the network.
+    if me.pending_pairs > 0 {
+        println!(
+            "{} {} — `hivemind peers` to confirm",
+            "  pair  ".dimmed(),
+            pending_phrase(me.pending_pairs).yellow()
+        );
+    }
+    if me.outbox > 0 {
+        println!(
+            "{} {}",
+            "  out   ".dimmed(),
+            outbox_phrase(me.outbox).yellow()
+        );
+    }
     Ok(())
+}
+
+fn peer_phrase(peers: usize) -> String {
+    match peers {
+        0 => "no peers — `hivemind join <host>` to meet one".to_owned(),
+        1 => "1 peer".to_owned(),
+        n => format!("{n} peers"),
+    }
+}
+
+fn pending_phrase(pending: usize) -> String {
+    match pending {
+        1 => "1 node is waiting for you".to_owned(),
+        n => format!("{n} nodes are waiting for you"),
+    }
+}
+
+fn outbox_phrase(outbox: usize) -> String {
+    match outbox {
+        1 => "1 message still going out".to_owned(),
+        n => format!("{n} messages still going out"),
+    }
 }
 
 fn unread_phrase(unread: u64) -> String {

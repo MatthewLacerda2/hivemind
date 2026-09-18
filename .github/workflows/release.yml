@@ -43,11 +43,17 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # The bundle is checked in and embedded at compile time, so this is not
+      # strictly needed to produce a working binary — it is here so a release
+      # cannot ship a bundle older than its source.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
       - name: Build the web UI
-        run: |
-          if [[ -f web/package.json ]]; then
-            cd web && npm ci && npm run build
-          fi
+        run: cd web && npm ci && npm run build
 
       - name: Build
         run: cargo build --profile dist --target ${{ matrix.target }} -p hivemind-cli

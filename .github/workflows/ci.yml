@@ -38,6 +38,15 @@ jobs:
         with:
           tool: just,cargo-nextest,cargo-deny
 
+      # The UI's bundle is checked in and embedded at compile time, so a clone
+      # without Node still builds the daemon — but CI rebuilds it to prove the
+      # committed bundle still matches its source.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
       - name: Formatting
         run: just fmt-check
 

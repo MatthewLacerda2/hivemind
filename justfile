@@ -87,11 +87,12 @@ openapi-check:
 web-build:
     #!/usr/bin/env bash
     set -euo pipefail
-    if [[ ! -f web/package.json ]]; then
-        echo "web: no UI yet — lands in M5 (SPEC §14)"
-        exit 0
-    fi
-    cd web && npm ci && npm run build
+    cd web && npm ci && npm run check && npm run build
+    # The built bundle is checked in because `include_dir` embeds it at compile
+    # time: a clone without Node must still build the daemon. That makes it a
+    # generated file in git, so CI fails if it has drifted from the source —
+    # the same bargain `openapi-check` makes.
+    cd .. && git diff --exit-code -- crates/hivemind-api/assets/hivemind.js
 
 # ------------------------------------------------------------------- all ----
 
