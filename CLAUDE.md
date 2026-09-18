@@ -1,5 +1,8 @@
 # CLAUDE.md
 
+For working **on** hivemind. Somebody being asked to *run* it wants
+[`docs/using.md`](docs/using.md), which the README points at.
+
 How to work in this repo. `SPEC.md` is the source of truth for *what* hivemind
 is and stays until it is all built; this is *how* it gets built;
 `docs/decisions/` holds the arguments.

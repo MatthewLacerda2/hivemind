@@ -251,20 +251,34 @@ fn a_message_survives_the_daemon_restarting() {
     // Store-and-forward is worth nothing if a restart loses mail (SPEC §8).
     let home = tempfile::tempdir().expect("temp home");
     let port = free_port();
+    let errors = home.path().join("daemon.stderr");
 
     let start = || {
         let mut process = Command::new(env!("CARGO_BIN_EXE_hivemind"))
             .args(["daemon", "--port", &port.to_string()])
             .env("HIVEMIND_HOME", home.path())
+            // Its own peer port, and no mDNS: a real daemon may be running on
+            // this machine, and the test must not meet it.
+            .env("HIVEMIND_PEER_PORT", free_port().to_string())
+            .env("HIVEMIND_DISCOVERY", "false")
             .env("HIVEMIND_LOG", "warn")
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(
+                std::fs::File::create(&errors).expect("a file for the daemon stderr"),
+            ))
             .spawn()
             .expect("daemon starts");
         let stdout = process.stdout.take().expect("stdout");
         let mut reader = BufReader::new(stdout);
         let mut line = String::new();
         reader.read_line(&mut line).expect("daemon is up");
+
+        // This test builds its own daemon rather than using `Daemon::start`,
+        // and so had its own copy of the race that fix was for: the
+        // "listening" line is printed before the router serves, so a CLI call
+        // made on the strength of it alone can arrive first.
+        wait_until_answering(port, &mut process, &errors);
+
         // Returned alongside the process so the pipe outlives this function;
         // dropping it would SIGPIPE the daemon on its next println!.
         (process, reader)

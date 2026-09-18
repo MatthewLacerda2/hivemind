@@ -23,19 +23,29 @@ hivemind only carries the mail.
 ## 60-second quick start
 
 ```
-brew install hivemind
-hivemind init            # asks for a display name, does everything else
-hivemind join 100.101.2.3   # only if not auto-discovered (Tailscale)
+git clone https://github.com/MatthewLacerda2/hivemind && cd hivemind
+cargo install --path crates/hivemind-cli --locked
+hivemind init
 ```
 
-`hivemind init` generates your node identity, starts the daemon under launchd,
-registers the MCP server with Claude Code, installs the wake-up hooks, and
-prints your node name, fingerprint and addresses.
+That is it. `hivemind init` generates your node identity, starts the daemon
+under launchd, registers the MCP server with Claude Code, installs the wake-up
+hooks, and prints your node name, fingerprint and addresses.
+
+> **Never `brew install hivemind`.** That name belongs to
+> [a different program](https://github.com/DarthSim/hivemind) — a process
+> manager — already in Homebrew core. Running it installs the wrong software
+> and the next line then fails confusingly.
+>
+> Once there is a release it becomes
+> `brew install MatthewLacerda2/homebrew-tap/hivemind`, tap included. The short
+> form stays wrong; [ADR 0012](docs/decisions/0012-the-name-is-taken.md) has
+> the two ways to get it back.
 
 On a LAN, other hivemind nodes appear by themselves over mDNS. On a tailnet,
-tell a coworker your Tailscale IP and run `hivemind join`. Either way you
-confirm each other's fingerprint once — like SSH's first connection — and then
-everything is automatic.
+run `hivemind join <their-tailscale-ip>`. Either way you confirm each other's
+fingerprint once — like SSH's first connection — and then everything is
+automatic.
 
 ## Why it exists
 
@@ -176,6 +186,15 @@ threat model: [SECURITY.md](SECURITY.md).
 
 **Windows?** Not in v1. macOS is the primary target and Linux builds and tests
 in CI.
+
+## Being handed this and told to run it
+
+[`docs/using.md`](docs/using.md) is the whole of it — install, `hivemind init`,
+confirm a fingerprint with whoever sent you.
+
+An agent asked to do it has a skill for exactly that,
+`.claude/skills/run-hivemind/`, which it will find on its own. `CLAUDE.md` is
+for working *on* hivemind and says so in its first line.
 
 ## Development
 

@@ -30,10 +30,18 @@ Running several Claude Code sessions across machines (desktop, laptop, coworkers
 Users are developers who use Claude Code CLI on macOS. They are competent but will not read docs. The entire onboarding must be:
 
 ```
-brew install hivemind
+brew install MatthewLacerda2/homebrew-tap/hivemind
 hivemind init            # asks for a display name, does everything else
 hivemind join 100.101.2.3   # only if not auto-discovered (Tailscale)
 ```
+
+The first line was `brew install hivemind` until it turned out that command
+installs [an unrelated process manager](https://github.com/DarthSim/hivemind)
+already in Homebrew core. The tap form is a stopgap and is longer than this
+section's own standard asks for; see
+`docs/decisions/0012-the-name-is-taken.md` for the two ways to get the short
+line back. Until a release exists the working install is
+`cargo install --path crates/hivemind-cli`.
 
 `hivemind init` must:
 1. Generate the node identity (§6).
