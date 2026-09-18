@@ -144,11 +144,18 @@ struct Peer {
     id: NodeId,                     // SHA-256 fingerprint of the node's TLS certificate (Ed25519 SPKI)
     name: String,                   // display name, e.g. "matthew-mbp"
     owner: Option<String>,          // human owner, e.g. "matthew" — for fan-out addressing
+    certificate: CertificateDer,    // the whole DER, because §6.3 pins by comparing it
     addrs: Vec<PeerAddr>,           // { host, port, source: Mdns | Tailscale | Manual, last_ok: DateTime }
     paired_at: DateTime<Utc>,
     last_seen: Option<DateTime<Utc>>,
 }
 ```
+
+`certificate` was not in the first draft of this section and is not optional:
+`id` is a fingerprint, and a fingerprint cannot be checked against a connection
+without the thing it fingerprints. It is also what makes a message verifiable
+after the transport is gone (§4.1) — the sender's public key is read out of it
+rather than taken from the message, so a peer cannot nominate its own key.
 
 ### 4.3 On-disk layout
 
@@ -230,6 +237,10 @@ DELETE /api/v1/peers/{id}
 POST   /api/v1/peers/refresh               re-run discovery now
 
 GET    /api/v1/messages?box=new|cur|out|sent&thread=&from=&unread=&q=&limit=&cursor=
+       # `cursor` is keyset, not an offset: `<sent_at in milliseconds>:<id>`,
+       # built from the last summary already received. An offset would repeat
+       # or skip a row when mail arrives mid-pagination, which is the normal
+       # state of an inbox.
 GET    /api/v1/messages/{id}
 POST   /api/v1/messages                    multipart: json part `message` + N file parts → send
 POST   /api/v1/messages/{id}/reply         same, with in_reply_to preset

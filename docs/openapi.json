@@ -135,6 +135,18 @@
               ],
               "minimum": 0
             }
+          },
+          {
+            "name": "cursor",
+            "in": "path",
+            "description": "Continue after this row, from a previous page (SPEC §7.1).\n\nBuild it from the last summary already received: `<sent_at in\nmilliseconds>:<id>`. Keyset rather than offset, so a message arriving\nwhile somebody pages through their inbox cannot make a row appear\ntwice or not at all.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {

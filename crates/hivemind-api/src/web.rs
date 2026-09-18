@@ -241,6 +241,10 @@ fn listing(
             unread_only,
             text: text.clone(),
             limit: Some(200),
+            // The page is read in one go: it renders a list somebody scrolls,
+            // not an API a client walks. Paging belongs here the day 200
+            // messages stops being enough to look at.
+            cursor: None,
         };
         messages.extend(
             service
