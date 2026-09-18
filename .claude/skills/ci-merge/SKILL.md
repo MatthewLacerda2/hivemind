@@ -65,6 +65,17 @@ branch makes GitHub **close** the pull requests stacked on it rather than
 retarget them. It happened to #3 and #5; no work was lost, but the recovery
 cost a new pull request and an explanation on each closed one.
 
+## Drafts get no CI at all
+
+CI runs on ready pull requests and on `main`, nowhere else. Two consequences
+worth holding onto:
+
+- **`just mergeable` on a draft says so and refuses.** That is correct, not a
+  bug in the tool: nothing has checked it.
+- **Marking a pull request ready is what asks for a run.** Do it, then wait —
+  and if no run appears, read `just mergeable`'s output before touching any
+  workflow file. A conflicted branch produces no run either.
+
 ## When a pull request is red
 
 Fix it in the next commit. It does not go back to draft — draft is for work

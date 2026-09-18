@@ -101,6 +101,13 @@ mergeable PR="":
 scripts:
     python3 -m unittest discover --start-directory .github/scripts/tests --quiet
 
+# A ratchet, not a target: the limits start just under the largest file that
+# exists and only ever come down. `just size --report` lists what to split next.
+
+# [gate] No Rust file over its line-of-code limit. Comments and blanks are free
+size *ARGS:
+    python3 .github/scripts/size.py {{ARGS}}
+
 # [gate] The layering SPEC §3.1 and §10 describe, held to rather than hoped for.
 boundaries:
     python3 .github/scripts/boundaries.py
@@ -185,7 +192,7 @@ web-build:
 
 # What ci.yml runs, in its order — including the coverage gate, which runs as a
 # separate job there. Run this before opening a PR (SPEC §16.6).
-ci: fmt-check lint boundaries markers doc test scripts deny openapi-check web-build dist-check cov-gate
+ci: fmt-check lint size boundaries markers doc test scripts deny openapi-check web-build dist-check cov-gate
 
 # `ci` plus what nightly.yml runs on a schedule.
 ci-full: ci audit
