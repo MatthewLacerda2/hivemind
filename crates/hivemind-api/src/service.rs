@@ -18,7 +18,7 @@ use std::sync::Mutex;
 use chrono::{DateTime, SubsecRound as _, Utc};
 use hivemind_core::blobs::{BlobError, BlobStore, check_attachment_name};
 use hivemind_core::config::DEFAULT_PEER_PORT;
-use hivemind_core::crypto::{Signature, SigningKey};
+use hivemind_core::crypto::{Sha256Digest, Signature, SigningKey};
 use hivemind_core::index::{Index, IndexError, Query, Summary};
 use hivemind_core::message::{
     AttachmentRef, CanonicalError, Kind, Message, MessageError, Recipient, SenderKind,
@@ -890,6 +890,104 @@ impl MailService {
             });
         }
         Ok(refs)
+    }
+
+    /// Get an attachment onto local disk, fetching it if we do not hold it.
+    ///
+    /// SPEC §8: a file too large to travel with its message is fetched on
+    /// first access. The fetch resumes from whatever an interrupted attempt
+    /// left behind, so a laptop closed mid-transfer costs the bytes not yet
+    /// received rather than all of them.
+    ///
+    /// # Errors
+    /// [`ServiceError::NoSuchMessage`] if the message is unknown,
+    /// [`ServiceError::Blob`] if the message declares no such attachment,
+    /// [`ServiceError::NoSuchPeer`] if the sender is no longer paired, or
+    /// [`ServiceError::Peer`] if the fetch fails.
+    pub async fn fetch_attachment(
+        &self,
+        message_id: Ulid,
+        digest: Sha256Digest,
+    ) -> Result<std::path::PathBuf, ServiceError> {
+        if self.blobs.has(&digest) {
+            return Ok(self.blobs.path_of(&digest));
+        }
+
+        let (_, message) = self.get(message_id)?;
+        // Only an attachment this message declares. Otherwise the endpoint
+        // would be a way to ask a peer for any file it happens to hold.
+        if !message.attachments.iter().any(|a| a.sha256 == digest) {
+            return Err(BlobError::NotFound {
+                digest: digest.to_hex(),
+            }
+            .into());
+        }
+
+        // Our own outgoing mail: if the blob is gone it is gone, and there is
+        // nobody to ask for it.
+        if message.from == self.identity {
+            return Err(BlobError::NotFound {
+                digest: digest.to_hex(),
+            }
+            .into());
+        }
+
+        self.download_from(message.from, &digest).await?;
+        Ok(self.blobs.path_of(&digest))
+    }
+
+    /// Fetch one blob from the peer that sent it, resuming if we can.
+    async fn download_from(&self, from: NodeId, digest: &Sha256Digest) -> Result<(), ServiceError> {
+        let certificate = self
+            .certificate_of(from)
+            .ok_or_else(|| ServiceError::NoSuchPeer {
+                id: from.to_string(),
+            })?;
+        let addresses = self.peer_addresses(from)?;
+        if addresses.is_empty() {
+            return Err(ServiceError::NoSuchPeer {
+                id: from.to_string(),
+            });
+        }
+
+        let client = hivemind_net::client::PeerClient::pinned(
+            &self.tls,
+            hivemind_net::tls::TrustedPeers::new(vec![(from, certificate)]),
+        )?;
+        let path = format!("/peer/v1/blobs/{}", digest.to_hex());
+
+        let mut last = None;
+        for addr in addresses {
+            let from_byte = self.blobs.partial_len(digest);
+            let result = client
+                .download(&addr, &path, from_byte, |chunk| {
+                    self.blobs
+                        .append_partial(digest, chunk)
+                        .map(|_| ())
+                        .map_err(|e| hivemind_net::client::ClientError::Http {
+                            addr: String::new(),
+                            reason: e.to_string(),
+                        })
+                })
+                .await;
+
+            match result {
+                Ok(_) => {
+                    // Verified here rather than trusted: the bytes are thrown
+                    // away if they are not what the signed message named.
+                    self.blobs.finish_partial(digest)?;
+                    return Ok(());
+                }
+                Err(error) => last = Some(error),
+            }
+        }
+
+        Err(last.map_or(
+            ServiceError::NoSuchPeer {
+                id: from.to_string(),
+            },
+            ServiceError::Peer,
+        ))
     }
 
     /// Store the blobs that arrived with a message (SPEC §8).

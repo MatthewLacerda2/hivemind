@@ -371,6 +371,19 @@ struct MessageBody {
     body: String,
     sender_kind: String,
     sent_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default)]
+    attachments: Vec<Attachment>,
+}
+
+/// One attachment, as the local API reports it.
+#[derive(Debug, Deserialize, serde::Serialize)]
+struct Attachment {
+    name: String,
+    size: u64,
+    sha256: String,
+    mime: String,
+    inline: bool,
+    cached: bool,
 }
 
 /// Read one message and mark it read (SPEC §10).
@@ -389,7 +402,7 @@ pub(crate) async fn read(api: &str, id: &str, json: bool) -> Result<()> {
             serde_json::to_string_pretty(&serde_json::json!({
                 "id": message.id, "from": message.from, "subject": message.subject,
                 "body": message.body, "sender_kind": message.sender_kind,
-                "sent_at": message.sent_at,
+                "sent_at": message.sent_at, "attachments": message.attachments,
             }))?
         );
         return Ok(());
@@ -405,6 +418,28 @@ pub(crate) async fn read(api: &str, id: &str, json: bool) -> Result<()> {
     );
     println!();
     println!("{}", message.body);
+
+    if !message.attachments.is_empty() {
+        println!();
+        println!("{}", "attachments".dimmed());
+        for attachment in &message.attachments {
+            // "on disk" vs "fetch on read" is the difference between opening
+            // it now and waiting for the sender's laptop to be awake.
+            let state = if attachment.cached {
+                "on disk".green().to_string()
+            } else {
+                "fetch on read".yellow().to_string()
+            };
+            println!(
+                "  {}  {}  {}  {}",
+                attachment.name.bold(),
+                human_size(attachment.size),
+                attachment.mime.dimmed(),
+                state
+            );
+            println!("    {}", attachment.sha256.dimmed());
+        }
+    }
     Ok(())
 }
 
@@ -734,4 +769,27 @@ pub(crate) async fn trust_network(api: &str, yes: bool) -> Result<()> {
         println!("paired with {} ({})", peer.name.bold(), peer.short_id);
     }
     Ok(())
+}
+
+/// A size a person can read at a glance.
+fn human_size(bytes: u64) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    const UNITS: [(&str, u64); 4] = [
+        ("GiB", 1024 * 1024 * 1024),
+        ("MiB", 1024 * 1024),
+        ("KiB", 1024),
+        ("B", 1),
+    ];
+
+    for (unit, scale) in UNITS {
+        if bytes >= scale {
+            if scale == 1 {
+                return format!("{bytes} B");
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let value = bytes as f64 / scale as f64;
+            return format!("{value:.1} {unit}");
+        }
+    }
+    "0 B".to_owned()
 }

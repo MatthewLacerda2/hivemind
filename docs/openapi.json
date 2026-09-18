@@ -243,6 +243,62 @@
         }
       }
     },
+    "/api/v1/messages/{id}/attachments/{sha}": {
+      "get": {
+        "tags": [
+          "messages"
+        ],
+        "operationId": "get_attachment",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The message the attachment belongs to",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sha",
+            "in": "path",
+            "description": "The attachment's SHA-256, in hex",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The attachment's bytes",
+            "content": {
+              "application/octet-stream": {}
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/messages/{id}/read": {
       "post": {
         "tags": [
@@ -628,6 +684,46 @@
           }
         }
       },
+      "Attachment": {
+        "type": "object",
+        "description": "One attachment, as the local API describes it (SPEC §7.1).",
+        "required": [
+          "name",
+          "size",
+          "sha256",
+          "mime",
+          "inline",
+          "cached"
+        ],
+        "properties": {
+          "cached": {
+            "type": "boolean",
+            "description": "Whether the bytes are already on this machine. `false` means the first\nread of it will go to the sender."
+          },
+          "inline": {
+            "type": "boolean",
+            "description": "Whether it travelled with the message or is fetched on demand."
+          },
+          "mime": {
+            "type": "string",
+            "description": "What the sender says it is. Advisory (SPEC §4.1)."
+          },
+          "name": {
+            "type": "string",
+            "description": "The name to save it as. Checked on arrival, never a path (SPEC §6.3)."
+          },
+          "sha256": {
+            "type": "string",
+            "description": "Its content address, and the `sha` in the attachment URL."
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Its size in bytes.",
+            "minimum": 0
+          }
+        }
+      },
       "JoinRequest": {
         "type": "object",
         "description": "Where to look for a node to introduce ourselves to.",
@@ -686,9 +782,17 @@
           "kind",
           "sender_kind",
           "sent_at",
-          "mailbox"
+          "mailbox",
+          "attachments"
         ],
         "properties": {
+          "attachments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Attachment"
+            },
+            "description": "The files that came with it."
+          },
           "body": {
             "type": "string",
             "description": "Its body, as markdown."

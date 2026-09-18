@@ -286,14 +286,143 @@ impl PeerClient {
         }
     }
 
-    /// One request, from TCP connect to decoded body.
-    async fn exchange<R: DeserializeOwned>(
+    /// GET `path`, resuming from byte `from`, handing each chunk to `sink`.
+    ///
+    /// Returns how many bytes arrived. Streamed rather than buffered: this is
+    /// the path a file too large to travel with its message takes, and holding
+    /// a two-gigabyte attachment in memory to write it to disk would be a
+    /// strange way to save a round trip.
+    ///
+    /// # Errors
+    /// Any [`ClientError`]. A partial download is not an error — the caller
+    /// keeps what arrived and resumes from it.
+    pub async fn download<F>(
         &self,
         authority: &str,
         path: &str,
-        request: Vec<u8>,
-        content_type: &str,
-    ) -> Result<PeerResponse<R>, ClientError> {
+        from: u64,
+        sink: F,
+    ) -> Result<u64, ClientError>
+    where
+        F: FnMut(&[u8]) -> Result<(), ClientError> + Send,
+    {
+        match tokio::time::timeout(self.timeout, self.stream(authority, path, from, sink)).await {
+            Ok(result) => result,
+            Err(_) => Err(ClientError::Timeout {
+                addr: authority.to_owned(),
+                timeout: self.timeout,
+            }),
+        }
+    }
+
+    async fn stream<F>(
+        &self,
+        authority: &str,
+        path: &str,
+        from: u64,
+        mut sink: F,
+    ) -> Result<u64, ClientError>
+    where
+        F: FnMut(&[u8]) -> Result<(), ClientError> + Send,
+    {
+        let (mut sender, certificate, pump) = self.connect(authority).await?;
+        let _ = certificate;
+
+        let result = async {
+            let mut builder = hyper::Request::builder()
+                .method(hyper::Method::GET)
+                .uri(path)
+                .header(hyper::header::HOST, authority);
+            if from > 0 {
+                builder = builder.header(hyper::header::RANGE, format!("bytes={from}-"));
+            }
+
+            let request = builder
+                // An empty body rather than a separate type: the connection is
+                // typed by its body, and one type keeps `connect` shared.
+                .body(http_body_util::Full::new(hyper::body::Bytes::new()))
+                .map_err(|e| ClientError::Http {
+                    addr: authority.to_owned(),
+                    reason: e.to_string(),
+                })?;
+
+            let mut response =
+                sender
+                    .send_request(request)
+                    .await
+                    .map_err(|e| ClientError::Http {
+                        addr: authority.to_owned(),
+                        reason: e.to_string(),
+                    })?;
+
+            let status = response.status();
+            if !status.is_success() {
+                use http_body_util::BodyExt as _;
+                let bytes = response
+                    .body_mut()
+                    .collect()
+                    .await
+                    .map(http_body_util::Collected::to_bytes)
+                    .unwrap_or_default();
+                return Err(ClientError::Status {
+                    addr: authority.to_owned(),
+                    status: status.as_u16(),
+                    detail: problem_detail(&bytes),
+                });
+            }
+
+            // A server that ignored the range header answers 200 and starts
+            // from zero. Appending that to what we already hold would corrupt
+            // the file, so it is a failure rather than something to salvage.
+            if from > 0 && status != hyper::StatusCode::PARTIAL_CONTENT {
+                return Err(ClientError::Http {
+                    addr: authority.to_owned(),
+                    reason: format!("asked to resume from {from} but got {status}"),
+                });
+            }
+
+            let mut received = 0u64;
+            loop {
+                use http_body_util::BodyExt as _;
+                let Some(frame) = response.frame().await else {
+                    break;
+                };
+                let frame = frame.map_err(|e| ClientError::Http {
+                    addr: authority.to_owned(),
+                    reason: e.to_string(),
+                })?;
+                if let Some(chunk) = frame.data_ref() {
+                    received += chunk.len() as u64;
+                    sink(chunk)?;
+                }
+            }
+            Ok(received)
+        }
+        .await;
+
+        drop(sender);
+        pump.abort();
+        result
+    }
+
+    /// Connect, complete the TLS handshake, and start driving the connection.
+    ///
+    /// Returns the request sender, the certificate the peer presented — only
+    /// available while the session is alive, which is the whole reason this
+    /// client exists rather than a pooled one — and the task pumping the
+    /// socket, which the caller aborts when it is done.
+    #[allow(clippy::type_complexity)]
+    async fn connect(
+        &self,
+        authority: &str,
+    ) -> Result<
+        (
+            hyper::client::conn::http1::SendRequest<http_body_util::Full<hyper::body::Bytes>>,
+            Vec<u8>,
+            tokio::task::JoinHandle<()>,
+        ),
+        ClientError,
+    > {
         let tcp = tokio::net::TcpStream::connect(authority)
             .await
             .map_err(|source| ClientError::Connect {
@@ -334,7 +463,7 @@ impl PeerClient {
                 .to_vec()
         };
 
-        let (mut sender, connection) =
+        let (sender, connection) =
             hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(tls))
                 .await
                 .map_err(|e| ClientError::Http {
@@ -342,9 +471,24 @@ impl PeerClient {
                     reason: e.to_string(),
                 })?;
 
-        // The connection task drives the socket. It ends when `sender` is
-        // dropped, so there is nothing to clean up on the error paths below.
-        let pump = tokio::spawn(connection);
+        let pump = tokio::spawn(async move {
+            // The connection task drives the socket. It ends when the sender
+            // is dropped, so there is nothing for the caller to clean up.
+            let _ = connection.await;
+        });
+
+        Ok((sender, certificate, pump))
+    }
+
+    /// One request, from TCP connect to decoded body.
+    async fn exchange<R: DeserializeOwned>(
+        &self,
+        authority: &str,
+        path: &str,
+        request: Vec<u8>,
+        content_type: &str,
+    ) -> Result<PeerResponse<R>, ClientError> {
+        let (mut sender, certificate, pump) = self.connect(authority).await?;
 
         let response = async {
             let http = hyper::Request::builder()

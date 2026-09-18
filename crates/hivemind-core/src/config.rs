@@ -168,6 +168,16 @@ impl Config {
         {
             self.discovery = flag;
         }
+        if let Ok(bytes) = std::env::var("HIVEMIND_MAX_ATTACHMENT_BYTES")
+            && let Ok(bytes) = bytes.parse()
+        {
+            self.max_attachment_bytes = bytes;
+        }
+        if let Ok(bytes) = std::env::var("HIVEMIND_INLINE_MAX_BYTES")
+            && let Ok(bytes) = bytes.parse()
+        {
+            self.inline_max_bytes = bytes;
+        }
         if let Ok(value) = std::env::var("HIVEMIND_PREFETCH")
             && let Some(flag) = parse_bool(&value)
         {

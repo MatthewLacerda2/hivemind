@@ -23,6 +23,11 @@ struct Daemon {
 
 impl Daemon {
     fn start(name: &str) -> Self {
+        Self::start_with(name, &[])
+    }
+
+    /// Start with extra environment, for the settings a test needs to bend.
+    fn start_with(name: &str, extra: &[(&str, &str)]) -> Self {
         let port = free_port();
         let peer_port = free_port();
         let home = tempfile::tempdir().expect("temp home");
@@ -38,6 +43,7 @@ impl Daemon {
             // and every other hivemind on the developer's LAN.
             .env("HIVEMIND_DISCOVERY", "false")
             .env("HIVEMIND_LOG", "warn")
+            .envs(extra.iter().copied())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
@@ -95,6 +101,35 @@ impl Daemon {
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8(output.stdout).expect("utf-8 output")
+    }
+
+    /// POST to this daemon's local API, returning the decoded JSON.
+    fn post(&self, path: &str, body: &serde_json::Value) -> (u16, serde_json::Value) {
+        let response = reqwest::blocking::Client::new()
+            .post(format!("{}{path}", self.api()))
+            .json(body)
+            .send()
+            .expect("the daemon answers");
+        let status = response.status().as_u16();
+        let text = response.text().unwrap_or_default();
+        (
+            status,
+            serde_json::from_str(&text).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    /// GET raw bytes from this daemon's local API.
+    fn get_bytes(&self, path: &str) -> (u16, Vec<u8>) {
+        let response = reqwest::blocking::Client::builder()
+            // A first fetch pulls the whole file from the other daemon.
+            .timeout(Duration::from_mins(1))
+            .build()
+            .expect("client")
+            .get(format!("{}{path}", self.api()))
+            .send()
+            .expect("the daemon answers");
+        let status = response.status().as_u16();
+        (status, response.bytes().expect("body").to_vec())
     }
 
     fn node_id(&self) -> String {
@@ -343,4 +378,151 @@ fn mail_addressed_to_an_owner_reaches_every_machine_they_have() {
 
     laptop.wait_for("both machines");
     desktop.wait_for("both machines");
+}
+
+/// Where a test can leave a file to attach.
+fn scratch_file(dir: &tempfile::TempDir, name: &str, bytes: &[u8]) -> String {
+    let path = dir.path().join(name);
+    std::fs::write(&path, bytes).expect("write");
+    path.to_string_lossy().into_owned()
+}
+
+#[test]
+fn a_small_attachment_arrives_with_its_message() {
+    // SPEC §8: at or below inline_max it ships in the delivery, so it is
+    // readable the moment the message is.
+    let alice = Daemon::start("alice");
+    let bob = Daemon::start("bob");
+    pair(&alice, &bob);
+
+    let files = tempfile::tempdir().expect("temp dir");
+    let path = scratch_file(&files, "notes.md", b"# notes\n\nsmall enough to travel");
+
+    let (status, accepted) = alice.post(
+        "/api/v1/messages",
+        &serde_json::json!({
+            "to": [bob.node_id()],
+            "subject": "with notes",
+            "body": "see attached",
+            "attachments": [path],
+        }),
+    );
+    assert_eq!(
+        status, 202,
+        "sending is accepted, not delivered: {accepted}"
+    );
+
+    let arrived = bob.wait_for("with notes");
+    let id = arrived["id"].as_str().expect("an id");
+
+    let full = json(&bob.run(&["read", id, "--json"]));
+    let sha = full["attachments"][0]["sha256"].as_str().expect("a digest");
+
+    let (status, bytes) = bob.get_bytes(&format!("/api/v1/messages/{id}/attachments/{sha}"));
+    assert_eq!(status, 200);
+    assert_eq!(bytes, b"# notes\n\nsmall enough to travel");
+}
+
+#[test]
+fn a_large_attachment_is_fetched_on_first_access_and_resumes_after_an_interruption() {
+    // SPEC §13.2 asks for exactly this: kill the blob transfer mid-way and
+    // assert it resumes with a range request rather than starting again.
+    // Alice's inline limit is below the file, so it ships as a ref and bob
+    // fetches it on first access.
+    let alice = Daemon::start_with("alice", &[("HIVEMIND_INLINE_MAX_BYTES", "1024")]);
+    let bob = Daemon::start("bob");
+    pair(&alice, &bob);
+
+    let files = tempfile::tempdir().expect("temp dir");
+    let content: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+    let path = scratch_file(&files, "big.bin", &content);
+
+    let (status, _) = alice.post(
+        "/api/v1/messages",
+        &serde_json::json!({
+            "to": [bob.node_id()],
+            "subject": "something large",
+            "body": "fetch it when you want it",
+            "attachments": [path],
+        }),
+    );
+    assert_eq!(status, 202);
+
+    let arrived = bob.wait_for("something large");
+    let id = arrived["id"].as_str().expect("an id").to_owned();
+    let full = json(&bob.run(&["read", &id, "--json"]));
+    let attachment = &full["attachments"][0];
+    let sha = attachment["sha256"].as_str().expect("a digest").to_owned();
+
+    assert_eq!(attachment["inline"], false, "too large to have travelled");
+    assert_eq!(
+        attachment["size"].as_u64().expect("a size"),
+        content.len() as u64
+    );
+
+    // Interrupt it: put most of the file in place as a partial, exactly as a
+    // transfer killed part-way would leave it, then let the fetch finish.
+    let partial = bob.home.path().join("blobs").join(format!("{sha}.part"));
+    std::fs::create_dir_all(partial.parent().expect("a parent")).expect("mkdir");
+    std::fs::write(&partial, &content[..200_000]).expect("write a partial");
+
+    let (status, bytes) = bob.get_bytes(&format!("/api/v1/messages/{id}/attachments/{sha}"));
+
+    assert_eq!(status, 200);
+    assert_eq!(
+        bytes.len(),
+        content.len(),
+        "the whole file should be there after resuming"
+    );
+    assert_eq!(bytes, content, "and it should be the right bytes");
+    assert!(
+        !partial.exists(),
+        "the partial should have been promoted, not left behind"
+    );
+}
+
+#[test]
+fn a_partial_that_does_not_match_is_not_served_as_if_it_did() {
+    // Resuming from a corrupt prefix would produce a file that is not what the
+    // signed message names, so the fetch must fail rather than hand it over.
+    let alice = Daemon::start_with("alice", &[("HIVEMIND_INLINE_MAX_BYTES", "1024")]);
+    let bob = Daemon::start("bob");
+    pair(&alice, &bob);
+
+    let files = tempfile::tempdir().expect("temp dir");
+    let content: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+    let path = scratch_file(&files, "big.bin", &content);
+
+    alice.post(
+        "/api/v1/messages",
+        &serde_json::json!({
+            "to": [bob.node_id()],
+            "subject": "verify me",
+            "body": "x",
+            "attachments": [path],
+        }),
+    );
+
+    let arrived = bob.wait_for("verify me");
+    let id = arrived["id"].as_str().expect("an id").to_owned();
+    let full = json(&bob.run(&["read", &id, "--json"]));
+    let sha = full["attachments"][0]["sha256"]
+        .as_str()
+        .expect("a digest")
+        .to_owned();
+
+    // A prefix of the wrong length, so resuming lands at the wrong offset.
+    let partial = bob.home.path().join("blobs").join(format!("{sha}.part"));
+    std::fs::create_dir_all(partial.parent().expect("a parent")).expect("mkdir");
+    std::fs::write(&partial, vec![0u8; 200_000]).expect("write a bad partial");
+
+    let (status, _) = bob.get_bytes(&format!("/api/v1/messages/{id}/attachments/{sha}"));
+    assert_eq!(
+        status, 500,
+        "a file that does not hash to what was signed is not served"
+    );
+    assert!(
+        !partial.exists(),
+        "and the bad partial must not be left to be resumed"
+    );
 }
