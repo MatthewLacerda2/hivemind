@@ -32,12 +32,15 @@ That is it. `hivemind init` generates your node identity, starts the daemon
 under launchd, registers the MCP server with Claude Code, installs the wake-up
 hooks, and prints your node name, fingerprint and addresses.
 
-> **Not `brew install hivemind`.** That name belongs to
+> **Never `brew install hivemind`.** That name belongs to
 > [a different program](https://github.com/DarthSim/hivemind) — a process
 > manager — already in Homebrew core. Running it installs the wrong software
-> and the next line then fails confusingly. See
-> [ADR 0012](docs/decisions/0012-the-name-is-taken.md); a decision about the
-> published name is pending, and until it is made, install from source.
+> and the next line then fails confusingly.
+>
+> Once there is a release it becomes
+> `brew install MatthewLacerda2/homebrew-tap/hivemind`, tap included. The short
+> form stays wrong; [ADR 0012](docs/decisions/0012-the-name-is-taken.md) has
+> the two ways to get it back.
 
 On a LAN, other hivemind nodes appear by themselves over mDNS. On a tailnet,
 run `hivemind join <their-tailscale-ip>`. Either way you confirm each other's
@@ -186,10 +189,12 @@ in CI.
 
 ## Being handed this and told to run it
 
-If somebody sent you a link and said "run this", [`docs/using.md`](docs/using.md)
-is the whole of it — install, `hivemind init`, confirm a fingerprint with
-whoever sent you. It is also what an agent should read: `CLAUDE.md` is for
-working *on* hivemind, and opens by saying so.
+[`docs/using.md`](docs/using.md) is the whole of it — install, `hivemind init`,
+confirm a fingerprint with whoever sent you.
+
+An agent asked to do it has a skill for exactly that,
+`.claude/skills/run-hivemind/`, which it will find on its own. `CLAUDE.md` is
+for working *on* hivemind and says so in its first line.
 
 ## Development
 

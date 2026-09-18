@@ -4,8 +4,10 @@ Date: 2026-09-18
 
 ## Status
 
-Proposed. Needs a decision from the project owner — this is a naming call, not
-an engineering one.
+**Accepted: option A, provisionally.** The owner chose the tap so that the rest
+of the work can finish, and intends to revisit convenience of installation
+later. Everything below is kept because the reasoning does not expire — the
+argument for B or C is the argument that will be read when it is revisited.
 
 ## What happened
 
@@ -93,7 +95,16 @@ Everything becomes one free name.
 - **Honest summary:** the only option with no residue, and the only one that
   costs something that cannot be got back.
 
-## Recommendation
+## The decision, and why it is provisional
+
+**A**, for now, chosen deliberately as a stopgap rather than as an answer. The
+project is not published yet, so nobody can hit the trap today: the trap opens
+the moment a release exists and somebody types the short form.
+
+That is the trigger for revisiting this. Publishing without settling it is what
+would be careless; deferring it while nothing is published is not.
+
+## Recommendation, for when it is revisited
 
 **B**, if the name matters; **C**, if it does not.
 
@@ -113,6 +124,8 @@ people who were told the exact command.
 SPEC §2 needs amending: its quick start is currently a promise that cannot be
 kept. That happens in the same commit as whichever option is chosen.
 
-Until then the README's quick start must not say `brew install hivemind`. That
-is fixed separately and immediately, because leaving it is worse than having no
-quick start at all.
+Until a release exists, the README's quick start is `cargo install --path`,
+which is what actually works and cannot install the wrong thing. It must not
+say `brew install hivemind` under any option, including A — under A the command
+is `brew install MatthewLacerda2/homebrew-tap/hivemind`, and the short form
+stays wrong for ever.
