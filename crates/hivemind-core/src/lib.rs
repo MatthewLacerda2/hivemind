@@ -9,7 +9,8 @@
 //! # Layout
 //!
 //! - [`message`] — the `Message` type, its canonical encoding and signature.
-//! - [`peer`] — node identity, the address book and recipient expansion.
+//! - [`peer`] — node identity and fingerprints.
+//! - [`peerbook`] — the address book: who we have paired with (SPEC §4.2).
 //! - [`store`] — the maildir-style store; files are the source of truth (SPEC §4.3).
 //! - [`index`] — the derived `SQLite` cache and its rebuild logic.
 //! - [`crypto`] — Ed25519 key handling, fingerprints and signing.
@@ -24,4 +25,5 @@ pub mod identity;
 pub mod index;
 pub mod message;
 pub mod peer;
+pub mod peerbook;
 pub mod store;

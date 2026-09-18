@@ -11,7 +11,17 @@ authors.workspace = true
 [dependencies]
 hivemind-core.workspace = true
 
+chrono.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+tracing.workspace = true
+
 [dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
