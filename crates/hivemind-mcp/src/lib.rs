@@ -9,3 +9,5 @@
 
 pub mod server;
 pub mod tools;
+
+pub use server::{HivemindMcp, INBOX_URI, PEERS_URI, http_service};

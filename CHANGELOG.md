@@ -33,6 +33,14 @@ and the entries below are generated from conventional commits by
 - Decision records 0006 (node id display), 0007 (`received_at` is not signed)
   and 0008 (the service layer is synchronous).
 
+- **M2, Claude.** The MCP server at `/mcp`, with the seven tools and two
+  resources from SPEC §9.1, reachable by Claude Code after
+  `hivemind mcp install`. Wake-up hooks (`hivemind hook install`) that print a
+  one-line unread summary on `SessionStart` and `UserPromptSubmit` in about
+  10 ms, merging into `~/.claude/settings.json` rather than clobbering it.
+  Desktop notifications on arriving mail. `config.toml` with `HIVEMIND_*`
+  environment overrides and validation. `docs/mcp.md`.
+
 There are no peers yet: `join`, `pair` and delivery to another machine are M3.
 
 [Unreleased]: https://github.com/MatthewLacerda2/hivemind/commits/main

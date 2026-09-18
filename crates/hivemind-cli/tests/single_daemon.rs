@@ -86,9 +86,35 @@ impl Daemon {
 
 impl Drop for Daemon {
     fn drop(&mut self) {
-        let _ = self.process.kill();
-        let _ = self.process.wait();
+        stop(&mut self.process);
     }
+}
+
+/// Stop a daemon the way launchd would.
+///
+/// SIGKILL would leave it no chance to flush — including, under
+/// `cargo llvm-cov`, its coverage profile, which is why this test's subject
+/// would otherwise appear untested.
+fn stop(process: &mut Child) {
+    #[cfg(unix)]
+    {
+        // SAFETY-adjacent: `kill(2)` on a pid we own and have not yet reaped.
+        let pid = process.id();
+        let _ = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status();
+
+        // Give it a moment to shut down cleanly before insisting.
+        for _ in 0..50 {
+            if matches!(process.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    let _ = process.kill();
+    let _ = process.wait();
 }
 
 fn free_port() -> u16 {
@@ -224,8 +250,7 @@ fn a_message_survives_the_daemon_restarting() {
     let (mut first, _first_out) = start();
     cli(&["send", "everyone", "-s", "survives a restart", "--", "body"]);
     let identity_before = json(&cli(&["status", "--json"]))["id"].clone();
-    first.kill().expect("kill");
-    first.wait().expect("wait");
+    stop(&mut first);
 
     let (mut second, _second_out) = start();
     let after = json(&cli(&["status", "--json"]));
@@ -238,8 +263,7 @@ fn a_message_survives_the_daemon_restarting() {
     let inbox = json(&cli(&["inbox", "--json"]));
     assert_eq!(inbox[0]["subject"], "survives a restart");
 
-    second.kill().expect("kill");
-    second.wait().expect("wait");
+    stop(&mut second);
 }
 
 #[test]
