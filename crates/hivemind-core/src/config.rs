@@ -238,6 +238,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_config_key_is_documented_in_the_readme() {
+        // The README's table used to be a `TODO(M1)` saying documenting the
+        // keys would be "a second place to be wrong". It would — unless
+        // something checks it, which is this.
+        let readme = include_str!("../../../README.md");
+
+        // Read the field names out of this file rather than listing them:
+        // a list here is the thing that would be forgotten.
+        let source = include_str!("config.rs");
+        let fields: Vec<&str> = source
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("pub "))
+            .filter_map(|rest| rest.split_once(':'))
+            .map(|(name, _)| name.trim())
+            .filter(|name| !name.contains(' ') && !name.contains('('))
+            .collect();
+
+        assert!(
+            fields.len() >= 9,
+            "expected to find the fields, got {fields:?}"
+        );
+
+        for field in fields {
+            assert!(
+                readme.contains(&format!("| `{field}` |")),
+                "`{field}` has no row in the README's configuration table"
+            );
+        }
+    }
+
+    #[test]
     fn discovery_is_on_unless_it_is_turned_off() {
         // Finding the laptop on the next desk without typing an address is
         // most of the point, so this defaults on. Setting the environment

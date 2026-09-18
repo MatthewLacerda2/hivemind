@@ -72,15 +72,25 @@ serde_json = "1"
 tempfile = "3"
 
 [workspace.lints.rust]
-# SPEC §13.1: no unsafe anywhere. If this ever needs an exception it gets an
-# ADR first, not an `#[allow]`.
-unsafe_code = "deny"
+# SPEC §13.1: no unsafe anywhere. `forbid` rather than `deny` so it is a
+# guarantee rather than a coincidence — `deny` can be undone by a local
+# `#[allow]`, and the rule is that an exception gets an ADR, not an attribute.
+unsafe_code = "forbid"
 missing_docs = "warn"
 missing_debug_implementations = "warn"
 unreachable_pub = "warn"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
+# Library code states its invariants with `expect("…")`, which names what was
+# assumed when it turns out not to hold. `unwrap` in a test is the assertion
+# itself, so test targets allow it back — see clippy.toml.
+unwrap_used = "deny"
+# Debugging leftovers must not survive a merge. Each of these is something
+# somebody meant to remove and a review is a bad place to catch it.
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
 # SPEC §13.1 asks for a *curated* allow-list. Each entry needs a reason.
 # `hivemind_core::message::MessageId` is the idiomatic path here; renaming the
 # types to satisfy this lint would make them worse at their call sites.

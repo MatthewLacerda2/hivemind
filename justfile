@@ -105,6 +105,11 @@ scripts:
 boundaries:
     python3 .github/scripts/boundaries.py
 
+# [gate] A `TODO(Mn)` whose milestone has shipped is a lie in a file somebody
+# trusts, and nothing reads it, so nothing complains. This complains.
+markers:
+    python3 .github/scripts/stale_markers.py
+
 # Regenerate the changelog from conventional commits (SPEC §13.5).
 # The v0.1.0 entry is hand-written and stays: there was no previous release to
 # diff against, and a list of commit subjects is not a description of what the
@@ -147,7 +152,7 @@ web-build:
 
 # What ci.yml runs, in its order — including the coverage gate, which runs as a
 # separate job there. Run this before opening a PR (SPEC §16.6).
-ci: fmt-check lint boundaries doc test scripts deny openapi-check web-build dist-check cov-gate
+ci: fmt-check lint boundaries markers doc test scripts deny openapi-check web-build dist-check cov-gate
 
 # `ci` plus what nightly.yml runs on a schedule.
 ci-full: ci audit

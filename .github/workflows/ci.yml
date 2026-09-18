@@ -67,6 +67,9 @@ jobs:
       - name: Architectural boundaries
         run: just boundaries
 
+      - name: Stale milestone markers
+        run: just markers
+
       - name: Licences and advisories
         run: just deny
 
