@@ -2,15 +2,21 @@
 # Regenerate with: git cliff --output CHANGELOG.md
 
 [changelog]
+# Kept identical to the header already in CHANGELOG.md. `--prepend` rewrites it
+# from here every time, so if the two disagree the file changes for no reason on
+# every release.
 header = """
 # Changelog
 
 All notable changes to this project are documented here.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html),
-and the entries below are generated from conventional commits by
-[`git-cliff`](https://git-cliff.org).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
+and this project adheres to
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html). From v0.2.0 the
+entries are generated from conventional commits by
+[`git-cliff`](https://git-cliff.org) — run `just changelog`. This first entry is
+written by hand, because there is no previous release to diff against and a list
+of commit subjects is not a description of what the thing does.
 """
 body = """
 {% if version %}\

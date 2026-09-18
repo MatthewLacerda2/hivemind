@@ -10,25 +10,13 @@ It is deliberately a *mail service*, not an orchestrator: store-and-forward,
 inbox and outbox, attachments, threads. The intelligence stays in each Claude.
 hivemind only carries the mail.
 
-> **Status: pre-release.** Local mail works (M0, M1): one daemon, a real
-> inbox, threads, search, and a CLI. There are no peers yet — `join`, `pair`
-> and delivery to another machine arrive in M3 — so the quick start below
-> describes where this is going, not what `brew install` gives you today. See
-> [SPEC.md](SPEC.md) §14 for the plan and [CHANGELOG.md](CHANGELOG.md) for what
-> has actually shipped.
->
-> What works now (M0–M2):
->
-> ```
-> hivemind daemon                       # in one terminal
-> hivemind mcp install                  # register with Claude Code
-> hivemind hook install                 # surface mail at turn boundaries
-> hivemind send everyone -s "hello" -- "a note to myself"
-> hivemind inbox
-> ```
->
-> Your Claude can already read and send this machine's mail through MCP. What
-> it cannot do yet is reach anyone else's machine.
+> **Status: pre-release.** Everything below works: local mail, pairing over
+> mutual TLS, delivery that survives a closed laptop, attachments, the MCP
+> server and the web UI (M0–M5). What is not done is distribution — there is no
+> `brew install hivemind` yet, so today it is `cargo install --path
+> crates/hivemind-cli` or a build from the repo. See
+> [CHANGELOG.md](CHANGELOG.md) for what has shipped and
+> [SPEC.md](SPEC.md) §14 for the plan.
 
 ---
 
@@ -109,24 +97,39 @@ startup with messages that say what to fix.
 
 ## How it compares
 
-<!-- TODO(M6): fill this in only after actually installing and using each one.
-     A comparison table written from reading READMEs is marketing, not
-     documentation (SPEC §13.5). -->
+Read from each project's own documentation on 18 September 2026, not from
+running them. Where a project does not say, the cell says so rather than
+guessing — an empty cell is more honest than an assumption, and these move
+fast, so check before relying on any row.
 
-The axes that matter, and where hivemind sits on each:
+| | hivemind | [claude-peers-mcp][cpm] | [claude-bridge][cb] | [agent-inbox][ai] |
+|---|---|---|---|---|
+| Needs a broker or server | No | Yes — a daemon on `localhost:7899` | No | Yes — a LangGraph deployment |
+| Needs a cloud account | No | No | No | Optional — hosted or self-host |
+| Works across machines | Yes — LAN and Tailscale | No — "everything is localhost-only" | No — "runs locally, on one machine" | n/a |
+| Reaches a peer that is asleep | Yes — retries until it lands | No — live sessions only | Yes — waits in the inbox | n/a |
+| Attachments | Yes, up to 2 GiB, resumable | Not documented | Not documented | Not documented |
+| Usable by a human with no agent | Yes — CLI and web UI | CLI | Through a Claude Code chat | It is a human UI |
+| Orchestrates agents | **No, by design** | No | No — coordinates chats you opened | n/a — reviews interrupts |
 
-| | hivemind |
-|---|---|
-| Needs a server or broker | No |
-| Needs a cloud account | No |
-| Works across machines | Yes — LAN and Tailscale |
-| Delivers to an offline peer | Yes — retries until it lands |
-| Attachments | Yes, up to 2 GiB, resumable |
-| Human-usable without an agent | Yes — CLI and web UI |
-| Orchestrates agents | **No, by design** |
+[cpm]: https://github.com/louislva/claude-peers-mcp
+[cb]: https://github.com/michalekz/claude-bridge
+[ai]: https://github.com/langchain-ai/agent-inbox
 
-Rows for `claude-peers-mcp`, Claude Bridge, Agent Room and `agent-inbox` are
-filled in at M6, once each has been installed and tried rather than skimmed.
+`agent-inbox` is in the table because SPEC §13.5 names it, but it is answering a
+different question: it is a human-in-the-loop UI for reviewing a LangGraph
+agent's interrupts, not a way for two people's agents to talk. The `n/a` rows
+are not gaps — they are the wrong question to ask of it.
+
+SPEC §13.5 also names "Agent Room". Several unrelated projects use that name and
+none is clearly the one meant, so there is no row for it rather than a row about
+whichever one came up first.
+
+**Where hivemind is the wrong tool.** If every session is on one machine,
+`claude-bridge` is simpler and has no network surface at all. If what you want
+is a human reviewing an agent's decisions, that is `agent-inbox`. hivemind earns
+its complexity — mutual TLS, a pairing step, a retry queue — only when the
+machines are genuinely different machines.
 
 ## FAQ
 
