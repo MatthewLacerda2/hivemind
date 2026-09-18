@@ -305,6 +305,13 @@ pub struct ListParams {
     pub q: Option<String>,
     /// How many to return.
     pub limit: Option<usize>,
+    /// Continue after this row, from a previous page (SPEC §7.1).
+    ///
+    /// Build it from the last summary already received: `<sent_at in
+    /// milliseconds>:<id>`. Keyset rather than offset, so a message arriving
+    /// while somebody pages through their inbox cannot make a row appear
+    /// twice or not at all.
+    pub cursor: Option<String>,
 }
 
 /// Turn the paths a local caller supplied into real ones.
@@ -562,6 +569,10 @@ pub(crate) async fn list_messages(
         unread_only: params.unread.unwrap_or(false),
         text: params.q,
         limit: params.limit,
+        // A cursor this version did not issue filters to nothing rather than
+        // erroring, the same reading as an unknown mailbox above: it is a
+        // stale query string, not a broken client.
+        cursor: params.cursor.as_deref().and_then(|c| c.parse().ok()),
     };
 
     Ok(Json(
@@ -1100,5 +1111,166 @@ mod tests {
     fn a_node_id_recipient_is_read_as_a_node() {
         let id = NodeId::from_certificate_der(b"somebody");
         assert_eq!(parse_recipient(&id.to_string()), Recipient::Node(id));
+    }
+
+    /// Ask for a path and report the status and body.
+    ///
+    /// Used by the contract test below, which cares that a route exists and
+    /// was reached — not what it answers.
+    async fn touch(router: &Router, method: &str, path: &str) -> (StatusCode, String) {
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .expect("request");
+
+        // Bounded, because `/api/v1/events` is a stream that by design never
+        // ends: collecting its body waits for a shutdown that is not coming.
+        // Reaching the handler is what this asks, so the timeout is the
+        // answer rather than a failure.
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            router.clone().oneshot(request),
+        )
+        .await
+        .expect("the route answered within five seconds")
+        .expect("response");
+
+        let status = response.status();
+        let body = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            response.into_body().collect(),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .map(|collected| String::from_utf8_lossy(&collected.to_bytes()).into_owned())
+        .unwrap_or_default();
+
+        (status, body)
+    }
+
+    #[tokio::test]
+    async fn every_endpoint_in_the_openapi_document_is_routed() {
+        // SPEC §13.2 asks that every endpoint in `openapi.json` have at least
+        // one test. This is the half a person cannot forget: a path documented
+        // and never routed answers 404 to a client that read the document and
+        // believed it.
+        //
+        // `openapi-check` already fails if the document drifts from the code
+        // that generates it. This is the other direction — that what the
+        // document promises is actually reachable.
+        let document: serde_json::Value =
+            serde_json::from_str(include_str!("../../../docs/openapi.json"))
+                .expect("the checked-in document parses");
+        let paths = document["paths"].as_object().expect("a paths object");
+        assert!(
+            paths.len() >= 15,
+            "expected the full API, got {}",
+            paths.len()
+        );
+
+        let (_dir, router, identity) = app();
+
+        for (path, methods) in paths {
+            // utoipa writes `{id}`; a request needs something that parses.
+            let concrete = path
+                .replace("{id}", &ulid::Ulid::generate().to_string())
+                .replace("{thread_id}", &ulid::Ulid::generate().to_string())
+                .replace("{sha}", &"ab".repeat(32))
+                .replace("{file}", "hivemind.css");
+
+            for method in methods.as_object().expect("methods").keys() {
+                let (status, body) = touch(&router, &method.to_uppercase(), &concrete).await;
+
+                assert_ne!(
+                    status,
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "{method} {path} is in openapi.json and the route refuses that method"
+                );
+
+                // A 404 is two different answers wearing one number. axum's —
+                // no such route — has an empty body; a handler's is problem+json
+                // naming the thing that was not found (SPEC §7.3). Only the
+                // first is a broken promise, and the difference is the body.
+                if status == StatusCode::NOT_FOUND {
+                    assert!(
+                        body.contains("/problems/"),
+                        "{method} {path} is in openapi.json and nothing is routed there"
+                    );
+                }
+            }
+        }
+        // Unused unless a route above needs it; keeps the helper honest.
+        let _ = identity;
+    }
+
+    #[tokio::test]
+    async fn a_listing_can_be_paged_with_a_cursor() {
+        // SPEC §7.1's `cursor=`, through the query string a client would use.
+        let (_dir, router, identity) = app();
+        for n in 1..=3 {
+            call(
+                &router,
+                post_json(
+                    "/api/v1/messages",
+                    &serde_json::json!({
+                        "to": [identity.to_string()],
+                        "subject": format!("m{n}"),
+                        "body": "x",
+                    }),
+                ),
+            )
+            .await;
+        }
+
+        let (_, first) = call(&router, get("/api/v1/messages?box=new&limit=2")).await;
+        let rows = first.as_array().expect("an array");
+        assert_eq!(rows.len(), 2);
+
+        let last = &rows[1];
+        let cursor = format!(
+            "{}:{}",
+            chrono::DateTime::parse_from_rfc3339(last["sent_at"].as_str().expect("a time"))
+                .expect("rfc3339")
+                .timestamp_millis(),
+            last["id"].as_str().expect("an id")
+        );
+
+        let (_, second) = call(
+            &router,
+            get(&format!("/api/v1/messages?box=new&limit=2&cursor={cursor}")),
+        )
+        .await;
+        let rows = second.as_array().expect("an array");
+        assert_eq!(rows.len(), 1, "one left after the first page");
+        assert_ne!(rows[0]["id"], last["id"], "and not the one we already had");
+    }
+
+    #[tokio::test]
+    async fn a_cursor_this_version_did_not_issue_is_ignored_rather_than_fatal() {
+        // A stale query string in somebody's history is not a broken client.
+        let (_dir, router, identity) = app();
+        call(
+            &router,
+            post_json(
+                "/api/v1/messages",
+                &serde_json::json!({
+                    "to": [identity.to_string()],
+                    "subject": "only one",
+                    "body": "x",
+                }),
+            ),
+        )
+        .await;
+
+        let (status, body) = call(&router, get("/api/v1/messages?cursor=nonsense")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body.as_array().expect("an array").len(),
+            2,
+            "it should read as no cursor at all: the message in new and in sent"
+        );
     }
 }

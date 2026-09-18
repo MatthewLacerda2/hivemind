@@ -17,8 +17,9 @@ struct Daemon {
     peer_port: u16,
     home: tempfile::TempDir,
     // Held open: the daemon prints several startup lines and would take a
-    // SIGPIPE on the next one if this were dropped.
-    _stdout: BufReader<std::process::ChildStdout>,
+    // SIGPIPE on the next one if this were dropped. Replaced on restart,
+    // which is why it is not underscore-prefixed.
+    stdout: BufReader<std::process::ChildStdout>,
 }
 
 impl Daemon {
@@ -62,7 +63,7 @@ impl Daemon {
             port,
             peer_port,
             home,
-            _stdout: reader,
+            stdout: reader,
         };
         daemon.wait_until_ready();
         daemon
@@ -178,6 +179,61 @@ impl Daemon {
             std::thread::sleep(Duration::from_millis(50));
         }
         panic!("{subject:?} never arrived; inbox is {}", self.inbox());
+    }
+}
+
+impl Daemon {
+    /// Stop the daemon, keeping its home so it can be started again.
+    ///
+    /// SIGTERM rather than a kill: the daemon handles it (SPEC §2 — launchd
+    /// stops a service that way), and this is the test that proves mail
+    /// survives it.
+    fn stop(&mut self) {
+        #[cfg(unix)]
+        {
+            let _ = Command::new("kill")
+                .args(["-TERM", &self.process.id().to_string()])
+                .status();
+            for _ in 0..200 {
+                if matches!(self.process.try_wait(), Ok(Some(_))) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        let _ = self.process.kill();
+        let _ = self.process.wait();
+    }
+
+    /// Start it again on the same home, ports included.
+    ///
+    /// The ports have to be the same: the sender learned where to reach this
+    /// node when they paired, and a peer that comes back on a different port
+    /// is a different machine as far as the address book is concerned.
+    fn restart(&mut self, name: &str) {
+        let mut process = Command::new(env!("CARGO_BIN_EXE_hivemind"))
+            .args(["daemon", "--port", &self.port.to_string()])
+            .env("HIVEMIND_HOME", self.home.path())
+            .env("HIVEMIND_PEER_PORT", self.peer_port.to_string())
+            .env("HIVEMIND_NAME", name)
+            .env("HIVEMIND_OWNER", name)
+            .env("HIVEMIND_NOTIFICATIONS", "false")
+            .env("HIVEMIND_DISCOVERY", "false")
+            .env("HIVEMIND_LOG", "warn")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the daemon binary starts");
+
+        let stdout = process.stdout.take().expect("stdout");
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("it says it is up");
+        assert!(line.contains("listening"), "unexpected: {line}");
+
+        self.process = process;
+        self.stdout = reader;
+        self.wait_until_ready();
     }
 }
 
@@ -550,4 +606,90 @@ fn a_partial_that_does_not_match_is_not_served_as_if_it_did() {
         !partial.exists(),
         "and the bad partial must not be left to be resumed"
     );
+}
+
+#[test]
+fn a_laptop_that_was_closed_receives_what_was_sent_while_it_slept() {
+    // SPEC §8, and the sentence the whole project rests on: "A laptop that
+    // comes to the office on Monday receives Friday's mail." Every other test
+    // here has both daemons up the whole time, so nothing was checking it.
+    let alice = Daemon::start("alice");
+    let mut bob = Daemon::start("bob");
+    pair(&alice, &bob);
+
+    let bobs_id = bob.node_id();
+    bob.stop();
+
+    alice.run(&[
+        "send",
+        &bobs_id,
+        "-s",
+        "friday afternoon",
+        "--",
+        "read this on monday",
+    ]);
+
+    // It should be waiting, not lost and not delivered. `status` reports the
+    // outbox depth, which is the daemon's own account of what it still owes.
+    let mut waited = 0;
+    let outstanding = loop {
+        let status = json(&alice.run(&["status", "--json"]));
+        let outbox = status["outbox"].as_u64().expect("an outbox count");
+        if outbox > 0 || waited > 50 {
+            break outbox;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        waited += 1;
+    };
+    assert_eq!(outstanding, 1, "alice should still owe bob one message");
+
+    // Monday.
+    bob.restart("bob");
+    let arrived = bob.wait_for("friday afternoon");
+    assert_eq!(arrived["from"], alice.node_id());
+
+    // And alice should stop owing it, which is the other half: a message that
+    // arrives but never leaves the outbox is a message that will be delivered
+    // again for ever.
+    let deadline = Instant::now() + Duration::from_mins(1);
+    while Instant::now() < deadline {
+        let status = json(&alice.run(&["status", "--json"]));
+        if status["outbox"].as_u64() == Some(0) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!(
+        "the message arrived but alice still has it in her outbox: {}",
+        alice.run(&["status", "--json"])
+    );
+}
+
+#[test]
+fn a_reply_to_another_machine_stays_in_the_same_thread() {
+    // Threading is tested on one daemon; this is the half that crosses a wire,
+    // where `in_reply_to` has to survive being signed, delivered and re-read.
+    let alice = Daemon::start("alice");
+    let bob = Daemon::start("bob");
+    pair(&alice, &bob);
+
+    alice.run(&[
+        "send",
+        &bob.node_id(),
+        "-s",
+        "a question",
+        "--",
+        "what time?",
+    ]);
+    let question = bob.wait_for("a question");
+    let question_id = question["id"].as_str().expect("an id").to_owned();
+
+    bob.run(&["reply", &question_id, "--", "one o'clock"]);
+    let answer = alice.wait_for("Re: a question");
+
+    assert_eq!(
+        answer["thread_id"], question["thread_id"],
+        "the reply should have joined the thread it answers"
+    );
+    assert_eq!(answer["from"], bob.node_id());
 }
