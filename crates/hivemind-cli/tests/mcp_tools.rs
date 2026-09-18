@@ -27,6 +27,7 @@ impl Daemon {
         let port = free_port();
 
         let home = tempfile::tempdir().expect("temp home");
+        let errors = home.path().join("daemon.stderr");
         let mut process = Command::new(env!("CARGO_BIN_EXE_hivemind"))
             .args(["daemon", "--port", &port.to_string()])
             .env("HIVEMIND_HOME", home.path())
@@ -40,7 +41,9 @@ impl Daemon {
             // A banner per message would be noise on the machine running tests.
             .env("HIVEMIND_NOTIFICATIONS", "false")
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(
+                std::fs::File::create(&errors).expect("a file for the daemon stderr"),
+            ))
             .spawn()
             .expect("daemon starts");
 
@@ -49,6 +52,11 @@ impl Daemon {
         let mut line = String::new();
         reader.read_line(&mut line).expect("daemon is up");
         assert!(line.contains("listening"), "unexpected: {line}");
+
+        // ...and then wait for it to actually answer. That line is printed
+        // after the socket is bound and before the router serves it, so a
+        // request made on the strength of it alone races the rest of startup.
+        wait_until_answering(port, &mut process, &errors);
 
         Self {
             process,
@@ -411,8 +419,19 @@ async fn the_server_tells_claude_that_message_bodies_are_untrusted() {
     client.cancel().await.ok();
 }
 
-/// A port the OS says is free. Released immediately, so this races with any
-/// other process that wants one — which in practice is only these tests.
+/// A port the OS says is free.
+///
+/// Released immediately, which leaves a window: a parallel test can be handed
+/// the same number before this one's daemon binds it. That is a real race and
+/// not a theoretical one -- it is the likeliest cause of the red `main` after
+/// M6, where a daemon died during startup and the CLI reported only that
+/// nothing was listening.
+///
+/// It is not closed here, because closing it properly means the daemon binding
+/// port 0 and reporting what it got, which is a change to the product for the
+/// sake of the tests. Instead [`wait_until_answering`] panics with the
+/// daemon's stderr, so the next occurrence names itself instead of being
+/// guessed at.
 fn free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     listener.local_addr().expect("addr").port()
@@ -520,4 +539,36 @@ async fn an_attachment_name_that_is_a_path_is_refused() {
     );
 
     client.cancel().await.ok();
+}
+
+/// Poll the daemon's health endpoint until it answers, or give up loudly.
+///
+/// See the copy in `single_daemon.rs` for why the stderr is kept: a daemon
+/// that died binding a port reads as "connection refused" from outside, and
+/// is indistinguishable from a slow one until you can see what it said.
+fn wait_until_answering(port: u16, process: &mut Child, errors: &std::path::Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
+    let url = format!("http://127.0.0.1:{port}/healthz");
+
+    while std::time::Instant::now() < deadline {
+        if let Ok(Some(status)) = process.try_wait() {
+            panic!(
+                "the daemon exited with {status} during startup.\nIts stderr:\n{}",
+                std::fs::read_to_string(errors).unwrap_or_default()
+            );
+        }
+        if std::process::Command::new("curl")
+            .args(["-sf", "-o", "/dev/null", "--max-time", "2", &url])
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    panic!(
+        "the daemon never answered {url}.\nIts stderr:\n{}",
+        std::fs::read_to_string(errors).unwrap_or_default()
+    );
 }
