@@ -5,3 +5,7 @@
 /web/node_modules
 /web/dist
 .DS_Store
+# cargo-mutants working directories. The report is read and acted on, never
+# checked in — it is about a diff, and a diff does not survive the branch.
+/mutants.out
+/mutants.out.old

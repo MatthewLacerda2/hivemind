@@ -70,15 +70,25 @@ impl Daemon {
 
     /// The peer port is bound after the line we read above, so a join sent
     /// immediately can race it.
+    ///
+    /// A minute rather than ten seconds. This returns the moment the port
+    /// opens, so a generous deadline costs nothing in the normal case — and
+    /// ten seconds was not enough on a machine running a mutation sweep
+    /// beside it. CI runs on a shared runner, so the same squeeze is waiting
+    /// there; it would have read as a mysterious flake in an unrelated test.
     fn wait_until_ready(&self) {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_mins(1);
         while Instant::now() < deadline {
             if std::net::TcpStream::connect(("127.0.0.1", self.peer_port)).is_ok() {
                 return;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        panic!("the peer port never opened");
+        panic!(
+            "the peer port {} never opened — the daemon is slow to start or \
+             died; its stdout is held open by this struct",
+            self.peer_port
+        );
     }
 
     fn api(&self) -> String {
@@ -152,7 +162,9 @@ impl Daemon {
     /// await — but a test that slept a fixed second would be both slower and
     /// flakier than one that asks.
     fn wait_for(&self, subject: &str) -> serde_json::Value {
-        let deadline = Instant::now() + Duration::from_secs(30);
+        // Delivery is asynchronous and retries with backoff, so this is the
+        // one wait that genuinely models the product rather than the machine.
+        let deadline = Instant::now() + Duration::from_mins(1);
         while Instant::now() < deadline {
             let inbox = self.inbox();
             if let Some(found) = inbox

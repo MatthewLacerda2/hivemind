@@ -246,3 +246,183 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hivemind_core::crypto::SigningKey;
+    use hivemind_net::discovery::Seen as _;
+
+    use crate::service::NodeDescription;
+
+    fn service() -> (tempfile::TempDir, Arc<MailService>) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let id = NodeId::from_certificate_der(b"this node");
+        let node = NodeDescription {
+            id,
+            certificate: b"this node".to_vec(),
+            private_key: Vec::new(),
+            name: "test".to_owned(),
+            owner: None,
+            callback_host: "127.0.0.1".to_owned(),
+            peer_port: 8400,
+            max_attachment_bytes: hivemind_core::config::DEFAULT_MAX_ATTACHMENT_BYTES,
+            inline_max_bytes: hivemind_core::config::DEFAULT_INLINE_MAX_BYTES,
+            prefetch: false,
+        };
+        let service = MailService::open(dir.path(), node, SigningKey::from_bytes(&[11u8; 32]))
+            .expect("service");
+        (dir, Arc::new(service))
+    }
+
+    fn node(seed: u8) -> NodeId {
+        NodeId::from_certificate_der(&[seed; 16])
+    }
+
+    #[test]
+    fn a_node_seen_for_the_first_time_is_due_a_greeting() {
+        let (_dir, service) = service();
+        let sink = ServiceSink::new(service);
+        assert!(sink.due_a_greeting(node(1)));
+    }
+
+    #[test]
+    fn the_same_node_seen_again_immediately_is_not() {
+        // mDNS repeats a browse result several times a minute. Without this,
+        // each repeat would be a TLS handshake.
+        let (_dir, service) = service();
+        let sink = ServiceSink::new(service);
+
+        assert!(sink.due_a_greeting(node(1)));
+        assert!(!sink.due_a_greeting(node(1)));
+        assert!(!sink.due_a_greeting(node(1)));
+    }
+
+    #[test]
+    fn a_different_node_is_due_one_of_its_own() {
+        // Greeting one machine must not silence the next one discovered.
+        let (_dir, service) = service();
+        let sink = ServiceSink::new(service);
+
+        assert!(sink.due_a_greeting(node(1)));
+        assert!(sink.due_a_greeting(node(2)));
+    }
+
+    #[test]
+    fn a_node_greeted_longer_ago_than_the_interval_is_due_again() {
+        // The boundary, from both sides. `Instant` cannot be moved, so the
+        // record is aged directly — which is what the passage of time does to
+        // it anyway.
+        let (_dir, service) = service();
+        let sink = ServiceSink::new(service);
+        let peer = node(1);
+
+        assert!(sink.due_a_greeting(peer));
+
+        // `checked_sub` rather than `-`: an `Instant` taken early in a
+        // process's life can be younger than the interval, and that panic
+        // would look like a bug in the code under test.
+        let second = std::time::Duration::from_secs(1);
+        let now = std::time::Instant::now();
+        let ago = |how_long| {
+            now.checked_sub(how_long)
+                .expect("the process has run for longer than the interval")
+        };
+
+        sink.greeted
+            .lock()
+            .expect("lock")
+            .insert(peer, ago(GREETING_INTERVAL.saturating_sub(second)));
+        assert!(
+            !sink.due_a_greeting(peer),
+            "one second short of the interval is still too soon"
+        );
+
+        sink.greeted
+            .lock()
+            .expect("lock")
+            .insert(peer, ago(GREETING_INTERVAL + second));
+        assert!(sink.due_a_greeting(peer), "one second past it is due again");
+    }
+
+    #[test]
+    fn discovering_a_peer_we_already_know_records_the_address_and_greets_nobody() {
+        // SPEC §5.4: discovery keeps the address book current for known peers
+        // and never creates trust.
+        let (_dir, service) = service();
+        let friend = hivemind_core::identity::Identity::from_seed([7u8; 32]).expect("identity");
+        let id = friend.node_id();
+
+        service
+            .record_pairing_offer(
+                id,
+                &crate::peer::Handshake {
+                    id: id.to_string(),
+                    name: "friend".to_owned(),
+                    owner: None,
+                    version: "0.1.0".to_owned(),
+                    callback_host: "10.0.0.1".to_owned(),
+                    callback_port: 8400,
+                    gossip: None,
+                },
+                friend.certificate_der().to_vec(),
+                hivemind_core::peerbook::PeerAddr::manual("10.0.0.1", 8400),
+            )
+            .expect("offer");
+        service.confirm_pair(id).expect("confirm");
+
+        let sink = ServiceSink::new(Arc::clone(&service));
+        sink.seen(hivemind_net::discovery::Discovered {
+            id,
+            name: "friend".to_owned(),
+            owner: None,
+            addr: hivemind_core::peerbook::PeerAddr {
+                host: "10.0.0.9".to_owned(),
+                port: 8400,
+                source: hivemind_core::peerbook::AddrSource::Mdns,
+                last_ok: None,
+            },
+        });
+
+        let addresses = service.peer_addresses(id).expect("addresses");
+        assert!(
+            addresses.iter().any(|a| a == "10.0.0.9:8400"),
+            "the discovered address should have been learned: {addresses:?}"
+        );
+        assert!(
+            sink.greeted.lock().expect("lock").is_empty(),
+            "a peer we already know needs no greeting"
+        );
+    }
+
+    #[test]
+    fn the_outbox_reports_what_is_waiting_and_where_to_send_it() {
+        let (_dir, service) = service();
+        let outbox = ServiceOutbox::new(Arc::clone(&service));
+
+        assert!(outbox.pending().is_empty(), "nothing sent yet");
+
+        // A message to ourselves completes at once, so it never sits in out/.
+        service
+            .send(
+                crate::service::Draft {
+                    to: vec![hivemind_core::message::Recipient::Node(service.identity())],
+                    subject: "to myself".to_owned(),
+                    body: "x".to_owned(),
+                    kind: hivemind_core::message::Kind::Message,
+                    in_reply_to: None,
+                    attachments: Vec::new(),
+                },
+                hivemind_core::message::SenderKind::Human,
+            )
+            .expect("send");
+        assert!(
+            outbox.pending().is_empty(),
+            "a message with no remote recipient is already delivered"
+        );
+
+        // An unknown node has no address to try, which is not the same as
+        // having one that does not answer.
+        assert!(outbox.addresses(node(3)).is_empty());
+    }
+}
