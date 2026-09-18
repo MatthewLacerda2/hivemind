@@ -1,5 +1,22 @@
 # CLAUDE.md
 
+## First: which of the two things were you asked to do?
+
+**"Run this" / "set this up" / "install this"** — you are being asked to *use*
+hivemind, not to work on it. Everything below this section is for contributors
+and will mislead you. Go to [`docs/using.md`](docs/using.md): it is four
+commands and takes a couple of minutes.
+
+**"Fix this" / "add that" / "why does X happen"** — you are being asked to work
+on hivemind. Read on.
+
+Getting this wrong is a real failure mode and not a hypothetical one. Somebody
+handed a link and told to run it will open this file first, find rules about
+merge policy, size ratchets and mutation testing, and reasonably conclude they
+have been invited to contribute. They have not.
+
+---
+
 How to work in this repo. `SPEC.md` is the source of truth for *what* hivemind
 is and stays until it is all built; this is *how* it gets built;
 `docs/decisions/` holds the arguments.
