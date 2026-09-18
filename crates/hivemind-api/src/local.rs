@@ -14,7 +14,7 @@ use axum::{Json, http::StatusCode};
 use chrono::{DateTime, Utc};
 use futures_core::Stream;
 use hivemind_core::index::{Query, Summary};
-use hivemind_core::message::{Kind, Message, Recipient, SenderKind};
+use hivemind_core::message::{Kind, Message, SenderKind};
 use hivemind_core::store::Mailbox;
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
@@ -608,7 +608,11 @@ pub(crate) async fn send_message(
     Json(request): Json<SendRequest>,
 ) -> Result<(StatusCode, Json<Accepted>), Problem> {
     let draft = Draft {
-        to: request.to.iter().map(|s| parse_recipient(s)).collect(),
+        to: request
+            .to
+            .iter()
+            .map(|typed| service.parse_recipient(typed))
+            .collect::<Result<Vec<_>, _>>()?,
         subject: request.subject,
         body: request.body,
         kind: request
@@ -747,17 +751,6 @@ fn parse_id(raw: &str) -> Result<Ulid, Problem> {
             format!("`{raw}` is not a message id"),
         )
     })
-}
-
-/// A recipient string is a node id, `everyone`, or an owner name (SPEC §9.1).
-fn parse_recipient(raw: &str) -> Recipient {
-    if raw.eq_ignore_ascii_case("everyone") {
-        return Recipient::Everyone;
-    }
-    match raw.parse() {
-        Ok(node) => Recipient::Node(node),
-        Err(_) => Recipient::Owner(raw.to_owned()),
-    }
 }
 
 #[cfg(test)]
@@ -1091,26 +1084,6 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(found.as_array().expect("array").len(), 1);
         assert_eq!(found[0]["subject"], "dashboard PR");
-    }
-
-    #[test]
-    fn everyone_is_recognised_whatever_its_case() {
-        assert_eq!(parse_recipient("everyone"), Recipient::Everyone);
-        assert_eq!(parse_recipient("EVERYONE"), Recipient::Everyone);
-    }
-
-    #[test]
-    fn a_recipient_that_is_not_a_node_id_is_read_as_an_owner_name() {
-        assert_eq!(
-            parse_recipient("rafael"),
-            Recipient::Owner("rafael".to_owned())
-        );
-    }
-
-    #[test]
-    fn a_node_id_recipient_is_read_as_a_node() {
-        let id = NodeId::from_certificate_der(b"somebody");
-        assert_eq!(parse_recipient(&id.to_string()), Recipient::Node(id));
     }
 
     /// Ask for a path and report the status and body.

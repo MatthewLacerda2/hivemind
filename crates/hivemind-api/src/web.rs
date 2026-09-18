@@ -411,12 +411,18 @@ async fn send(
         }
     }
 
-    let recipients: Vec<Recipient> = to
+    // Through the service, which knows the address book: a short id is a peer
+    // and not a person's name (#19).
+    let recipients: Vec<Recipient> = match to
         .split(',')
         .map(str::trim)
         .filter(|part| !part.is_empty())
-        .map(parse_recipient)
-        .collect();
+        .map(|typed| service.parse_recipient(typed))
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(recipients) => recipients,
+        Err(error) => return Ok(render_error(error)),
+    };
 
     let draft = Draft {
         to: recipients,
@@ -643,16 +649,6 @@ fn tempdir() -> Result<tempfile::TempDir, crate::service::ServiceError> {
         }
         .into()
     })
-}
-
-/// What a person typed in the `To` box.
-fn parse_recipient(typed: &str) -> Recipient {
-    if typed.eq_ignore_ascii_case("everyone") {
-        return Recipient::Everyone;
-    }
-    typed
-        .parse()
-        .map_or_else(|_| Recipient::Owner(typed.to_owned()), Recipient::Node)
 }
 
 /// "3 minutes ago", for a reader rather than a log.
@@ -1020,18 +1016,5 @@ mod tests {
             relative(chrono::Utc::now() + chrono::Duration::hours(1)),
             "just now"
         );
-    }
-
-    #[test]
-    fn a_recipient_box_takes_a_name_an_id_or_everyone() {
-        assert_eq!(parse_recipient("everyone"), Recipient::Everyone);
-        assert_eq!(parse_recipient("EVERYONE"), Recipient::Everyone);
-        assert_eq!(
-            parse_recipient("matheus"),
-            Recipient::Owner("matheus".to_owned())
-        );
-
-        let id = NodeId::from_certificate_der(b"somebody");
-        assert_eq!(parse_recipient(&id.to_string()), Recipient::Node(id));
     }
 }

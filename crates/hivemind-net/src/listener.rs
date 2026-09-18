@@ -25,6 +25,13 @@ pub struct CallerIdentity {
     /// The certificate itself, which pairing stores so that later connections
     /// can be pinned against it.
     pub certificate: Vec<u8>,
+    /// The address the connection actually came from.
+    ///
+    /// The socket knows this; the caller only has an opinion about it. A
+    /// handshake used to be believed on the point, and since every daemon
+    /// claimed `127.0.0.1`, every peer learned its own loopback as the way to
+    /// reach the other one (#23).
+    pub remote: std::net::SocketAddr,
 }
 
 /// Why the listener stopped.
@@ -74,7 +81,7 @@ pub async fn serve<F>(
         let router = router.clone();
 
         tokio::spawn(async move {
-            if let Err(error) = serve_connection(acceptor, stream, router).await {
+            if let Err(error) = serve_connection(acceptor, stream, remote, router).await {
                 // Expected constantly: port scanners, a peer we un-paired, a
                 // half-open connection. Debug, not warn.
                 tracing::debug!(%remote, %error, "peer connection ended");
@@ -87,6 +94,7 @@ pub async fn serve<F>(
 async fn serve_connection(
     acceptor: TlsAcceptor,
     stream: tokio::net::TcpStream,
+    remote: std::net::SocketAddr,
     router: axum::Router,
 ) -> Result<(), String> {
     let tls = acceptor.accept(stream).await.map_err(|e| e.to_string())?;
@@ -109,6 +117,7 @@ async fn serve_connection(
     let caller = CallerIdentity {
         node_id: NodeId::from_certificate_der(&certificate),
         certificate,
+        remote,
     };
     let router = router.layer(axum::Extension(caller));
 
@@ -129,6 +138,7 @@ mod tests {
         let caller = CallerIdentity {
             node_id: NodeId::from_certificate_der(identity.certificate_der()),
             certificate: identity.certificate_der().to_vec(),
+            remote: "10.0.0.2:51234".parse().expect("an address"),
         };
         assert_eq!(caller.node_id, identity.node_id());
     }

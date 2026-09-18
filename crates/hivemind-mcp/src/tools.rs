@@ -39,22 +39,14 @@ fn parse_id(raw: &str) -> Result<Ulid, McpError> {
         .map_err(|_| McpError::invalid_params(format!("`{raw}` is not a message id"), None))
 }
 
-/// A recipient string is a node id, `everyone`, or an owner name.
-fn parse_recipient(raw: &str) -> Recipient {
-    if raw.eq_ignore_ascii_case("everyone") {
-        return Recipient::Everyone;
-    }
-    raw.parse()
-        .map_or_else(|_| Recipient::Owner(raw.to_owned()), Recipient::Node)
-}
-
 // ------------------------------------------------------------ parameters ---
 
 /// Arguments for `send`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SendParams {
-    /// Who to send to. Each entry is a node name, an owner name (which reaches
-    /// every machine that person runs), or `everyone`.
+    /// Who to send to. Each entry is a node's short id as `list_peers` shows
+    /// it, its full `hm1:` fingerprint, an owner name (which reaches every
+    /// machine that person runs), or `everyone`.
     pub to: Vec<String>,
     /// A one-line subject, at most 200 characters.
     pub subject: String,
@@ -324,7 +316,15 @@ impl HivemindMcp {
         Parameters(params): Parameters<SendParams>,
     ) -> Result<Json<Sent>, McpError> {
         let draft = Draft {
-            to: params.to.iter().map(|s| parse_recipient(s)).collect(),
+            // Through the service, which knows the address book. An agent
+            // reading `list_peers` is handed short ids, and sending to one
+            // used to deliver to nobody and report success (#19).
+            to: params
+                .to
+                .iter()
+                .map(|typed| self.service.parse_recipient(typed))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| mcp_error(&e))?,
             subject: params.subject,
             body: params.body,
             kind: params
@@ -464,20 +464,6 @@ impl HivemindMcp {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn everyone_is_recognised_whatever_its_case() {
-        assert_eq!(parse_recipient("everyone"), Recipient::Everyone);
-        assert_eq!(parse_recipient("EVERYONE"), Recipient::Everyone);
-    }
-
-    #[test]
-    fn a_recipient_that_is_not_a_node_id_is_read_as_an_owner_name() {
-        assert_eq!(
-            parse_recipient("rafael"),
-            Recipient::Owner("rafael".to_owned())
-        );
-    }
 
     #[test]
     fn a_bad_message_id_is_the_callers_fault_not_an_internal_error() {
