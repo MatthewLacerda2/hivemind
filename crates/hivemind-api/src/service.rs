@@ -892,6 +892,45 @@ impl MailService {
         Ok(refs)
     }
 
+    /// Store the blobs that arrived with a message (SPEC §8).
+    ///
+    /// Each is matched against an attachment the *signed* message declares, so
+    /// a sender cannot use a delivery to push arbitrary files into the blob
+    /// store — and the bytes must hash to the digest that attachment names, so
+    /// it cannot substitute different content for one it did declare.
+    ///
+    /// # Errors
+    /// [`ServiceError::Blob`] if a part does not match what was declared.
+    pub fn accept_inline_blobs(
+        &self,
+        message: &Message,
+        blobs: Vec<(String, Vec<u8>)>,
+    ) -> Result<(), ServiceError> {
+        for (name, bytes) in blobs {
+            let declared = message
+                .attachments
+                .iter()
+                .find(|a| a.inline && a.sha256.to_hex() == name)
+                .ok_or(BlobError::UnsafeName(
+                    "a delivery carried a file the message does not declare",
+                ))?;
+
+            // Hashed before it is stored, not after: writing it first would
+            // leave a file named after the wrong digest behind on every
+            // rejection.
+            let actual = hivemind_core::crypto::Sha256Digest::of(&bytes);
+            if actual != declared.sha256 {
+                return Err(BlobError::DigestMismatch {
+                    expected: declared.sha256.to_hex(),
+                    actual: actual.to_hex(),
+                }
+                .into());
+            }
+            self.blobs.put_bytes(&bytes)?;
+        }
+        Ok(())
+    }
+
     /// The blob store, for handlers that stream attachments.
     #[must_use]
     pub fn blobs(&self) -> &BlobStore {
@@ -971,6 +1010,24 @@ impl MailService {
     fn thread_id_of(&self, parent: Ulid) -> Result<Ulid, ServiceError> {
         let (_, message) = self.get(parent)?;
         Ok(message.thread_id)
+    }
+}
+
+impl MailService {
+    /// The largest delivery this node will read (SPEC §8).
+    ///
+    /// The inline budget, plus room for the message itself. A peer configured
+    /// more generously than this one gets a `413` rather than being allowed to
+    /// decide how much memory this machine spends.
+    #[must_use]
+    pub fn max_delivery_bytes(&self) -> usize {
+        let budget = self
+            .inline_max_bytes
+            .saturating_mul(INLINE_BUDGET_MULTIPLE)
+            .saturating_add(hivemind_core::message::BODY_MAX_BYTES as u64)
+            // Multipart framing, and the subject and headers alongside it.
+            .saturating_add(64 * 1024);
+        usize::try_from(budget).unwrap_or(usize::MAX)
     }
 }
 

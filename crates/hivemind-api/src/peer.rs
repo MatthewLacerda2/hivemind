@@ -52,9 +52,17 @@ pub struct Delivered {
 
 /// Build the peer router.
 pub fn router(state: Arc<MailService>) -> Router {
+    let limit = state.max_delivery_bytes();
     Router::new()
         .route("/peer/v1/handshake", post(handshake))
-        .route("/peer/v1/messages", post(receive_message))
+        .route(
+            "/peer/v1/messages",
+            post(receive_message)
+                // axum defaults to 2 MiB, which is smaller than one inline
+                // attachment. This is the only route that needs raising, and
+                // it is raised to exactly what this node is willing to hold.
+                .layer(axum::extract::DefaultBodyLimit::max(limit)),
+        )
         .route(
             "/peer/v1/blobs/{sha}",
             axum::routing::get(serve_blob).head(have_blob),
@@ -102,8 +110,9 @@ async fn handshake(
 async fn receive_message(
     State(service): State<Arc<MailService>>,
     Extension(caller): Extension<CallerIdentity>,
-    Json(message): Json<Message>,
+    multipart: axum::extract::Multipart,
 ) -> Result<(StatusCode, Json<Delivered>), Problem> {
+    let (message, blobs) = read_delivery(multipart).await?;
     // SPEC §6.2 step 3: until both sides confirm, mail is refused.
     if !service.is_paired(caller.node_id)? {
         return Err(Problem::new(
@@ -121,8 +130,62 @@ async fn receive_message(
         ));
     }
 
+    // Blobs before the message: a message whose inline attachment is missing
+    // would show an attachment nothing can open, and redelivery is safe
+    // (SPEC §8) so failing here costs a retry rather than the mail.
+    service.accept_inline_blobs(&message, blobs)?;
+
     let id = service.receive(caller.node_id, message)?;
     Ok((StatusCode::ACCEPTED, Json(Delivered { id: id.to_string() })))
+}
+
+/// Pull the message and its inline blobs out of a delivery.
+///
+/// The `message` part must come first. That is how the sender writes it, and
+/// requiring it means a blob can be checked against a declared attachment as
+/// it is read rather than buffering everything first.
+async fn read_delivery(
+    mut multipart: axum::extract::Multipart,
+) -> Result<(Message, Vec<(String, Vec<u8>)>), Problem> {
+    let mut message: Option<Message> = None;
+    let mut blobs = Vec::new();
+
+    loop {
+        let field = multipart.next_field().await.map_err(|e| {
+            Problem::new(
+                ProblemType::InvalidMessage,
+                format!("the delivery could not be read: {e}"),
+            )
+        })?;
+        let Some(field) = field else { break };
+
+        let name = field.name().unwrap_or_default().to_owned();
+        let bytes = field.bytes().await.map_err(|e| {
+            Problem::new(
+                ProblemType::InvalidMessage,
+                format!("a part of the delivery could not be read: {e}"),
+            )
+        })?;
+
+        if name == "message" {
+            message = Some(serde_json::from_slice(&bytes).map_err(|e| {
+                Problem::new(
+                    ProblemType::InvalidMessage,
+                    format!("unreadable message: {e}"),
+                )
+            })?);
+        } else {
+            blobs.push((name, bytes.to_vec()));
+        }
+    }
+
+    let message = message.ok_or_else(|| {
+        Problem::new(
+            ProblemType::InvalidMessage,
+            "a delivery must carry a `message` part",
+        )
+    })?;
+    Ok((message, blobs))
 }
 
 /// Where a range request wants to start.
@@ -322,6 +385,63 @@ mod tests {
         (status, json)
     }
 
+    /// Deliver `message` (plus any inline blobs) as `who`, as the wire does.
+    async fn deliver(
+        service: &Arc<MailService>,
+        who: &Identity,
+        message: &serde_json::Value,
+        blobs: &[(String, Vec<u8>)],
+    ) -> (StatusCode, serde_json::Value) {
+        const BOUNDARY: &str = "hivemind-test-boundary";
+
+        let mut body = Vec::new();
+        body.extend_from_slice(format!("--{BOUNDARY}\r\n").as_bytes());
+        body.extend_from_slice(
+            b"Content-Disposition: form-data; name=\"message\"\r\n\
+              Content-Type: application/json\r\n\r\n",
+        );
+        body.extend_from_slice(message.to_string().as_bytes());
+        body.extend_from_slice(b"\r\n");
+
+        for (name, bytes) in blobs {
+            body.extend_from_slice(format!("--{BOUNDARY}\r\n").as_bytes());
+            body.extend_from_slice(
+                format!(
+                    "Content-Disposition: form-data; name=\"{name}\"; filename=\"{name}\"\r\n\
+                     Content-Type: application/octet-stream\r\n\r\n"
+                )
+                .as_bytes(),
+            );
+            body.extend_from_slice(bytes);
+            body.extend_from_slice(b"\r\n");
+        }
+        body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
+
+        let router = router(Arc::clone(service)).layer(Extension(caller(who)));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/peer/v1/messages")
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={BOUNDARY}"),
+            )
+            .body(Body::from(body))
+            .expect("request");
+
+        let response = router.oneshot(request).await.expect("response");
+        let status = response.status();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
     /// A message from `from` to `to`, signed properly.
     fn message_from(from: &Identity, to: NodeId, subject: &str) -> serde_json::Value {
         let (_dir, sender) = service(from);
@@ -363,6 +483,170 @@ mod tests {
         service.confirm_pair(friend.node_id()).expect("confirm");
     }
 
+    /// A signed message from `from` carrying `files`, plus the parts to send.
+    fn message_with_files(
+        from: &Identity,
+        to: NodeId,
+        files: &[(&str, &[u8])],
+    ) -> (serde_json::Value, Vec<(String, Vec<u8>)>) {
+        let (dir, sender) = service(from);
+        let paths: Vec<_> = files
+            .iter()
+            .map(|(name, bytes)| {
+                let path = dir.path().join(name);
+                std::fs::write(&path, bytes).expect("write");
+                path
+            })
+            .collect();
+
+        let message = sender
+            .send(
+                Draft {
+                    to: vec![Recipient::Node(to)],
+                    subject: "with files".to_owned(),
+                    body: "see attached".to_owned(),
+                    kind: Kind::Message,
+                    in_reply_to: None,
+                    attachments: paths,
+                },
+                SenderKind::Human,
+            )
+            .expect("send");
+
+        let parts = message
+            .attachments
+            .iter()
+            .filter(|a| a.inline)
+            .map(|a| {
+                let bytes = files
+                    .iter()
+                    .find(|(name, _)| *name == a.name)
+                    .map(|(_, bytes)| (*bytes).to_vec())
+                    .expect("the file we wrote");
+                (a.sha256.to_hex(), bytes)
+            })
+            .collect();
+
+        (serde_json::to_value(message).expect("serialise"), parts)
+    }
+
+    #[tokio::test]
+    async fn an_inline_attachment_arrives_with_its_message() {
+        let host = identity(27);
+        let friend = identity(28);
+        let (_dir, service) = service(&host);
+        pair_with(&service, &friend).await;
+
+        let (message, parts) =
+            message_with_files(&friend, host.node_id(), &[("notes.md", b"the contents")]);
+        assert_eq!(
+            parts.len(),
+            1,
+            "a small file should travel with the message"
+        );
+
+        let (status, _) = deliver(&service, &friend, &message, &parts).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+
+        let digest: hivemind_core::crypto::Sha256Digest = parts[0].0.parse().expect("digest");
+        assert!(
+            service.blobs().has(&digest),
+            "the attachment should be readable without another request"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_delivery_cannot_push_a_file_the_message_does_not_declare() {
+        // Otherwise any paired peer could write arbitrary files into this
+        // node's blob store by attaching them to an unrelated message.
+        let host = identity(29);
+        let friend = identity(30);
+        let (_dir, service) = service(&host);
+        pair_with(&service, &friend).await;
+
+        let message = message_from(&friend, host.node_id(), "nothing attached");
+        let smuggled = hivemind_core::crypto::Sha256Digest::of(b"not declared");
+
+        let (status, _) = deliver(
+            &service,
+            &friend,
+            &message,
+            &[(smuggled.to_hex(), b"not declared".to_vec())],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(!service.blobs().has(&smuggled));
+        assert_eq!(
+            service.unread_count().expect("count"),
+            0,
+            "and the message it rode in on is refused too"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_part_whose_bytes_are_not_what_was_declared_is_refused() {
+        // The digest is in the signed message, so substituting content here
+        // means the sender is lying about something it signed.
+        let host = identity(31);
+        let friend = identity(32);
+        let (_dir, service) = service(&host);
+        pair_with(&service, &friend).await;
+
+        let (message, parts) =
+            message_with_files(&friend, host.node_id(), &[("notes.md", b"the real thing")]);
+        let swapped = vec![(parts[0].0.clone(), b"something else".to_vec())];
+
+        let (status, _) = deliver(&service, &friend, &message, &swapped).await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        let digest: hivemind_core::crypto::Sha256Digest = parts[0].0.parse().expect("digest");
+        assert!(
+            !service.blobs().has(&digest),
+            "nothing should have been written under a digest it does not match"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_large_attachment_is_left_to_be_fetched_rather_than_sent() {
+        // SPEC §8: over inline_max ships as a ref. The message still arrives.
+        let host = identity(33);
+        let friend = identity(34);
+        let (_dir, service) = service(&host);
+        pair_with(&service, &friend).await;
+
+        let big = vec![
+            b'x';
+            usize::try_from(hivemind_core::config::DEFAULT_INLINE_MAX_BYTES).unwrap() + 1
+        ];
+        let (message, parts) = message_with_files(&friend, host.node_id(), &[("big.bin", &big)]);
+
+        assert!(parts.is_empty(), "too big to travel with the message");
+
+        let (status, _) = deliver(&service, &friend, &message, &parts).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(service.unread_count().expect("count"), 1);
+    }
+
+    #[tokio::test]
+    async fn a_delivery_with_no_message_part_is_refused() {
+        let host = identity(35);
+        let friend = identity(36);
+        let (_dir, service) = service(&host);
+        pair_with(&service, &friend).await;
+
+        let router = router(Arc::clone(&service)).layer(Extension(caller(&friend)));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/peer/v1/messages")
+            .header("content-type", "multipart/form-data; boundary=x")
+            .body(Body::from("--x--\r\n"))
+            .expect("request");
+
+        let response = router.oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
     #[tokio::test]
     async fn redelivering_a_message_neither_duplicates_it_nor_marks_it_unread() {
         // SPEC §8: recipients dedupe on message id, so the sender can retry
@@ -379,11 +663,11 @@ mod tests {
             .parse()
             .expect("ulid");
 
-        let (first, _) = call(&service, &friend, "/peer/v1/messages", &message).await;
+        let (first, _) = deliver(&service, &friend, &message, &[]).await;
         assert_eq!(first, StatusCode::ACCEPTED);
         service.mark_read(id).expect("read it");
 
-        let (again, body) = call(&service, &friend, "/peer/v1/messages", &message).await;
+        let (again, body) = deliver(&service, &friend, &message, &[]).await;
         assert_eq!(again, StatusCode::ACCEPTED, "a retry is a success");
         assert_eq!(body["id"], message["id"]);
 
@@ -410,7 +694,7 @@ mod tests {
         let (_dir, service) = service(&host);
         let message = message_from(&stranger, host.node_id(), "let me in");
 
-        let (status, problem) = call(&service, &stranger, "/peer/v1/messages", &message).await;
+        let (status, problem) = deliver(&service, &stranger, &message, &[]).await;
 
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(problem["type"], "/problems/not-paired");
@@ -448,7 +732,7 @@ mod tests {
         service.confirm_pair(friend.node_id()).expect("confirm");
 
         let message = message_from(&friend, host.node_id(), "hello");
-        let (status, body) = call(&service, &friend, "/peer/v1/messages", &message).await;
+        let (status, body) = deliver(&service, &friend, &message, &[]).await;
 
         assert_eq!(status, StatusCode::ACCEPTED);
         assert_eq!(body["id"], message["id"]);
@@ -482,7 +766,7 @@ mod tests {
         service.confirm_pair(friend.node_id()).expect("confirm");
 
         let forged = message_from(&third_party, host.node_id(), "not mine");
-        let (status, problem) = call(&service, &friend, "/peer/v1/messages", &forged).await;
+        let (status, problem) = deliver(&service, &friend, &forged, &[]).await;
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(problem["type"], "/problems/identity-mismatch");

@@ -68,6 +68,40 @@ impl PeerTransport {
     pub fn new(service: Arc<MailService>, identity: hivemind_net::tls::LocalIdentity) -> Self {
         Self { service, identity }
     }
+
+    /// The attachments that travel with the message (SPEC §8).
+    ///
+    /// A blob we no longer hold is left out rather than failing the delivery:
+    /// the recipient can still fetch it lazily, and a missing file is a worse
+    /// reason to stop delivering mail than to deliver it without the file.
+    fn inline_parts(
+        &self,
+        message: &hivemind_core::message::Message,
+    ) -> Vec<hivemind_net::client::Part> {
+        message
+            .attachments
+            .iter()
+            .filter(|attachment| attachment.inline)
+            .filter_map(|attachment| {
+                let path = self.service.blobs().path_of(&attachment.sha256);
+                match std::fs::read(&path) {
+                    Ok(bytes) => Some(hivemind_net::client::Part {
+                        name: attachment.sha256.to_hex(),
+                        content_type: attachment.mime.clone(),
+                        bytes,
+                    }),
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            name = %attachment.name,
+                            "an inline attachment is missing; sending without it"
+                        );
+                        None
+                    }
+                }
+            })
+            .collect()
+    }
 }
 
 impl hivemind_net::delivery::Transport for PeerTransport {
@@ -89,8 +123,10 @@ impl hivemind_net::delivery::Transport for PeerTransport {
             });
 
         let client = hivemind_net::client::PeerClient::pinned(&self.identity, trusted)?;
-        let _: hivemind_net::client::PeerResponse<crate::peer::Delivered> =
-            client.post(addr, "/peer/v1/messages", message).await?;
+        let parts = self.inline_parts(message);
+        let _: hivemind_net::client::PeerResponse<crate::peer::Delivered> = client
+            .post_multipart(addr, "/peer/v1/messages", message, &parts)
+            .await?;
         Ok(())
     }
 }

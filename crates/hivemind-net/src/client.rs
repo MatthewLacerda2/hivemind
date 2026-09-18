@@ -128,6 +128,18 @@ pub struct PeerResponse<R> {
     pub certificate: Vec<u8>,
 }
 
+/// One file travelling with a message (SPEC §7.2).
+#[derive(Debug, Clone)]
+pub struct Part {
+    /// The form field name. For a delivery this is the blob's digest, so the
+    /// recipient can match a part to the attachment that declared it.
+    pub name: String,
+    /// What the sender says it is. Advisory (SPEC §4.1).
+    pub content_type: String,
+    /// The bytes.
+    pub bytes: Vec<u8>,
+}
+
 /// An HTTP client for one peer's trust settings.
 #[derive(Debug, Clone)]
 pub struct PeerClient {
@@ -178,6 +190,68 @@ impl PeerClient {
         self
     }
 
+    /// POST `body` as JSON plus `parts` as files, as one multipart request.
+    ///
+    /// The body is assembled in memory. That is deliberate rather than lazy:
+    /// what travels this way is bounded by the sender's inline budget (SPEC
+    /// §8), and anything larger is fetched separately with a range request
+    /// that can resume — which streaming the request would not give us.
+    ///
+    /// # Errors
+    /// Any [`ClientError`].
+    pub async fn post_multipart<B, R>(
+        &self,
+        authority: &str,
+        path: &str,
+        body: &B,
+        parts: &[Part],
+    ) -> Result<PeerResponse<R>, ClientError>
+    where
+        B: Serialize + Sync,
+        R: DeserializeOwned,
+    {
+        let json = serde_json::to_vec(body).map_err(|e| ClientError::Http {
+            addr: authority.to_owned(),
+            reason: format!("could not encode the request: {e}"),
+        })?;
+
+        let boundary = multipart_boundary();
+        let mut request = Vec::new();
+        write_part(
+            &mut request,
+            &boundary,
+            "message",
+            None,
+            "application/json",
+            &json,
+        );
+        for part in parts {
+            write_part(
+                &mut request,
+                &boundary,
+                &part.name,
+                Some(&part.name),
+                &part.content_type,
+                &part.bytes,
+            );
+        }
+        request.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+
+        let content_type = format!("multipart/form-data; boundary={boundary}");
+        match tokio::time::timeout(
+            self.timeout,
+            self.exchange(authority, path, request, &content_type),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(ClientError::Timeout {
+                addr: authority.to_owned(),
+                timeout: self.timeout,
+            }),
+        }
+    }
+
     /// POST `body` as JSON to `path` at `authority` (`host:port`).
     ///
     /// # Errors
@@ -198,7 +272,12 @@ impl PeerClient {
             reason: format!("could not encode the request: {e}"),
         })?;
 
-        match tokio::time::timeout(self.timeout, self.exchange(authority, path, request)).await {
+        match tokio::time::timeout(
+            self.timeout,
+            self.exchange(authority, path, request, "application/json"),
+        )
+        .await
+        {
             Ok(result) => result,
             Err(_) => Err(ClientError::Timeout {
                 addr: authority.to_owned(),
@@ -213,6 +292,7 @@ impl PeerClient {
         authority: &str,
         path: &str,
         request: Vec<u8>,
+        content_type: &str,
     ) -> Result<PeerResponse<R>, ClientError> {
         let tcp = tokio::net::TcpStream::connect(authority)
             .await
@@ -271,7 +351,7 @@ impl PeerClient {
                 .method(hyper::Method::POST)
                 .uri(path)
                 .header(hyper::header::HOST, authority)
-                .header(hyper::header::CONTENT_TYPE, "application/json")
+                .header(hyper::header::CONTENT_TYPE, content_type)
                 .body(http_body_util::Full::new(hyper::body::Bytes::from(request)))
                 .map_err(|e| ClientError::Http {
                     addr: authority.to_owned(),
@@ -339,6 +419,53 @@ fn problem_detail(body: &[u8]) -> String {
                 .and_then(|d| d.as_str().map(ToOwned::to_owned))
         })
         .unwrap_or_else(|| text.chars().take(200).collect())
+}
+
+/// A boundary no body will contain.
+///
+/// 128 random bits, hex-encoded. A collision would corrupt one request; the
+/// alternative — scanning every part for every candidate — costs a pass over
+/// the whole body to avoid something that will not happen.
+fn multipart_boundary() -> String {
+    let mut bytes = [0u8; 16];
+    // A failure here is not worth failing a delivery over, and the fallback is
+    // still a string no reasonable body contains.
+    if getrandom::fill(&mut bytes).is_err() {
+        return "hivemind-boundary-fallback-0000".to_owned();
+    }
+    let mut out = String::with_capacity(32 + 9);
+    out.push_str("hivemind-");
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+/// Append one `multipart/form-data` part.
+fn write_part(
+    out: &mut Vec<u8>,
+    boundary: &str,
+    name: &str,
+    filename: Option<&str>,
+    content_type: &str,
+    bytes: &[u8],
+) {
+    out.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    // The name is a digest or the literal "message" — never anything a sender
+    // chose — so there is nothing here to escape.
+    match filename {
+        Some(filename) => out.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\n")
+                .as_bytes(),
+        ),
+        None => out.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"{name}\"\r\n").as_bytes(),
+        ),
+    }
+    out.extend_from_slice(format!("Content-Type: {content_type}\r\n\r\n").as_bytes());
+    out.extend_from_slice(bytes);
+    out.extend_from_slice(b"\r\n");
 }
 
 #[cfg(test)]
