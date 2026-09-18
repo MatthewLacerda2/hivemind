@@ -70,10 +70,11 @@ jobs:
         with:
           tool: just,cargo-nextest,cargo-llvm-cov
 
-      # Report-only until M1 puts code under test; then this becomes `cov-gate`
-      # and the 85% floor starts failing the build (SPEC §13.2, §14).
+      # The 85% floor is live as of M1 (SPEC §13.2, §14). Coverage is a smoke
+      # detector, not a target: if this fails, look at what is untested before
+      # reaching for the number.
       - name: Coverage
-        run: just cov
+        run: just cov-gate
 
       - name: Summary
         if: always()

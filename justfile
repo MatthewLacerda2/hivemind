@@ -51,11 +51,14 @@ cov:
     cargo llvm-cov report --summary-only \
         --ignore-filename-regex '(tests/|crates/hivemind-cli/)'
 
-# Same as `cov` but fails below the floor. CI switches to this in M1 (SPEC §14).
+# What CI runs: same report as `cov`, and a failure below the floor.
 cov-gate:
-    cargo llvm-cov nextest --workspace --all-features \
+    cargo llvm-cov nextest --workspace --all-features --no-tests=warn \
         --ignore-filename-regex '(tests/|crates/hivemind-cli/)' \
-        --no-tests=warn --fail-under-lines {{COVERAGE_MIN}}
+        --lcov --output-path lcov.info \
+        --fail-under-lines {{COVERAGE_MIN}}
+    cargo llvm-cov report --summary-only \
+        --ignore-filename-regex '(tests/|crates/hivemind-cli/)'
 
 # -------------------------------------------------------------- supply chain ----
 
@@ -92,11 +95,12 @@ web-build:
 
 # ------------------------------------------------------------------- all ----
 
-# What CI runs, in CI's order. Run this before opening a PR (SPEC §16.6).
-ci: fmt-check lint doc test deny openapi-check web-build
+# What ci.yml runs, in its order — including the coverage gate, which runs as a
+# separate job there. Run this before opening a PR (SPEC §16.6).
+ci: fmt-check lint doc test deny openapi-check web-build cov-gate
 
-# `ci` plus the slow coverage and advisory passes.
-ci-full: ci cov audit
+# `ci` plus what nightly.yml runs on a schedule.
+ci-full: ci audit
 
 release-dry-run:
     cargo dist plan
