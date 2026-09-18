@@ -1,6 +1,6 @@
 # 0006. The node id display form is 13 groups, not 12
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-09-17
 
 ## Context
@@ -52,11 +52,8 @@ Display is always lowercase.
   loses nothing.
 - The display form is four characters longer than the spec implies. At this
   length it makes no practical difference to a line of terminal output.
-- This diverges from the letter of SPEC §6.1, which is why this record exists
-  and why its status is *proposed* rather than *accepted*. **The spec should be
-  amended to say 13 groups.** If the intent really was to truncate, that is a
-  one-line change to `GROUPS` and one golden test, but it should be written down
-  as a deliberate choice with its own record.
+- SPEC §6.1 said "12 groups" and has been amended to say 13 groups of 4, so the
+  spec and the code now agree. This record is why.
 - Nothing else depends on the display form. The wire protocol and `peers.toml`
   carry the raw 32 bytes; this is presentation only.
 

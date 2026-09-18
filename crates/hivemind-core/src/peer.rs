@@ -8,7 +8,10 @@ use std::fmt::{self, Write as _};
 use std::str::FromStr;
 
 use data_encoding::BASE32_NOPAD;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest as _, Sha256};
+
+use crate::crypto::{deserialize_bytes, serialize_bytes};
 
 /// Characters per dash-separated group in the display form.
 const GROUP: usize = 4;
@@ -61,6 +64,18 @@ impl fmt::Display for NodeId {
             f.write_str(str::from_utf8(group).map_err(|_| fmt::Error)?)?;
         }
         Ok(())
+    }
+}
+
+impl Serialize for NodeId {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        serialize_bytes(&self.0, s)
+    }
+}
+
+impl<'de> Deserialize<'de> for NodeId {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        deserialize_bytes::<D, 32>(d).map(Self)
     }
 }
 
