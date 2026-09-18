@@ -335,7 +335,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/threads/{thread_id}", get(get_thread))
         .route("/api/v1/events", get(events))
         .route("/healthz", get(healthz))
-        .with_state(state)
+        .with_state(Arc::clone(&state))
+        // Merged after the API's state is applied: the web router carries its
+        // own, so the two cannot share one `with_state` call (SPEC §11).
+        .merge(crate::web::router(state))
 }
 
 /// Liveness. Deliberately says nothing about the network.

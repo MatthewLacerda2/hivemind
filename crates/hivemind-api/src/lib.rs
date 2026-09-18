@@ -13,6 +13,7 @@ pub mod outbox;
 pub mod peer;
 pub mod problem;
 pub mod service;
+pub mod web;
 
 pub use local::{router, serve};
 pub use openapi::ApiDoc;

@@ -10,9 +10,12 @@ authors.workspace = true
 
 [dependencies]
 hivemind-core.workspace = true
+include_dir.workspace = true
 hivemind-net.workspace = true
 
 async-stream.workspace = true
+askama.workspace = true
+tempfile.workspace = true
 axum.workspace = true
 futures-core.workspace = true
 chrono.workspace = true

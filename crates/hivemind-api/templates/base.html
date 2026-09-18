@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}hivemind{% endblock %}</title>
+<link rel="stylesheet" href="/assets/hivemind.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header>
+  <nav aria-label="Main">
+    <a href="/" class="brand">hivemind</a>
+    <ul>
+      <li><a href="/"{% if here == "inbox" %} aria-current="page"{% endif %}>Inbox{% if unread > 0 %} <span class="count">{{ unread }}</span>{% endif %}</a></li>
+      <li><a href="/sent"{% if here == "sent" %} aria-current="page"{% endif %}>Sent</a></li>
+      <li><a href="/compose"{% if here == "compose" %} aria-current="page"{% endif %}>Compose</a></li>
+      <li><a href="/peers"{% if here == "peers" %} aria-current="page"{% endif %}>Peers</a></li>
+    </ul>
+  </nav>
+  <p class="whoami"><span class="label">this node</span> <code title="{{ node_id }}">{{ short_id }}</code></p>
+</header>
+
+<main id="main">
+{% block content %}{% endblock %}
+</main>
+
+<!-- Loaded last and entirely optional. Everything above works without it. -->
+<script src="/assets/hivemind.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}{{ subject }} — hivemind{% endblock %}
+{% block content %}
+<h1>{{ subject }}</h1>
+<p class="breadcrumb"><a href="/">&larr; Inbox</a></p>
+
+<ol class="thread">
+{% for message in messages %}
+  <li class="message" id="m-{{ message.id }}">
+    <p class="meta">
+      <span class="who" title="{{ message.from }}">{{ message.from_short }}</span>
+      <span class="badge {{ message.sender_kind }}">{{ message.sender_kind }}</span>
+      <time datetime="{{ message.sent_at }}">{{ message.when }}</time>
+    </p>
+    <div class="body">{{ message.body }}</div>
+
+    {% if !message.attachments.is_empty() %}
+      <ul class="attachments">
+      {% for attachment in message.attachments %}
+        <li>
+          <a href="/api/v1/messages/{{ message.id }}/attachments/{{ attachment.sha256 }}"
+             download="{{ attachment.name }}">{{ attachment.name }}</a>
+          <span class="size">{{ attachment.human_size }}</span>
+          {% if !attachment.cached %}<span class="badge lazy">fetch on open</span>{% endif %}
+        </li>
+      {% endfor %}
+      </ul>
+    {% endif %}
+  </li>
+{% endfor %}
+</ol>
+
+<form class="reply" method="post" action="/thread/{{ thread_id }}/reply">
+  <h2><label for="reply-body">Reply</label></h2>
+  <textarea id="reply-body" name="body" rows="5" required
+            placeholder="Markdown is fine."></textarea>
+  <button type="submit">Send reply</button>
+</form>
+{% endblock %}
