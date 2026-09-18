@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
-use hivemind_api::{ApiDoc, MailService};
+use hivemind_api::{ApiDoc, MailService, NodeDescription};
 use hivemind_core::config::Config;
 use hivemind_core::identity::Identity;
 use hivemind_core::index::Index;
@@ -40,7 +40,15 @@ pub(crate) async fn daemon(home: Option<&Path>, port: u16) -> Result<()> {
     let config = Config::load(&home).context("could not read the configuration")?;
     let identity = Identity::load_or_create(&home.join("identity"))
         .context("could not load this node's identity")?;
-    let service = MailService::open(&home, identity.node_id(), identity.signing_key().clone())
+    let node = NodeDescription {
+        id: identity.node_id(),
+        certificate: identity.certificate_der().to_vec(),
+        name: config.name.clone(),
+        owner: config.owner.clone(),
+        callback_host: "127.0.0.1".to_owned(),
+        peer_port: config.peer_port,
+    };
+    let service = MailService::open(&home, node, identity.signing_key().clone())
         .context("could not open the mail store")?;
 
     // SPEC §6.3: loopback only, and it fails closed. The address is not

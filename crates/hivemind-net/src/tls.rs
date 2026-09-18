@@ -236,6 +236,128 @@ impl ClientCertVerifier for PinnedVerifier {
     }
 }
 
+/// Accept any well-formed certificate, and let the application decide.
+///
+/// Used in two places, both deliberate (ADR 0010):
+///
+/// - The peer listener, so a node we have never met can reach
+///   `/peer/v1/handshake`. Everything else checks `peers.toml` and answers
+///   `403 not_paired`.
+/// - `hivemind join`, which is the "first use" in trust-on-first-use: we accept
+///   what the host presents so its fingerprint can be shown to a human.
+///
+/// It is never used for delivering mail. Outbound delivery always pins.
+#[derive(Debug)]
+struct AcceptAnyPeer {
+    provider: Arc<rustls::crypto::CryptoProvider>,
+}
+
+impl AcceptAnyPeer {
+    fn new() -> Self {
+        Self {
+            provider: provider(),
+        }
+    }
+
+    fn verify_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        // Still a real signature check: we are not verifying *who* they are,
+        // but they must hold the key for the certificate they presented.
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+}
+
+impl ServerCertVerifier for AcceptAnyPeer {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Err(rustls::Error::General(
+            "TLS 1.2 is not supported".to_owned(),
+        ))
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.verify_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        supported_schemes()
+    }
+}
+
+impl ClientCertVerifier for AcceptAnyPeer {
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: UnixTime,
+    ) -> Result<ClientCertVerified, rustls::Error> {
+        Ok(ClientCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Err(rustls::Error::General(
+            "TLS 1.2 is not supported".to_owned(),
+        ))
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.verify_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        supported_schemes()
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        // Still mandatory: we need *a* certificate to know who is calling, even
+        // though we will accept one we have never seen.
+        true
+    }
+}
+
 /// Our own certificate and key, for presenting to the other side.
 #[derive(Debug, Clone)]
 pub struct LocalIdentity {
@@ -462,12 +584,20 @@ mod handshake_tests {
         server: (LocalIdentity, TrustedPeers),
         client: (LocalIdentity, TrustedPeers),
     ) -> Result<(), String> {
-        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(
+        handshake_with(
             server_config(&server.0, server.1).map_err(|e| e.to_string())?,
-        ));
-        let connector = tokio_rustls::TlsConnector::from(Arc::new(
             client_config(&client.0, client.1).map_err(|e| e.to_string())?,
-        ));
+        )
+        .await
+    }
+
+    /// The same, from already-built configurations.
+    pub(super) async fn handshake_with(
+        server: rustls::ServerConfig,
+        client: rustls::ClientConfig,
+    ) -> Result<(), String> {
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server));
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(client));
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -609,5 +739,81 @@ mod tests_support {
 
     pub(super) fn trusts(peer: &Identity) -> TrustedPeers {
         TrustedPeers::new(vec![(peer.node_id(), peer.certificate_der().to_vec())])
+    }
+}
+
+/// TLS for the peer listener (ADR 0010).
+///
+/// Admits any client so an unknown node can reach `/peer/v1/handshake`; the
+/// router then requires a paired peer for everything else. The peer's
+/// certificate is available to the handler, which is how it learns who called.
+///
+/// # Errors
+/// [`TlsError::Config`] if rustls rejects the key or the configuration.
+pub fn peer_listener_config(identity: &LocalIdentity) -> Result<rustls::ServerConfig, TlsError> {
+    let mut config = rustls::ServerConfig::builder_with_provider(provider())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|e| TlsError::Config(e.to_string()))?
+        .with_client_cert_verifier(Arc::new(AcceptAnyPeer::new()))
+        .with_single_cert(identity.chain(), identity.key().into())
+        .map_err(|e| TlsError::Config(e.to_string()))?;
+
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    Ok(config)
+}
+
+/// TLS for `hivemind join`: the first use in trust-on-first-use.
+///
+/// Accepts whatever the host presents so its fingerprint can be shown to a
+/// human to confirm. **Never used to deliver mail** — that always pins.
+///
+/// # Errors
+/// [`TlsError::Config`] if rustls rejects the key or the configuration.
+pub fn join_config(identity: &LocalIdentity) -> Result<rustls::ClientConfig, TlsError> {
+    let mut config = rustls::ClientConfig::builder_with_provider(provider())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|e| TlsError::Config(e.to_string()))?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AcceptAnyPeer::new()))
+        .with_client_auth_cert(identity.chain(), identity.key().into())
+        .map_err(|e| TlsError::Config(e.to_string()))?;
+
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    Ok(config)
+}
+
+#[cfg(test)]
+mod permissive_tests {
+    use super::tests_support::*;
+    use super::*;
+
+    #[tokio::test]
+    async fn a_stranger_can_reach_the_peer_listener_so_pairing_can_begin() {
+        // The literal reading of SPEC §6.3 made this impossible, which is why
+        // ADR 0010 exists: nothing could ever pair.
+        let host = identity(1);
+        let stranger = identity(7);
+
+        super::handshake_tests::handshake_with(
+            peer_listener_config(&local(&host)).expect("listener config"),
+            join_config(&local(&stranger)).expect("join config"),
+        )
+        .await
+        .expect("an unknown node must be able to start a handshake");
+    }
+
+    #[tokio::test]
+    async fn joining_does_not_weaken_delivery_which_still_pins() {
+        // `join` is permissive; delivery is not. A node that answers on the
+        // right address with the wrong key gets no mail.
+        let host = identity(1);
+        let stranger = identity(7);
+
+        super::handshake_tests::handshake_with(
+            peer_listener_config(&local(&host)).expect("listener config"),
+            client_config(&local(&stranger), trusts(&identity(8))).expect("pinned config"),
+        )
+        .await
+        .expect_err("delivery must still pin the peer certificate");
     }
 }

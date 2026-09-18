@@ -13,6 +13,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::peer::NodeId;
 
+/// How many unconfirmed pairing offers we keep.
+///
+/// Anyone who can reach the peer port can create one (ADR 0010), so the list is
+/// bounded. Confirmed entries are never evicted: the user said yes to those.
+pub const MAX_PENDING: usize = 64;
+
 /// How an address was learned (SPEC §5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -359,6 +365,9 @@ impl PeerBook {
     }
 
     /// Record a pairing offer, keeping any confirmation we already gave.
+    ///
+    /// Evicts the oldest *unconfirmed* offer once the list is full, so an
+    /// unpaired node cannot grow this without bound (ADR 0010).
     pub fn insert_pending(&mut self, pending: PendingPair) {
         let key = pending.id.to_string();
         let already_confirmed = self
@@ -371,7 +380,30 @@ impl PeerBook {
         // A second handshake from the same node must not silently un-confirm
         // what the user already agreed to.
         pending.confirmed_by_us |= already_confirmed;
+
+        let replacing = self.file.pending.contains_key(&key);
+        if !replacing && self.file.pending.len() >= MAX_PENDING {
+            self.evict_oldest_unconfirmed();
+        }
         self.file.pending.insert(key, pending);
+    }
+
+    /// Drop the oldest offer the user has not confirmed.
+    ///
+    /// If every entry is confirmed, nothing is evicted: those are decisions a
+    /// human made, and a stranger must not be able to push them out.
+    fn evict_oldest_unconfirmed(&mut self) {
+        let oldest = self
+            .file
+            .pending
+            .values()
+            .filter(|p| !p.confirmed_by_us)
+            .min_by_key(|p| p.first_seen)
+            .map(|p| p.id.to_string());
+
+        if let Some(key) = oldest {
+            self.file.pending.remove(&key);
+        }
     }
 
     /// Mark that we have confirmed a pending pair. Returns whether it existed.
@@ -440,8 +472,9 @@ mod tests {
         }
     }
 
-    fn at(secs: i64) -> DateTime<Utc> {
-        DateTime::from_timestamp(secs, 0).expect("in range")
+    /// Takes a `usize` so that loop counters can be timestamps without a cast.
+    fn at(secs: usize) -> DateTime<Utc> {
+        DateTime::from_timestamp(i64::try_from(secs).expect("in range"), 0).expect("in range")
     }
 
     #[test]
@@ -625,6 +658,91 @@ mod tests {
                 .confirmed_by_us,
             "a repeated handshake must not silently un-confirm"
         );
+    }
+
+    fn pending_from(seed: &[u8], first_seen: DateTime<Utc>, confirmed: bool) -> PendingPair {
+        let certificate = certificate(seed);
+        PendingPair {
+            id: certificate.node_id(),
+            name: "offering".to_owned(),
+            owner: None,
+            certificate,
+            addr: PeerAddr::manual("10.0.0.2", 8400),
+            first_seen,
+            confirmed_by_us: confirmed,
+        }
+    }
+
+    #[test]
+    fn pending_offers_are_bounded_so_a_stranger_cannot_grow_them_forever() {
+        // Anyone who can reach the peer port can create one of these (ADR 0010).
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut book = PeerBook::load(dir.path()).expect("load");
+
+        for i in 0..(MAX_PENDING + 20) {
+            book.insert_pending(pending_from(format!("node {i}").as_bytes(), at(i), false));
+        }
+
+        assert_eq!(book.pending().count(), MAX_PENDING);
+    }
+
+    #[test]
+    fn eviction_takes_the_oldest_offer_first() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut book = PeerBook::load(dir.path()).expect("load");
+
+        let oldest = pending_from(b"the first one", at(1), false);
+        book.insert_pending(oldest.clone());
+        for i in 1..MAX_PENDING {
+            book.insert_pending(pending_from(
+                format!("node {i}").as_bytes(),
+                at(100 + i),
+                false,
+            ));
+        }
+        assert!(book.pending_pair(oldest.id).is_some());
+
+        book.insert_pending(pending_from(b"one too many", at(9_999), false));
+        assert!(
+            book.pending_pair(oldest.id).is_none(),
+            "the oldest unconfirmed offer should have been evicted"
+        );
+    }
+
+    #[test]
+    fn a_stranger_cannot_push_out_an_offer_the_user_already_confirmed() {
+        // Otherwise flooding the peer port would undo a pairing in progress.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut book = PeerBook::load(dir.path()).expect("load");
+
+        let confirmed = pending_from(b"the one we want", at(1), true);
+        book.insert_pending(confirmed.clone());
+        for i in 0..(MAX_PENDING * 2) {
+            book.insert_pending(pending_from(
+                format!("flood {i}").as_bytes(),
+                at(1_000 + i),
+                false,
+            ));
+        }
+
+        assert!(
+            book.pending_pair(confirmed.id)
+                .is_some_and(|p| p.confirmed_by_us),
+            "a confirmed offer must survive a flood"
+        );
+        assert_eq!(book.pending().count(), MAX_PENDING);
+    }
+
+    #[test]
+    fn re_offering_an_existing_pair_does_not_count_against_the_bound() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut book = PeerBook::load(dir.path()).expect("load");
+        let pending = pending_from(b"repeat caller", at(1), false);
+
+        for _ in 0..(MAX_PENDING * 2) {
+            book.insert_pending(pending.clone());
+        }
+        assert_eq!(book.pending().count(), 1);
     }
 
     #[test]

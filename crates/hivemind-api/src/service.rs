@@ -20,6 +20,9 @@ use hivemind_core::crypto::{Signature, SigningKey};
 use hivemind_core::index::{Index, IndexError, Query, Summary};
 use hivemind_core::message::{CanonicalError, Kind, Message, MessageError, Recipient, SenderKind};
 use hivemind_core::peer::NodeId;
+use hivemind_core::peerbook::{
+    CertificateDer, Peer, PeerAddr, PeerBook, PeerBookError, PendingPair,
+};
 use hivemind_core::store::{MailStore, Mailbox, StoreError};
 use tokio::sync::broadcast;
 use ulid::Ulid;
@@ -63,6 +66,11 @@ pub enum Event {
         /// Which one.
         id: Ulid,
     },
+    /// A node offered to pair and is waiting on a confirmation.
+    PairPending {
+        /// Which node.
+        id: NodeId,
+    },
 }
 
 impl Event {
@@ -73,6 +81,7 @@ impl Event {
             Self::MessageReceived { .. } => "message.received",
             Self::MessageDelivered { .. } => "message.delivered",
             Self::MessageRead { .. } => "message.read",
+            Self::PairPending { .. } => "pair.pending",
         }
     }
 
@@ -83,6 +92,8 @@ impl Event {
             Self::MessageReceived { id }
             | Self::MessageDelivered { id }
             | Self::MessageRead { id } => *id,
+            // A pairing event is not about a message.
+            Self::PairPending { .. } => Ulid::nil(),
         }
     }
 }
@@ -111,6 +122,18 @@ pub enum ServiceError {
     /// The message could not be signed.
     #[error(transparent)]
     Canonical(#[from] CanonicalError),
+    /// The address book said no.
+    #[error(transparent)]
+    PeerBook(#[from] PeerBookError),
+    /// The message did not verify against the sender's key.
+    #[error("the message signature does not verify")]
+    BadSignature,
+    /// No such peer.
+    #[error("no peer {id}")]
+    NoSuchPeer {
+        /// The id that was asked for.
+        id: String,
+    },
     /// The index lock was poisoned by a panic in another thread.
     #[error("the index is unavailable after an earlier failure")]
     Unavailable,
@@ -121,9 +144,32 @@ pub enum ServiceError {
 pub struct MailService {
     store: MailStore,
     index: Mutex<Index>,
+    peers: Mutex<PeerBook>,
     identity: NodeId,
+    certificate: Vec<u8>,
+    name: String,
+    owner: Option<String>,
+    callback_host: String,
+    peer_port: u16,
     signing_key: SigningKey,
     events: broadcast::Sender<Event>,
+}
+
+/// Who this node says it is when introducing itself (SPEC §7.2).
+#[derive(Debug, Clone)]
+pub struct NodeDescription {
+    /// This node's fingerprint.
+    pub id: NodeId,
+    /// Its DER-encoded certificate.
+    pub certificate: Vec<u8>,
+    /// Its display name.
+    pub name: String,
+    /// The human who owns it.
+    pub owner: Option<String>,
+    /// The host peers should call back on.
+    pub callback_host: String,
+    /// The port its peer listener is on.
+    pub peer_port: u16,
 }
 
 impl MailService {
@@ -135,7 +181,7 @@ impl MailService {
     /// directory cannot be opened.
     pub fn open(
         root: &Path,
-        identity: NodeId,
+        node: NodeDescription,
         signing_key: SigningKey,
     ) -> Result<Self, ServiceError> {
         let store = MailStore::open(root.join("mail"))?;
@@ -143,15 +189,44 @@ impl MailService {
         // Cheap when the index was already current, because it is only the
         // files that exist; correct when it was not.
         index.rebuild_from(&store)?;
+        let peers = PeerBook::load(root)?;
 
         let (events, _) = broadcast::channel(EVENT_BUFFER);
         Ok(Self {
             store,
             index: Mutex::new(index),
-            identity,
+            peers: Mutex::new(peers),
+            identity: node.id,
+            certificate: node.certificate,
+            name: node.name,
+            owner: node.owner,
+            callback_host: node.callback_host,
+            peer_port: node.peer_port,
             signing_key,
             events,
         })
+    }
+
+    /// This node's display name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The human who owns this machine, if they said.
+    #[must_use]
+    pub fn owner(&self) -> Option<&str> {
+        self.owner.as_deref()
+    }
+
+    /// This node's certificate, which peers pin.
+    #[must_use]
+    pub fn certificate(&self) -> &[u8] {
+        &self.certificate
+    }
+
+    fn peers(&self) -> Result<std::sync::MutexGuard<'_, PeerBook>, ServiceError> {
+        self.peers.lock().map_err(|_| ServiceError::Unavailable)
     }
 
     /// This node's identity.
@@ -339,6 +414,211 @@ impl MailService {
         Ok(())
     }
 
+    // ------------------------------------------------------------- peers ---
+
+    /// How this node introduces itself (SPEC §7.2).
+    #[must_use]
+    pub fn own_handshake(&self) -> crate::peer::Handshake {
+        crate::peer::Handshake {
+            id: self.identity.to_string(),
+            name: self.name.clone(),
+            owner: self.owner.clone(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            callback_host: self.callback_host.clone(),
+            callback_port: self.peer_port,
+            // Reserved for v2 (SPEC §12). Sending nothing today keeps the
+            // field's meaning open.
+            gossip: None,
+        }
+    }
+
+    /// Is this node allowed to send us mail?
+    ///
+    /// # Errors
+    /// [`ServiceError::Unavailable`] if the address book lock is poisoned.
+    pub fn is_paired(&self, id: NodeId) -> Result<bool, ServiceError> {
+        Ok(self.peers()?.is_paired(id))
+    }
+
+    /// Every paired peer.
+    ///
+    /// # Errors
+    /// [`ServiceError::Unavailable`] if the address book lock is poisoned.
+    pub fn paired_peers(&self) -> Result<Vec<Peer>, ServiceError> {
+        Ok(self.peers()?.peers().cloned().collect())
+    }
+
+    /// Everything waiting on a confirmation.
+    ///
+    /// # Errors
+    /// [`ServiceError::Unavailable`] if the address book lock is poisoned.
+    pub fn pending_pairs(&self) -> Result<Vec<PendingPair>, ServiceError> {
+        Ok(self.peers()?.pending().cloned().collect())
+    }
+
+    /// Record that a node introduced itself, without trusting it yet.
+    ///
+    /// # Errors
+    /// [`ServiceError::PeerBook`] if the book cannot be written.
+    pub fn record_pairing_offer(
+        &self,
+        id: NodeId,
+        handshake: &crate::peer::Handshake,
+        certificate: Vec<u8>,
+        addr: PeerAddr,
+    ) -> Result<(), ServiceError> {
+        let mut peers = self.peers()?;
+
+        // Already paired: this is a peer saying hello again, not an offer.
+        // Refresh where it can be reached and leave the trust decision alone.
+        if let Some(peer) = peers.peer_mut(id) {
+            peer.learn_addr(addr);
+            peer.last_seen = Some(Utc::now());
+            return peers.save().map_err(Into::into);
+        }
+
+        peers.insert_pending(PendingPair {
+            id,
+            name: handshake.name.clone(),
+            owner: handshake.owner.clone(),
+            certificate: CertificateDer::new(certificate),
+            addr,
+            first_seen: Utc::now(),
+            confirmed_by_us: false,
+        });
+        peers.save()?;
+        let _ = self.events.send(Event::PairPending { id });
+        Ok(())
+    }
+
+    /// Confirm a pending pair from this side (SPEC §6.2).
+    ///
+    /// Promotes it to a real peer once *we* have agreed; the other side does
+    /// the same independently, and neither will accept mail until it has.
+    ///
+    /// # Errors
+    /// [`ServiceError::NoSuchPeer`] if nothing is pending for that id.
+    pub fn confirm_pair(&self, id: NodeId) -> Result<Peer, ServiceError> {
+        let mut peers = self.peers()?;
+        let Some(pending) = peers.remove_pending(id) else {
+            return Err(ServiceError::NoSuchPeer { id: id.to_string() });
+        };
+
+        let peer = Peer {
+            id: pending.id,
+            name: pending.name,
+            owner: pending.owner,
+            certificate: pending.certificate,
+            addrs: vec![pending.addr],
+            paired_at: Utc::now(),
+            last_seen: None,
+        };
+        peers.insert_peer(peer.clone());
+        peers.save()?;
+        Ok(peer)
+    }
+
+    /// Forget a peer.
+    ///
+    /// # Errors
+    /// [`ServiceError::NoSuchPeer`] if it was not there.
+    pub fn remove_peer(&self, id: NodeId) -> Result<(), ServiceError> {
+        let mut peers = self.peers()?;
+        if !peers.remove_peer(id) {
+            peers.remove_pending(id);
+        }
+        peers.save().map_err(Into::into)
+    }
+
+    /// The certificates TLS should accept, for rebuilding the trust set.
+    ///
+    /// # Errors
+    /// [`ServiceError::Unavailable`] if the address book lock is poisoned.
+    pub fn trusted_certificates(&self) -> Result<Vec<(NodeId, Vec<u8>)>, ServiceError> {
+        Ok(self.peers()?.acceptable_certificates())
+    }
+
+    /// Accept a message delivered by a paired peer.
+    ///
+    /// Idempotent on message id, because redelivery is always safe (SPEC §8).
+    ///
+    /// # Errors
+    /// [`ServiceError::BadSignature`] if it does not verify against the
+    /// sender's key.
+    pub fn receive(&self, from: NodeId, mut message: Message) -> Result<Ulid, ServiceError> {
+        // The signature is checked against the certificate we pinned, not
+        // against anything in the message: a peer cannot nominate its own key.
+        let verifying_key = {
+            let peers = self.peers()?;
+            let peer = peers.peer(from).ok_or_else(|| ServiceError::NoSuchPeer {
+                id: from.to_string(),
+            })?;
+            verifying_key_from_certificate(peer.certificate.as_bytes())
+                .ok_or(ServiceError::BadSignature)?
+        };
+        message
+            .verify(&verifying_key)
+            .map_err(|_| ServiceError::BadSignature)?;
+
+        let id = message.id;
+
+        // Idempotent: a redelivery of something we already hold is a success,
+        // and must not reset its read state by rewriting it into `new`.
+        if self.store.get(Mailbox::New, id).is_ok() || self.store.get(Mailbox::Cur, id).is_ok() {
+            return Ok(id);
+        }
+
+        message.received_at = Some(Utc::now().trunc_subsecs(3));
+        self.put(Mailbox::New, &message)?;
+
+        if let Ok(mut peers) = self.peers()
+            && let Some(peer) = peers.peer_mut(from)
+        {
+            peer.last_seen = Some(Utc::now());
+            let _ = peers.save();
+        }
+
+        let _ = self.events.send(Event::MessageReceived { id });
+        Ok(id)
+    }
+
+    /// Which nodes a recipient list actually reaches, at this moment.
+    ///
+    /// Expanded at send time and stored with the message, so a peer paired
+    /// tomorrow does not retroactively receive today's mail (SPEC §8).
+    ///
+    /// # Errors
+    /// [`ServiceError::Unavailable`] if the address book lock is poisoned.
+    pub fn expand_recipients(&self, to: &[Recipient]) -> Result<Vec<NodeId>, ServiceError> {
+        let peers = self.peers()?;
+        let mut out: Vec<NodeId> = Vec::new();
+
+        for recipient in to {
+            match recipient {
+                Recipient::Node(id) => out.push(*id),
+                Recipient::Owner(owner) => {
+                    out.extend(peers.peers_owned_by(owner).map(|p| p.id));
+                    // `everyone` and an owner name can both name this machine.
+                    if self
+                        .owner
+                        .as_deref()
+                        .is_some_and(|o| o.eq_ignore_ascii_case(owner))
+                    {
+                        out.push(self.identity);
+                    }
+                }
+                Recipient::Everyone => {
+                    out.extend(peers.peers().map(|p| p.id));
+                    out.push(self.identity);
+                }
+            }
+        }
+
+        out.sort_unstable();
+        out.dedup();
+        Ok(out)
+    }
+
     fn put(&self, mailbox: Mailbox, message: &Message) -> Result<(), ServiceError> {
         // File first, index second. A crash between them leaves a stale index,
         // which the next rebuild corrects; the other order would invent a
@@ -370,15 +650,47 @@ impl MailService {
     }
 }
 
+/// Pull the Ed25519 public key out of a DER certificate.
+///
+/// The `SubjectPublicKeyInfo` of an Ed25519 certificate ends with the 32-byte
+/// key, and the OID that precedes it is fixed. Scanning for that OID avoids
+/// pulling in a full X.509 parser for one field — and a wrong answer here
+/// cannot forge anything, it can only fail to verify.
+fn verifying_key_from_certificate(der: &[u8]) -> Option<hivemind_core::crypto::VerifyingKey> {
+    /// `AlgorithmIdentifier` for Ed25519: SEQUENCE(6) { OID 1.3.101.112 }.
+    const ED25519_SPKI_PREFIX: &[u8] =
+        &[0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
+
+    let start = der
+        .windows(ED25519_SPKI_PREFIX.len())
+        .position(|window| window == ED25519_SPKI_PREFIX)?
+        + ED25519_SPKI_PREFIX.len();
+    let bytes: [u8; 32] = der.get(start..start + 32)?.try_into().ok()?;
+    hivemind_core::crypto::VerifyingKey::from_bytes(&bytes).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bits of a node description the store tests do not care about.
+    fn describe(id: NodeId) -> NodeDescription {
+        NodeDescription {
+            id,
+            certificate: b"this node".to_vec(),
+            name: "test".to_owned(),
+            owner: None,
+            callback_host: "127.0.0.1".to_owned(),
+            peer_port: 8400,
+        }
+    }
 
     fn service() -> (tempfile::TempDir, MailService) {
         let dir = tempfile::tempdir().expect("temp dir");
         let key = SigningKey::from_bytes(&[11u8; 32]);
         let identity = NodeId::from_certificate_der(b"this node");
-        let service = MailService::open(dir.path(), identity, key).expect("service opens");
+        let service =
+            MailService::open(dir.path(), describe(identity), key).expect("service opens");
         (dir, service)
     }
 
@@ -599,7 +911,8 @@ mod tests {
         let identity = NodeId::from_certificate_der(b"this node");
 
         let sent = {
-            let service = MailService::open(dir.path(), identity, key.clone()).expect("open");
+            let service =
+                MailService::open(dir.path(), describe(identity), key.clone()).expect("open");
             service
                 .send(
                     Draft {
@@ -616,7 +929,7 @@ mod tests {
 
         std::fs::remove_file(dir.path().join("index.db")).expect("delete the index");
 
-        let service = MailService::open(dir.path(), identity, key).expect("reopen");
+        let service = MailService::open(dir.path(), describe(identity), key).expect("reopen");
         assert_eq!(service.unread_count().expect("count"), 1);
         assert_eq!(service.get(sent.id).expect("get").1.subject, "survives");
     }

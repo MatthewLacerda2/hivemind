@@ -15,4 +15,4 @@ pub mod service;
 
 pub use local::{router, serve};
 pub use openapi::ApiDoc;
-pub use service::{Draft, Event, MailService, ServiceError};
+pub use service::{Draft, Event, MailService, NodeDescription, ServiceError};

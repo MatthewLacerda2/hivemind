@@ -434,7 +434,15 @@ mod tests {
     fn app() -> (tempfile::TempDir, Router, NodeId) {
         let dir = tempfile::tempdir().expect("temp dir");
         let identity = NodeId::from_certificate_der(b"this node");
-        let service = MailService::open(dir.path(), identity, SigningKey::from_bytes(&[11u8; 32]))
+        let node = crate::service::NodeDescription {
+            id: identity,
+            certificate: b"this node".to_vec(),
+            name: "test".to_owned(),
+            owner: None,
+            callback_host: "127.0.0.1".to_owned(),
+            peer_port: 8400,
+        };
+        let service = MailService::open(dir.path(), node, SigningKey::from_bytes(&[11u8; 32]))
             .expect("service");
         let router = router(Arc::new(service));
         (dir, router, identity)

@@ -11,6 +11,7 @@ use std::str::FromStr as _;
 use ulid::Ulid;
 
 use crate::message::Message;
+use crate::peer::NodeId;
 
 /// Which of the four directories a message is sitting in (SPEC §4.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -92,6 +93,88 @@ pub enum StoreError {
     },
 }
 
+/// A message in the outbox, with what we still owe each recipient.
+///
+/// SPEC §4.3 puts per-recipient delivery state "inside the file". It cannot go
+/// inside `Message`: those fields are signed, and delivery state changes after
+/// signing. So the outbox file holds an envelope — the signed message exactly
+/// as it will be sent, plus our own bookkeeping alongside it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Outbound {
+    /// The message, byte-identical to what each recipient receives.
+    pub message: Message,
+    /// One entry per recipient the message was expanded to at send time.
+    pub recipients: Vec<RecipientState>,
+}
+
+impl Outbound {
+    /// Is there anyone left to deliver to?
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.recipients.iter().all(|r| r.delivered_at.is_some())
+    }
+
+    /// Recipients still owed a copy.
+    pub fn outstanding(&self) -> impl Iterator<Item = &RecipientState> {
+        self.recipients.iter().filter(|r| r.delivered_at.is_none())
+    }
+
+    /// Record a successful delivery. Returns whether anything changed.
+    pub fn mark_delivered(&mut self, to: NodeId, at: chrono::DateTime<chrono::Utc>) -> bool {
+        match self
+            .recipients
+            .iter_mut()
+            .find(|r| r.node == to && r.delivered_at.is_none())
+        {
+            Some(state) => {
+                state.delivered_at = Some(at);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Record a failed attempt, so backoff can be computed from it.
+    pub fn mark_attempted(&mut self, to: NodeId, at: chrono::DateTime<chrono::Utc>, why: &str) {
+        if let Some(state) = self.recipients.iter_mut().find(|r| r.node == to) {
+            state.attempts = state.attempts.saturating_add(1);
+            state.last_attempt = Some(at);
+            // Kept for `hivemind status` and for a human wondering why their
+            // message has not arrived.
+            state.last_error = Some(why.to_owned());
+        }
+    }
+}
+
+/// What we owe one recipient.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RecipientState {
+    /// The node this copy is for.
+    pub node: NodeId,
+    /// When it was accepted, if it has been.
+    pub delivered_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// How many times we have tried.
+    pub attempts: u32,
+    /// When we last tried.
+    pub last_attempt: Option<chrono::DateTime<chrono::Utc>>,
+    /// Why the last attempt failed.
+    pub last_error: Option<String>,
+}
+
+impl RecipientState {
+    /// A recipient we have not tried yet.
+    #[must_use]
+    pub fn pending(node: NodeId) -> Self {
+        Self {
+            node,
+            delivered_at: None,
+            attempts: 0,
+            last_attempt: None,
+            last_error: None,
+        }
+    }
+}
+
 /// The on-disk mail store.
 #[derive(Debug, Clone)]
 pub struct MailStore {
@@ -127,14 +210,24 @@ impl MailStore {
     /// # Errors
     /// Returns [`StoreError::Io`] if the write or rename fails.
     pub fn put(&self, mailbox: Mailbox, message: &Message) -> Result<(), StoreError> {
-        let final_path = self.path_of(mailbox, message.id);
+        self.write_json(mailbox, message.id, message)
+    }
+
+    /// Write any JSON body into a mailbox, atomically.
+    fn write_json<T: serde::Serialize>(
+        &self,
+        mailbox: Mailbox,
+        id: Ulid,
+        body: &T,
+    ) -> Result<(), StoreError> {
+        let final_path = self.path_of(mailbox, id);
         // Same directory as the destination, so the rename below cannot cross a
         // filesystem boundary and stop being atomic. The suffix keeps it out of
         // `list`, which only accepts `.json`.
         let temp_path = final_path.with_extension("json.tmp");
 
-        let json = serde_json::to_vec_pretty(message).map_err(|source| StoreError::Io {
-            context: format!("could not encode message {}", message.id),
+        let json = serde_json::to_vec_pretty(body).map_err(|source| StoreError::Io {
+            context: format!("could not encode {id}"),
             source: std::io::Error::other(source),
         })?;
 
@@ -157,6 +250,15 @@ impl MailStore {
     /// [`StoreError::NotFound`] if it is not there, [`StoreError::Corrupt`] if
     /// the file will not parse.
     pub fn get(&self, mailbox: Mailbox, id: Ulid) -> Result<Message, StoreError> {
+        self.read_json(mailbox, id)
+    }
+
+    /// Read any JSON body out of a mailbox.
+    fn read_json<T: serde::de::DeserializeOwned>(
+        &self,
+        mailbox: Mailbox,
+        id: Ulid,
+    ) -> Result<T, StoreError> {
         let path = self.path_of(mailbox, id);
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
@@ -212,6 +314,42 @@ impl MailStore {
     ///
     /// # Errors
     /// [`StoreError::NotFound`] if it is not in `from`.
+    /// Write an outbox entry, replacing any entry with the same id.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Io`] if the write or rename fails.
+    pub fn put_outbound(&self, outbound: &Outbound) -> Result<(), StoreError> {
+        self.write_json(Mailbox::Out, outbound.message.id, outbound)
+    }
+
+    /// Read an outbox entry.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] or [`StoreError::Corrupt`].
+    pub fn get_outbound(&self, id: Ulid) -> Result<Outbound, StoreError> {
+        self.read_json(Mailbox::Out, id)
+    }
+
+    /// Every outbox entry, oldest first.
+    ///
+    /// Entries that will not parse are skipped: one bad file must not stop
+    /// delivery of everything behind it.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Io`] if the directory cannot be read.
+    pub fn list_outbound(&self) -> Result<Vec<Outbound>, StoreError> {
+        Ok(self
+            .list(Mailbox::Out)?
+            .into_iter()
+            .filter_map(|id| self.get_outbound(id).ok())
+            .collect())
+    }
+
+    /// Move a message between mailboxes, leaving its bytes untouched.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::NotFound`] if the message is not in `from`, or
+    /// [`StoreError::Io`] if the rename fails.
     pub fn move_to(&self, from: Mailbox, to: Mailbox, id: Ulid) -> Result<(), StoreError> {
         if from == to {
             return Ok(());
