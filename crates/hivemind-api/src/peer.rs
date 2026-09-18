@@ -280,6 +280,8 @@ mod tests {
             owner: Some("host".to_owned()),
             callback_host: "127.0.0.1".to_owned(),
             peer_port: 8400,
+            max_attachment_bytes: hivemind_core::config::DEFAULT_MAX_ATTACHMENT_BYTES,
+            inline_max_bytes: hivemind_core::config::DEFAULT_INLINE_MAX_BYTES,
         };
         let service =
             MailService::open(dir.path(), node, id.signing_key().clone()).expect("service opens");
@@ -331,6 +333,7 @@ mod tests {
                     body: "body".to_owned(),
                     kind: Kind::Message,
                     in_reply_to: None,
+                    attachments: Vec::new(),
                 },
                 SenderKind::Human,
             )

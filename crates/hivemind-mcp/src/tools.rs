@@ -62,6 +62,23 @@ pub struct SendParams {
     pub body: String,
     /// `message` (the default), `task`, or `notification`.
     pub kind: Option<String>,
+    /// Absolute paths to local files to send with the message. They are copied
+    /// into hivemind's own storage immediately, so the originals can be moved
+    /// or deleted afterwards.
+    pub attachments: Option<Vec<String>>,
+}
+
+/// Turn the paths an agent supplied into real ones.
+///
+/// No validation here beyond the shape: whether a path exists, is readable and
+/// is within the size limit is the blob store's answer to give, with a message
+/// the agent can act on.
+fn local_paths(paths: Option<Vec<String>>) -> Vec<std::path::PathBuf> {
+    paths
+        .unwrap_or_default()
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .collect()
 }
 
 /// Arguments for `inbox`.
@@ -89,6 +106,10 @@ pub struct ReplyParams {
     pub id: String,
     /// The reply body, as markdown.
     pub body: String,
+    /// Absolute paths to local files to send with the message. They are copied
+    /// into hivemind's own storage immediately, so the originals can be moved
+    /// or deleted afterwards.
+    pub attachments: Option<Vec<String>>,
 }
 
 /// Arguments for `broadcast`.
@@ -303,6 +324,7 @@ impl HivemindMcp {
                 .and_then(Kind::from_str_opt)
                 .unwrap_or(Kind::Message),
             in_reply_to: None,
+            attachments: local_paths(params.attachments),
         };
 
         // MCP means an agent, always. The caller does not get to say otherwise
@@ -331,7 +353,12 @@ impl HivemindMcp {
         let id = parse_id(&params.id)?;
         let message = self
             .service
-            .reply(id, params.body, SenderKind::Agent)
+            .reply(
+                id,
+                params.body,
+                local_paths(params.attachments),
+                SenderKind::Agent,
+            )
             .map_err(|e| mcp_error(&e))?;
 
         Ok(Json(Sent {
@@ -359,6 +386,9 @@ impl HivemindMcp {
                 .and_then(Kind::from_str_opt)
                 .unwrap_or(Kind::Message),
             in_reply_to: None,
+            // SPEC §9.1: broadcast takes no attachments. Sending a large file
+            // to everybody is rarely what was meant, and `send` is right there.
+            attachments: Vec::new(),
         };
 
         let message = self

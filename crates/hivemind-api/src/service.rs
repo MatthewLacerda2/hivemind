@@ -16,11 +16,13 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use chrono::{DateTime, SubsecRound as _, Utc};
-use hivemind_core::blobs::{BlobError, BlobStore};
+use hivemind_core::blobs::{BlobError, BlobStore, check_attachment_name};
 use hivemind_core::config::DEFAULT_PEER_PORT;
 use hivemind_core::crypto::{Signature, SigningKey};
 use hivemind_core::index::{Index, IndexError, Query, Summary};
-use hivemind_core::message::{CanonicalError, Kind, Message, MessageError, Recipient, SenderKind};
+use hivemind_core::message::{
+    AttachmentRef, CanonicalError, Kind, Message, MessageError, Recipient, SenderKind,
+};
 use hivemind_core::peer::NodeId;
 use hivemind_core::peerbook::{
     AddrSource, CertificateDer, Peer, PeerAddr, PeerBook, PeerBookError, PendingPair,
@@ -48,6 +50,9 @@ pub struct Draft {
     pub kind: Kind,
     /// The message being replied to, if any.
     pub in_reply_to: Option<Ulid>,
+    /// Local files to send with it. Each is copied into the blob store, and
+    /// only its name travels (SPEC §9.1).
+    pub attachments: Vec<std::path::PathBuf>,
 }
 
 /// Something that happened, for the SSE stream (SPEC §7.1).
@@ -164,6 +169,8 @@ pub struct MailService {
     owner: Option<String>,
     callback_host: String,
     peer_port: u16,
+    max_attachment_bytes: u64,
+    inline_max_bytes: u64,
     signing_key: SigningKey,
     events: broadcast::Sender<Event>,
 }
@@ -186,6 +193,10 @@ pub struct NodeDescription {
     pub callback_host: String,
     /// The port its peer listener is on.
     pub peer_port: u16,
+    /// The largest attachment this node accepts (SPEC §6.3).
+    pub max_attachment_bytes: u64,
+    /// Attachments at or below this size travel with the message (SPEC §8).
+    pub inline_max_bytes: u64,
 }
 
 impl MailService {
@@ -221,6 +232,8 @@ impl MailService {
             owner: node.owner,
             callback_host: node.callback_host,
             peer_port: node.peer_port,
+            max_attachment_bytes: node.max_attachment_bytes,
+            inline_max_bytes: node.inline_max_bytes,
             signing_key,
             events,
         })
@@ -293,7 +306,7 @@ impl MailService {
             body: draft.body,
             kind: draft.kind,
             sender_kind,
-            attachments: Vec::new(),
+            attachments: self.take_attachments(&draft.attachments)?,
             // Millisecond precision, because that is what the canonical
             // encoding signs (ADR 0007).
             sent_at: Utc::now().trunc_subsecs(3),
@@ -348,6 +361,7 @@ impl MailService {
         &self,
         parent: Ulid,
         body: String,
+        attachments: Vec<std::path::PathBuf>,
         sender_kind: SenderKind,
     ) -> Result<Message, ServiceError> {
         let (_, original) = self.get(parent)?;
@@ -364,6 +378,7 @@ impl MailService {
                 body,
                 kind: Kind::Message,
                 in_reply_to: Some(parent),
+                attachments,
             },
             sender_kind,
         )
@@ -834,6 +849,49 @@ impl MailService {
             .map(|peer| peer.certificate.as_bytes().to_vec())
     }
 
+    /// Copy local files into the blob store and describe them (SPEC §8).
+    ///
+    /// Each file is hashed as it is copied, so an attachment sent twice — or
+    /// sent by two people — is stored once. Whether it travels with the
+    /// message or is fetched on demand is decided here and recorded in the
+    /// signed message, so the recipient knows which to expect.
+    fn take_attachments(
+        &self,
+        paths: &[std::path::PathBuf],
+    ) -> Result<Vec<AttachmentRef>, ServiceError> {
+        let mut refs = Vec::with_capacity(paths.len());
+        // Bounded so that one message cannot become an unboundedly large
+        // delivery. Past the budget, otherwise-inline files ship as refs and
+        // the recipient fetches them; nothing is refused for being numerous.
+        let mut inline_budget = self.inline_max_bytes.saturating_mul(INLINE_BUDGET_MULTIPLE);
+
+        for path in paths {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .ok_or(BlobError::UnsafeName("an attachment needs a file name"))?;
+            check_attachment_name(&name)?;
+
+            let (sha256, size) = self.blobs.put_file(path, self.max_attachment_bytes)?;
+
+            let inline = size <= self.inline_max_bytes && size <= inline_budget;
+            if inline {
+                inline_budget -= size;
+            }
+
+            refs.push(AttachmentRef {
+                name,
+                size,
+                sha256,
+                // Guessed from the extension. Advisory only: a recipient that
+                // acts on it rather than on the bytes is trusting the sender.
+                mime: mime_for(path),
+                inline,
+            });
+        }
+        Ok(refs)
+    }
+
     /// The blob store, for handlers that stream attachments.
     #[must_use]
     pub fn blobs(&self) -> &BlobStore {
@@ -914,6 +972,42 @@ impl MailService {
         let (_, message) = self.get(parent)?;
         Ok(message.thread_id)
     }
+}
+
+/// How many times `inline_max` one message's inline attachments may total.
+///
+/// SPEC §8 sets the per-file rule; this bounds the whole delivery, which the
+/// recipient has to be willing to buffer.
+const INLINE_BUDGET_MULTIPLE: u64 = 4;
+
+/// A guess at a media type from the file extension.
+///
+/// Advisory only (SPEC §4.1). A recipient that acts on this rather than on the
+/// bytes is trusting the sender, so the list is short and boring on purpose.
+fn mime_for(path: &std::path::Path) -> String {
+    let extension = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+
+    match extension.as_str() {
+        "txt" | "log" | "toml" => "text/plain",
+        "md" => "text/markdown",
+        "json" => "application/json",
+        "csv" => "text/csv",
+        "html" | "htm" => "text/html",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        "gz" | "tgz" => "application/gzip",
+        "tar" => "application/x-tar",
+        _ => "application/octet-stream",
+    }
+    .to_owned()
 }
 
 /// Split `host[:port]` into its parts, bracketed IPv6 included.
@@ -1013,6 +1107,8 @@ mod tests {
             owner: None,
             callback_host: "127.0.0.1".to_owned(),
             peer_port: 8400,
+            max_attachment_bytes: hivemind_core::config::DEFAULT_MAX_ATTACHMENT_BYTES,
+            inline_max_bytes: hivemind_core::config::DEFAULT_INLINE_MAX_BYTES,
         }
     }
 
@@ -1032,6 +1128,7 @@ mod tests {
             body: body.to_owned(),
             kind: Kind::Message,
             in_reply_to: None,
+            attachments: Vec::new(),
         }
     }
 
@@ -1095,6 +1192,7 @@ mod tests {
             body: "body".to_owned(),
             kind: Kind::Message,
             in_reply_to: None,
+            attachments: Vec::new(),
         };
         assert!(matches!(
             service.send(draft, SenderKind::Human),
@@ -1164,7 +1262,7 @@ mod tests {
             .expect("send");
 
         let reply = service
-            .reply(root.id, "on it".to_owned(), SenderKind::Human)
+            .reply(root.id, "on it".to_owned(), Vec::new(), SenderKind::Human)
             .expect("reply");
 
         assert_eq!(reply.thread_id, root.thread_id);
@@ -1179,10 +1277,10 @@ mod tests {
             .send(draft_to_self(&service, "lunch", "?"), SenderKind::Human)
             .expect("send");
         let first = service
-            .reply(root.id, "yes".to_owned(), SenderKind::Human)
+            .reply(root.id, "yes".to_owned(), Vec::new(), SenderKind::Human)
             .expect("reply");
         let second = service
-            .reply(first.id, "1pm".to_owned(), SenderKind::Human)
+            .reply(first.id, "1pm".to_owned(), Vec::new(), SenderKind::Human)
             .expect("reply");
 
         assert_eq!(second.subject, "Re: lunch");
@@ -1195,7 +1293,7 @@ mod tests {
             .send(draft_to_self(&service, "lunch", "?"), SenderKind::Human)
             .expect("send");
         service
-            .reply(root.id, "yes".to_owned(), SenderKind::Human)
+            .reply(root.id, "yes".to_owned(), Vec::new(), SenderKind::Human)
             .expect("reply");
 
         let thread = service.thread(root.thread_id).expect("thread");
@@ -1210,7 +1308,12 @@ mod tests {
     fn replying_to_a_message_that_does_not_exist_is_an_error() {
         let (_dir, service) = service();
         assert!(matches!(
-            service.reply(Ulid::generate(), "hello".to_owned(), SenderKind::Human),
+            service.reply(
+                Ulid::generate(),
+                "hello".to_owned(),
+                Vec::new(),
+                SenderKind::Human
+            ),
             Err(ServiceError::NoSuchMessage { .. })
         ));
     }
@@ -1234,6 +1337,149 @@ mod tests {
         assert_eq!(first.name(), "message.received");
     }
 
+    /// A service whose limits are small enough to test the boundaries of.
+    fn service_with_limits(
+        max_attachment: u64,
+        inline_max: u64,
+    ) -> (tempfile::TempDir, MailService) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut node = describe(NodeId::from_certificate_der(b"this node"));
+        node.max_attachment_bytes = max_attachment;
+        node.inline_max_bytes = inline_max;
+        let service = MailService::open(dir.path(), node, SigningKey::from_bytes(&[11u8; 32]))
+            .expect("service opens");
+        (dir, service)
+    }
+
+    fn file_of(dir: &tempfile::TempDir, name: &str, bytes: usize) -> std::path::PathBuf {
+        let path = dir.path().join(name);
+        std::fs::write(&path, vec![b'x'; bytes]).expect("write");
+        path
+    }
+
+    fn draft_with(service: &MailService, attachments: Vec<std::path::PathBuf>) -> Draft {
+        Draft {
+            to: vec![Recipient::Node(service.identity())],
+            subject: "with files".to_owned(),
+            body: "see attached".to_owned(),
+            kind: Kind::Message,
+            in_reply_to: None,
+            attachments,
+        }
+    }
+
+    #[test]
+    fn a_small_attachment_travels_with_the_message_and_a_large_one_does_not() {
+        // SPEC §8: any single file at or below inline_max ships in the
+        // delivery; larger ones ship as refs and are fetched on demand.
+        let (dir, service) = service_with_limits(1_000_000, 100);
+        let small = file_of(&dir, "small.txt", 100);
+        let large = file_of(&dir, "large.txt", 101);
+
+        let sent = service
+            .send(draft_with(&service, vec![small, large]), SenderKind::Human)
+            .expect("send");
+
+        assert_eq!(sent.attachments.len(), 2);
+        assert!(sent.attachments[0].inline, "100 bytes is at the limit");
+        assert!(!sent.attachments[1].inline, "101 is over it");
+        assert_eq!(sent.attachments[0].name, "small.txt");
+        assert_eq!(sent.attachments[0].size, 100);
+    }
+
+    #[test]
+    fn the_inline_budget_bounds_one_delivery_without_refusing_anything() {
+        // Otherwise a message with a hundred small files becomes an
+        // unboundedly large request the recipient has to buffer.
+        let (dir, service) = service_with_limits(1_000_000, 100);
+        let budget = 100 * INLINE_BUDGET_MULTIPLE;
+
+        // Five files of 100 bytes: four fit the budget, the fifth does not.
+        let files: Vec<_> = (0..5)
+            .map(|i| file_of(&dir, &format!("part{i}.bin"), 100))
+            .collect();
+
+        let sent = service
+            .send(draft_with(&service, files), SenderKind::Human)
+            .expect("send");
+
+        let inline: Vec<_> = sent.attachments.iter().filter(|a| a.inline).collect();
+        assert_eq!(inline.len(), usize::try_from(budget / 100).expect("fits"));
+        assert!(
+            sent.attachments.iter().any(|a| !a.inline),
+            "the rest should ship as refs rather than be refused"
+        );
+        assert_eq!(sent.attachments.len(), 5, "nothing is dropped");
+    }
+
+    #[test]
+    fn an_attachment_over_the_hard_limit_is_refused() {
+        let (dir, service) = service_with_limits(50, 10);
+        let too_big = file_of(&dir, "huge.bin", 51);
+
+        let error = service
+            .send(draft_with(&service, vec![too_big]), SenderKind::Human)
+            .expect_err("over the limit");
+
+        assert!(matches!(
+            error,
+            ServiceError::Blob(BlobError::TooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn the_same_file_attached_twice_is_stored_once() {
+        let (dir, service) = service_with_limits(1_000_000, 1_000_000);
+        let path = file_of(&dir, "shared.bin", 512);
+
+        let sent = service
+            .send(
+                draft_with(&service, vec![path.clone(), path]),
+                SenderKind::Human,
+            )
+            .expect("send");
+
+        assert_eq!(sent.attachments.len(), 2, "both are listed");
+        assert_eq!(
+            sent.attachments[0].sha256, sent.attachments[1].sha256,
+            "and both point at one blob"
+        );
+        assert!(service.blobs().has(&sent.attachments[0].sha256));
+    }
+
+    #[test]
+    fn a_media_type_is_guessed_from_the_name_and_never_from_the_contents() {
+        let (dir, service) = service_with_limits(1_000_000, 1_000_000);
+        let png = file_of(&dir, "not-really.png", 8);
+
+        let sent = service
+            .send(draft_with(&service, vec![png]), SenderKind::Human)
+            .expect("send");
+
+        assert_eq!(
+            sent.attachments[0].mime, "image/png",
+            "advisory only: acting on this rather than on the bytes is \
+             trusting the sender"
+        );
+    }
+
+    #[test]
+    fn an_attachment_that_does_not_exist_says_so_rather_than_sending_nothing() {
+        let (dir, service) = service_with_limits(1_000_000, 1_000_000);
+        let missing = dir.path().join("never-written.txt");
+
+        let error = service
+            .send(draft_with(&service, vec![missing]), SenderKind::Human)
+            .expect_err("no such file");
+
+        assert!(matches!(error, ServiceError::Blob(BlobError::Io { .. })));
+        assert_eq!(
+            service.unread_count().expect("count"),
+            0,
+            "and nothing should have been sent"
+        );
+    }
+
     #[test]
     fn the_index_survives_being_deleted_and_the_mail_does_not() {
         // ADR 0002: index.db is disposable. Reopening rebuilds it from mail/.
@@ -1252,6 +1498,7 @@ mod tests {
                         body: "body".to_owned(),
                         kind: Kind::Message,
                         in_reply_to: None,
+                        attachments: Vec::new(),
                     },
                     SenderKind::Human,
                 )

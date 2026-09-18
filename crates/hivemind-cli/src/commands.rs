@@ -55,6 +55,8 @@ pub(crate) async fn daemon(home: Option<&Path>, port: u16) -> Result<()> {
                 owner: config.owner.clone(),
                 callback_host: "127.0.0.1".to_owned(),
                 peer_port: config.peer_port,
+                max_attachment_bytes: config.max_attachment_bytes,
+                inline_max_bytes: config.inline_max_bytes,
             },
             identity.signing_key().clone(),
         )

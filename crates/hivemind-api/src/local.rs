@@ -218,6 +218,9 @@ pub struct SendRequest {
     pub body: String,
     /// `message`, `task` or `notification`. Defaults to `message`.
     pub kind: Option<String>,
+    /// Absolute paths to local files to send with it. The API is loopback
+    /// only, so these are paths on this machine (SPEC §7.1).
+    pub attachments: Option<Vec<String>>,
 }
 
 /// What to say in a reply.
@@ -225,6 +228,9 @@ pub struct SendRequest {
 pub struct ReplyRequest {
     /// The body, as markdown.
     pub body: String,
+    /// Absolute paths to local files to send with it. The API is loopback
+    /// only, so these are paths on this machine (SPEC §7.1).
+    pub attachments: Option<Vec<String>>,
 }
 
 /// What a send returns (SPEC §8: accepted, not delivered).
@@ -252,6 +258,19 @@ pub struct ListParams {
     pub q: Option<String>,
     /// How many to return.
     pub limit: Option<usize>,
+}
+
+/// Turn the paths a local caller supplied into real ones.
+///
+/// Nothing is validated here: whether a path exists, is readable and fits
+/// under the size limit is the blob store's answer to give, with a message the
+/// caller can act on.
+fn local_paths(paths: Option<Vec<String>>) -> Vec<std::path::PathBuf> {
+    paths
+        .unwrap_or_default()
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .collect()
 }
 
 /// Build the loopback router, including the Swagger UI at `/docs` (SPEC §7).
@@ -458,6 +477,7 @@ pub(crate) async fn send_message(
             .and_then(Kind::from_str_opt)
             .unwrap_or(Kind::Message),
         in_reply_to: None,
+        attachments: local_paths(request.attachments),
     };
 
     // HTTP means a human at the CLI or the web UI. MCP sets Agent instead, and
@@ -484,7 +504,12 @@ pub(crate) async fn reply_to_message(
     Json(request): Json<ReplyRequest>,
 ) -> Result<(StatusCode, Json<Accepted>), Problem> {
     let id = parse_id(&id)?;
-    let message = service.reply(id, request.body, SenderKind::Human)?;
+    let message = service.reply(
+        id,
+        request.body,
+        local_paths(request.attachments),
+        SenderKind::Human,
+    )?;
     Ok((
         StatusCode::ACCEPTED,
         Json(Accepted {
@@ -616,6 +641,8 @@ mod tests {
             owner: None,
             callback_host: "127.0.0.1".to_owned(),
             peer_port: 8400,
+            max_attachment_bytes: hivemind_core::config::DEFAULT_MAX_ATTACHMENT_BYTES,
+            inline_max_bytes: hivemind_core::config::DEFAULT_INLINE_MAX_BYTES,
         };
         let service = MailService::open(dir.path(), node, SigningKey::from_bytes(&[11u8; 32]))
             .expect("service");
