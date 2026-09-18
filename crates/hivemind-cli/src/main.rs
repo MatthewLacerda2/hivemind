@@ -57,6 +57,12 @@ enum Command {
         /// The subject.
         #[arg(short, long)]
         subject: String,
+        /// A file to send with it. Repeat for several.
+        ///
+        /// Copied into hivemind's own storage straight away, so the original
+        /// can be moved or deleted afterwards.
+        #[arg(short = 'a', long = "attach")]
+        attach: Vec<std::path::PathBuf>,
         /// The body. Omit, or pass `-`, to read it from stdin.
         #[arg(last = true)]
         body: Option<String>,
@@ -178,9 +184,12 @@ async fn main() -> Result<()> {
         Command::Openapi { .. } => commands::openapi(),
         Command::Daemon { port } => commands::daemon(cli.home.as_deref(), port).await,
         Command::Status { json } => commands::status(&cli.api, json).await,
-        Command::Send { to, subject, body } => {
-            commands::send(&cli.api, &to, &subject, body.as_deref()).await
-        }
+        Command::Send {
+            to,
+            subject,
+            attach,
+            body,
+        } => commands::send(&cli.api, &to, &subject, &attach, body.as_deref()).await,
         Command::Inbox {
             unread,
             limit,

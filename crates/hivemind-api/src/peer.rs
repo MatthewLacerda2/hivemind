@@ -345,6 +345,7 @@ mod tests {
             peer_port: 8400,
             max_attachment_bytes: hivemind_core::config::DEFAULT_MAX_ATTACHMENT_BYTES,
             inline_max_bytes: hivemind_core::config::DEFAULT_INLINE_MAX_BYTES,
+            prefetch: false,
         };
         let service =
             MailService::open(dir.path(), node, id.signing_key().clone()).expect("service opens");

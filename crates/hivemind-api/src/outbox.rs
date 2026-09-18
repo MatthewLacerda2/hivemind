@@ -202,3 +202,47 @@ impl hivemind_net::discovery::Seen for ServiceSink {
         });
     }
 }
+
+/// Fetches lazy attachments as soon as their message arrives (SPEC §8).
+///
+/// Only when `prefetch = true`. The default is to wait until somebody asks,
+/// because the common case is a laptop on a metered connection that will never
+/// open most of what it receives.
+///
+/// Failures are logged and dropped: a fetch that did not work is exactly the
+/// situation the lazy path already handles, so the message is still readable
+/// and the attachment is still fetchable on first access.
+pub async fn prefetch_attachments<F>(service: Arc<MailService>, shutdown: F)
+where
+    F: std::future::Future<Output = ()> + Send,
+{
+    if !service.prefetches() {
+        return;
+    }
+
+    let mut events = service.subscribe();
+    let mut shutdown = std::pin::pin!(shutdown);
+
+    loop {
+        let event = tokio::select! {
+            () = &mut shutdown => break,
+            event = events.recv() => event,
+        };
+
+        let Ok(crate::service::Event::MessageReceived { id }) = event else {
+            // A lagged receiver has missed messages; their attachments will be
+            // fetched on first access like any other. Not worth stopping for.
+            continue;
+        };
+
+        let Ok((_, message)) = service.get(id) else {
+            continue;
+        };
+
+        for digest in service.missing_attachments(&message) {
+            if let Err(error) = service.fetch_attachment(id, digest).await {
+                tracing::debug!(%error, %id, "could not prefetch an attachment");
+            }
+        }
+    }
+}

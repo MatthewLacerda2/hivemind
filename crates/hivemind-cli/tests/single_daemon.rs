@@ -317,3 +317,83 @@ fn the_cli_says_something_useful_when_no_daemon_is_running() {
         "a connection refused should tell you how to fix it, got: {stderr}"
     );
 }
+
+#[test]
+fn a_file_attached_from_the_command_line_comes_back_by_name() {
+    // SPEC §10: `hivemind send -a file`. The CLI passes a path; the daemon
+    // copies the contents, so the original can go away afterwards.
+    let daemon = Daemon::start();
+
+    let files = tempfile::tempdir().expect("temp dir");
+    let path = files.path().join("report.md");
+    std::fs::write(&path, b"# report").expect("write");
+
+    let me = json(&daemon.run(&["status", "--json"]));
+    let id = me["id"].as_str().expect("an id").to_owned();
+
+    daemon.run(&[
+        "send",
+        &id,
+        "-s",
+        "with a file",
+        "-a",
+        &path.to_string_lossy(),
+        "--",
+        "see attached",
+    ]);
+
+    // Gone before it is ever read: the daemon has its own copy.
+    std::fs::remove_file(&path).expect("remove");
+
+    let inbox = json(&daemon.run(&["inbox", "--json"]));
+    let message_id = inbox[0]["id"].as_str().expect("an id").to_owned();
+
+    let message = json(&daemon.run(&["read", &message_id, "--json"]));
+    let attachment = &message["attachments"][0];
+    assert_eq!(attachment["name"], "report.md");
+    assert_eq!(attachment["size"], 8);
+    assert_eq!(attachment["cached"], true, "our own file is on this disk");
+
+    let prose = daemon.run(&["read", &message_id]);
+    assert!(prose.contains("report.md"), "read should list it: {prose}");
+    assert!(prose.contains("on disk"), "and say it is here: {prose}");
+}
+
+#[test]
+fn attaching_a_file_that_is_not_there_fails_before_anything_is_sent() {
+    let daemon = Daemon::start();
+    let me = json(&daemon.run(&["status", "--json"]));
+    let id = me["id"].as_str().expect("an id").to_owned();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_hivemind"))
+        .args([
+            "send",
+            &id,
+            "-s",
+            "missing",
+            "-a",
+            "/no/such/file.txt",
+            "--",
+            "body",
+        ])
+        .env("HIVEMIND_HOME", daemon.home())
+        .env("HIVEMIND_API", daemon.api())
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("the cli runs");
+
+    assert!(!output.status.success(), "it should have refused");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("/no/such/file.txt"),
+        "and say which file: {stderr}"
+    );
+    assert_eq!(
+        json(&daemon.run(&["inbox", "--json"]))
+            .as_array()
+            .expect("array")
+            .len(),
+        0,
+        "nothing should have been sent"
+    );
+}

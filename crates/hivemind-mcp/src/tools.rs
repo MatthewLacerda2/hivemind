@@ -296,7 +296,16 @@ impl HivemindMcp {
                     name: a.name.clone(),
                     sha: a.sha256.to_string(),
                     size: a.size,
-                    path: None,
+                    // A path only when the bytes are actually here. Handing
+                    // back a path to a file that does not exist would send a
+                    // Claude off to open nothing (SPEC §9.1).
+                    path: self.service.blobs().has(&a.sha256).then(|| {
+                        self.service
+                            .blobs()
+                            .path_of(&a.sha256)
+                            .to_string_lossy()
+                            .into_owned()
+                    }),
                 })
                 .collect(),
         }))
@@ -431,12 +440,19 @@ impl HivemindMcp {
             .find(|a| a.sha256.to_string() == params.sha);
 
         match found {
-            // Blob storage arrives in M4 (SPEC §14); until a message can carry
-            // one, this is unreachable rather than unimplemented.
-            Some(_) => Err(McpError::internal_error(
-                "attachment transfer is not available in this version",
-                None,
-            )),
+            Some(attachment) => {
+                // Blocks until it is here. An agent asked for the file, not
+                // for a progress report, and it has nothing to do until the
+                // bytes exist.
+                let path = self
+                    .service
+                    .fetch_attachment(id, attachment.sha256)
+                    .await
+                    .map_err(|e| mcp_error(&e))?;
+                Ok(Json(Downloaded {
+                    path: path.to_string_lossy().into_owned(),
+                }))
+            }
             None => Err(McpError::invalid_params(
                 format!("message {id} has no attachment with sha {}", params.sha),
                 None,

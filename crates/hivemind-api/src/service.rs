@@ -171,6 +171,7 @@ pub struct MailService {
     peer_port: u16,
     max_attachment_bytes: u64,
     inline_max_bytes: u64,
+    prefetch: bool,
     signing_key: SigningKey,
     events: broadcast::Sender<Event>,
 }
@@ -197,6 +198,9 @@ pub struct NodeDescription {
     pub max_attachment_bytes: u64,
     /// Attachments at or below this size travel with the message (SPEC §8).
     pub inline_max_bytes: u64,
+    /// Fetch lazy attachments as soon as a message arrives, rather than on
+    /// first access (SPEC §8).
+    pub prefetch: bool,
 }
 
 impl MailService {
@@ -234,6 +238,7 @@ impl MailService {
             peer_port: node.peer_port,
             max_attachment_bytes: node.max_attachment_bytes,
             inline_max_bytes: node.inline_max_bytes,
+            prefetch: node.prefetch,
             signing_key,
             events,
         })
@@ -892,6 +897,26 @@ impl MailService {
         Ok(refs)
     }
 
+    /// Whether this node fetches lazy attachments before they are asked for.
+    #[must_use]
+    pub fn prefetches(&self) -> bool {
+        self.prefetch
+    }
+
+    /// Attachments of `message` that are not here yet (SPEC §8).
+    ///
+    /// What `prefetch = true` acts on, and what `hivemind status` would report
+    /// as still outstanding.
+    #[must_use]
+    pub fn missing_attachments(&self, message: &Message) -> Vec<Sha256Digest> {
+        message
+            .attachments
+            .iter()
+            .map(|a| a.sha256)
+            .filter(|digest| !self.blobs.has(digest))
+            .collect()
+    }
+
     /// Get an attachment onto local disk, fetching it if we do not hold it.
     ///
     /// SPEC §8: a file too large to travel with its message is fetched on
@@ -1264,6 +1289,7 @@ mod tests {
             peer_port: 8400,
             max_attachment_bytes: hivemind_core::config::DEFAULT_MAX_ATTACHMENT_BYTES,
             inline_max_bytes: hivemind_core::config::DEFAULT_INLINE_MAX_BYTES,
+            prefetch: false,
         }
     }
 

@@ -57,6 +57,7 @@ pub(crate) async fn daemon(home: Option<&Path>, port: u16) -> Result<()> {
                 peer_port: config.peer_port,
                 max_attachment_bytes: config.max_attachment_bytes,
                 inline_max_bytes: config.inline_max_bytes,
+                prefetch: config.prefetch,
             },
             identity.signing_key().clone(),
         )
@@ -162,6 +163,13 @@ where
         stop(),
     ));
 
+    // SPEC §8: `prefetch = true` fetches lazy attachments on arrival rather
+    // than on first access. Off by default.
+    let prefetch = tokio::spawn(hivemind_api::outbox::prefetch_attachments(
+        Arc::clone(service),
+        stop(),
+    ));
+
     // SPEC §8: sending writes to out/ and returns; this is what empties it.
     let courier = tokio::spawn({
         let outbox = hivemind_api::ServiceOutbox::new(Arc::clone(service));
@@ -191,7 +199,7 @@ where
         }
     });
 
-    Ok(vec![peer_listener, courier, mdns])
+    Ok(vec![peer_listener, courier, mdns, prefetch])
 }
 
 /// Wait for whichever comes first: Ctrl-C from a terminal, or SIGTERM.
@@ -271,6 +279,7 @@ pub(crate) async fn send(
     api: &str,
     to: &[String],
     subject: &str,
+    attach: &[std::path::PathBuf],
     body: Option<&str>,
 ) -> Result<()> {
     anyhow::ensure!(
@@ -279,10 +288,25 @@ pub(crate) async fn send(
     );
     let body = body_from_arg_or_stdin(body)?;
 
+    // Absolute, because the daemon reads them and it is not in this directory.
+    let attachments = attach
+        .iter()
+        .map(|path| {
+            std::fs::canonicalize(path)
+                .map(|p| p.to_string_lossy().into_owned())
+                .with_context(|| format!("cannot read {}", path.display()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
     let accepted: Accepted = Client::new(api)
         .post(
             "/api/v1/messages",
-            &serde_json::json!({ "to": to, "subject": subject, "body": body }),
+            &serde_json::json!({
+                "to": to,
+                "subject": subject,
+                "body": body,
+                "attachments": attachments,
+            }),
         )
         .await?;
 
