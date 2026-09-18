@@ -18,14 +18,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Skip if there are no targets yet
+      - name: Confirm there are targets to run
         id: probe
         run: |
           if [[ -d fuzz ]]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
-            echo "fuzz targets land with the wire formats in M1 (SPEC §14)"
-            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "fuzz/ is missing; SPEC §13.2 asks for three targets" >&2
+            exit 1
           fi
       - if: steps.probe.outputs.run == 'true'
         run: rustup toolchain install nightly
@@ -38,9 +38,16 @@ jobs:
       - name: Fuzz
         if: steps.probe.outputs.run == 'true'
         run: |
-          for target in $(cargo +nightly fuzz list); do
+          for target in $(cd fuzz && cargo +nightly fuzz list); do
             echo "::group::$target"
-            cargo +nightly fuzz run "$target" -- -max_total_time=120
+            mkdir -p "fuzz/corpus/$target"
+            seeds=""
+            [[ -d "fuzz/seeds/$target" ]] && seeds="fuzz/seeds/$target"
+            # Both directories. Without the seeds the fuzzer spends its whole
+            # budget discovering that random bytes are not JSON, which tests
+            # serde and nothing of ours.
+            cargo +nightly fuzz run "$target" "fuzz/corpus/$target" $seeds -- \
+              -max_total_time=120
             echo "::endgroup::"
           done
 

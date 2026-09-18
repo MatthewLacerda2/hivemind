@@ -9,3 +9,8 @@
 # checked in — it is about a diff, and a diff does not survive the branch.
 /mutants.out
 /mutants.out.old
+# libFuzzer's working directories. The seeds in `fuzz/seeds/` are checked in;
+# the corpus it grows from them is thousands of files and regenerable.
+/fuzz/corpus
+/fuzz/artifacts
+/fuzz/target

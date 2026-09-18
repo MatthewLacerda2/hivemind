@@ -101,6 +101,34 @@ mergeable PR="":
 scripts:
     python3 -m unittest discover --start-directory .github/scripts/tests --quiet
 
+# A signal, and the nightly workflow is where it lives properly — this is for
+# running one by hand while the code that failed is still in front of you.
+# Seeds are in `fuzz/seeds/` and checked in; without them the fuzzer spends its
+# budget discovering that random bytes are not JSON. Passing both directories
+# is what makes the difference: 159 lines of coverage from nothing, 971 from
+# the seeds.
+
+# Run the fuzz targets for a short budget (SPEC §13.2). Needs nightly
+fuzz target="" seconds="60":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v cargo-fuzz >/dev/null 2>&1; then
+        echo "fuzz: not installed — cargo install cargo-fuzz --locked" >&2
+        exit 1
+    fi
+    targets="{{target}}"
+    if [[ -z "$targets" ]]; then
+        targets=$(cd fuzz && cargo +nightly fuzz list)
+    fi
+    for t in $targets; do
+        echo "── $t"
+        mkdir -p "fuzz/corpus/$t"
+        seeds=""
+        [[ -d "fuzz/seeds/$t" ]] && seeds="fuzz/seeds/$t"
+        cargo +nightly fuzz run "$t" "fuzz/corpus/$t" $seeds -- \
+            -max_total_time={{seconds}}
+    done
+
 # A ratchet, not a target: the limits start just under the largest file that
 # exists and only ever come down. `just size --report` lists what to split next.
 
