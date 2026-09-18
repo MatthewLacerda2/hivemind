@@ -19,7 +19,7 @@ use crate::store::{MailStore, Mailbox};
 /// Bumping this throws the index away and rebuilds it. That is the whole
 /// migration story, and it is why the index must never hold anything the mail
 /// files do not (SPEC §4.3).
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// What a listing shows without opening the message (SPEC §9.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,7 +106,7 @@ pub struct Index {
 /// drops this and rebuilds from `mail/` (SPEC §4.3).
 const SCHEMA: &str = "
 CREATE TABLE messages (
-    id               TEXT PRIMARY KEY,
+    id               TEXT NOT NULL,
     thread_id        TEXT NOT NULL,
     in_reply_to      TEXT,
     from_node        BLOB NOT NULL,
@@ -115,7 +115,11 @@ CREATE TABLE messages (
     sender_kind      TEXT NOT NULL,
     sent_at          INTEGER NOT NULL,
     mailbox          TEXT NOT NULL,
-    attachment_names TEXT NOT NULL
+    attachment_names TEXT NOT NULL,
+    -- A message addressed to its own sender genuinely exists twice: once in
+    -- `sent` as our copy, once in `new` as the one we received. The pair is
+    -- the identity, not the id alone.
+    PRIMARY KEY (id, mailbox)
 ) STRICT;
 
 CREATE INDEX messages_by_sent_at ON messages(sent_at DESC);
@@ -235,7 +239,7 @@ impl Index {
                      (id, thread_id, in_reply_to, from_node, subject, kind,
                       sender_kind, sent_at, mailbox, attachment_names)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-                 ON CONFLICT(id) DO UPDATE SET
+                 ON CONFLICT(id, mailbox) DO UPDATE SET
                      thread_id = excluded.thread_id,
                      in_reply_to = excluded.in_reply_to,
                      from_node = excluded.from_node,
@@ -260,8 +264,8 @@ impl Index {
             ),
         )?;
 
-        // Keep the full-text row in step by replacing it outright; FTS5 has no
-        // upsert of its own.
+        // One shared full-text row per message id. FTS5 has no upsert, so it is
+        // replaced outright.
         sqlite(
             "could not clear the previous full-text row",
             self.conn
@@ -281,12 +285,12 @@ impl Index {
     ///
     /// # Errors
     /// Returns [`IndexError::Sqlite`] on failure.
-    pub fn set_mailbox(&self, id: Ulid, mailbox: Mailbox) -> Result<(), IndexError> {
+    pub fn set_mailbox(&self, id: Ulid, from: Mailbox, to: Mailbox) -> Result<(), IndexError> {
         sqlite(
             "could not update a message's mailbox",
             self.conn.execute(
-                "UPDATE messages SET mailbox = ?2 WHERE id = ?1",
-                rusqlite::params![id.to_string(), mailbox.as_str()],
+                "UPDATE messages SET mailbox = ?3 WHERE id = ?1 AND mailbox = ?2",
+                rusqlite::params![id.to_string(), from.as_str(), to.as_str()],
             ),
         )?;
         Ok(())
@@ -296,18 +300,32 @@ impl Index {
     ///
     /// # Errors
     /// Returns [`IndexError::Sqlite`] on failure.
-    pub fn remove(&self, id: Ulid) -> Result<(), IndexError> {
+    pub fn remove(&self, id: Ulid, mailbox: Mailbox) -> Result<(), IndexError> {
         let id = id.to_string();
         sqlite(
             "could not remove a message from the index",
-            self.conn
-                .execute("DELETE FROM messages WHERE id = ?1", [&id]),
+            self.conn.execute(
+                "DELETE FROM messages WHERE id = ?1 AND mailbox = ?2",
+                rusqlite::params![&id, mailbox.as_str()],
+            ),
         )?;
-        sqlite(
-            "could not remove a message from full-text search",
+
+        // One full-text row per message, shared by its copies: drop it only
+        // once the last copy is gone.
+        let remaining: i64 = sqlite(
+            "could not count remaining copies",
             self.conn
-                .execute("DELETE FROM messages_fts WHERE id = ?1", [&id]),
+                .query_row("SELECT COUNT(*) FROM messages WHERE id = ?1", [&id], |r| {
+                    r.get(0)
+                }),
         )?;
+        if remaining == 0 {
+            sqlite(
+                "could not remove a message from full-text search",
+                self.conn
+                    .execute("DELETE FROM messages_fts WHERE id = ?1", [&id]),
+            )?;
+        }
         Ok(())
     }
 
@@ -569,6 +587,41 @@ mod tests {
     }
 
     #[test]
+    fn a_message_addressed_to_its_own_sender_exists_in_two_mailboxes() {
+        // Our copy in `sent`, and the one we received in `new`. Both are real
+        // and a listing should show each in its own place.
+        let message = message_at(1_000, "note to self", "remember this");
+        let index = index_with(&[
+            (Mailbox::Sent, message.clone()),
+            (Mailbox::New, message.clone()),
+        ]);
+
+        let found = index.search(&Query::default()).expect("search");
+        assert_eq!(found.len(), 2);
+        assert!(found.iter().all(|s| s.id == message.id));
+        assert_eq!(index.unread_count().expect("count"), 1);
+    }
+
+    #[test]
+    fn removing_one_copy_leaves_the_other_searchable() {
+        let message = message_at(1_000, "dashboard PR", "body");
+        let index = index_with(&[
+            (Mailbox::Sent, message.clone()),
+            (Mailbox::New, message.clone()),
+        ]);
+        index.remove(message.id, Mailbox::New).expect("remove");
+
+        let by_text = index
+            .search(&Query {
+                text: Some("dashboard".to_owned()),
+                ..Query::default()
+            })
+            .expect("search");
+        assert_eq!(by_text.len(), 1, "the surviving copy must stay searchable");
+        assert_eq!(by_text[0].mailbox, Mailbox::Sent);
+    }
+
+    #[test]
     fn indexing_the_same_message_twice_leaves_one_row() {
         let message = message_at(1_000, "once", "body");
         let index = index_with(&[(Mailbox::New, message.clone()), (Mailbox::New, message)]);
@@ -609,7 +662,7 @@ mod tests {
         assert_eq!(index.unread_count().expect("count"), 1);
 
         index
-            .set_mailbox(message.id, Mailbox::Cur)
+            .set_mailbox(message.id, Mailbox::New, Mailbox::Cur)
             .expect("set mailbox");
         assert_eq!(index.unread_count().expect("count"), 0);
         assert_eq!(
@@ -758,7 +811,7 @@ mod tests {
     fn a_removed_message_disappears_from_search_and_from_full_text() {
         let message = message_at(1_000, "dashboard PR", "a");
         let index = index_with(&[(Mailbox::New, message.clone())]);
-        index.remove(message.id).expect("remove");
+        index.remove(message.id, Mailbox::New).expect("remove");
 
         assert!(index.search(&Query::default()).expect("search").is_empty());
         let by_text = index
@@ -848,7 +901,7 @@ mod tests {
                 match placed.get(&which).copied() {
                     Some(from) if from != mailbox => {
                         store.move_to(from, mailbox, message.id).expect("move");
-                        live.set_mailbox(message.id, mailbox).expect("set mailbox");
+                        live.set_mailbox(message.id, from, mailbox).expect("set mailbox");
                     }
                     Some(_) => {}
                     None => {

@@ -14,6 +14,9 @@
 
 use std::fmt;
 
+/// Re-exported so the rest of the workspace signs and verifies without taking a
+/// direct dependency on the Ed25519 implementation.
+pub use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde::de::{Unexpected, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest as _, Sha256};
