@@ -11,7 +11,29 @@ authors.workspace = true
 [dependencies]
 hivemind-core.workspace = true
 
+axum.workspace = true
+chrono.workspace = true
+getrandom.workspace = true
+hyper.workspace = true
+http-body-util.workspace = true
+hyper-util.workspace = true
+mdns-sd.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+tower.workspace = true
+tracing.workspace = true
+
 [dev-dependencies]
+axum.workspace = true
+# `start_paused` lets the delivery loop be tested over simulated hours.
+tokio = { workspace = true, features = ["test-util"] }
+tempfile.workspace = true
+ulid.workspace = true
 
 [lints]
 workspace = true

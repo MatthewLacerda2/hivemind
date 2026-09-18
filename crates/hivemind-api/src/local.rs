@@ -41,6 +41,78 @@ pub struct Me {
     pub unread: u64,
 }
 
+/// A peer, paired or merely seen (SPEC §7.1).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PeerSummary {
+    /// Its fingerprint, in display form.
+    pub id: String,
+    /// The short form people compare by eye.
+    pub short_id: String,
+    /// What it calls itself. Unverified (ADR 0003).
+    pub name: String,
+    /// Who owns it, if it said. Also unverified.
+    pub owner: Option<String>,
+    /// Where it can be reached, best guess first.
+    pub addrs: Vec<String>,
+    /// Whether mail will actually flow, or it is still waiting on a
+    /// confirmation from one side or the other (SPEC §6.2).
+    pub paired: bool,
+    /// When this side confirmed. `null` while still pending.
+    pub paired_at: Option<String>,
+    /// When we last heard from it.
+    pub last_seen: Option<String>,
+}
+
+impl From<hivemind_core::peerbook::Peer> for PeerSummary {
+    fn from(peer: hivemind_core::peerbook::Peer) -> Self {
+        Self {
+            id: peer.id.to_string(),
+            short_id: peer.id.short(),
+            addrs: peer
+                .addrs_by_preference()
+                .into_iter()
+                .map(hivemind_core::peerbook::PeerAddr::authority)
+                .collect(),
+            paired: true,
+            paired_at: Some(peer.paired_at.to_rfc3339()),
+            last_seen: peer.last_seen.map(|t| t.to_rfc3339()),
+            name: peer.name,
+            owner: peer.owner,
+        }
+    }
+}
+
+impl From<hivemind_core::peerbook::PendingPair> for PeerSummary {
+    fn from(pending: hivemind_core::peerbook::PendingPair) -> Self {
+        Self {
+            id: pending.id.to_string(),
+            short_id: pending.id.short(),
+            addrs: vec![pending.addr.authority()],
+            paired: false,
+            // Not paired from this side, whatever the other side has done.
+            paired_at: None,
+            last_seen: Some(pending.first_seen.to_rfc3339()),
+            name: pending.name,
+            owner: pending.owner,
+        }
+    }
+}
+
+/// What a discovery run turned up.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct Refreshed {
+    /// How many nodes answered and were greeted.
+    pub found: usize,
+}
+
+/// Where to look for a node to introduce ourselves to.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct JoinRequest {
+    /// A hostname or address, with an optional `:port`.
+    #[schema(example = "laptop.local:8400")]
+    pub host: String,
+}
+
 /// One row of a listing (SPEC §9.1).
 #[derive(Debug, Serialize, ToSchema)]
 pub struct MessageSummary {
@@ -192,6 +264,12 @@ pub fn router(state: AppState) -> Router {
                 .url("/openapi.json", crate::openapi::ApiDoc::openapi()),
         )
         .route("/api/v1/me", get(me))
+        .route("/api/v1/peers", get(list_peers))
+        .route("/api/v1/peers/join", post(join_peer))
+        .route("/api/v1/peers/refresh", post(refresh_peers))
+        .route("/api/v1/peers/trust-network", post(trust_network))
+        .route("/api/v1/peers/{id}", axum::routing::delete(remove_peer))
+        .route("/api/v1/peers/{id}/pair", post(confirm_pair))
         .route("/api/v1/messages", get(list_messages).post(send_message))
         .route("/api/v1/messages/{id}", get(get_message))
         .route("/api/v1/messages/{id}/reply", post(reply_to_message))
@@ -220,6 +298,102 @@ pub(crate) async fn me(State(service): State<AppState>) -> Result<Json<Me>, Prob
         version: env!("CARGO_PKG_VERSION").to_owned(),
         unread: service.unread_count()?,
     }))
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/peers",
+    responses((status = 200, body = Vec<PeerSummary>), (status = 500, body = Problem)),
+    tag = "peers"
+)]
+pub(crate) async fn list_peers(
+    State(service): State<AppState>,
+) -> Result<Json<Vec<PeerSummary>>, Problem> {
+    // Paired and merely-seen in one list, because "who can I mail?" and "who
+    // is waiting on me?" are the same question asked at different moments.
+    let mut peers: Vec<PeerSummary> = service
+        .paired_peers()?
+        .into_iter()
+        .map(PeerSummary::from)
+        .collect();
+    peers.extend(service.pending_pairs()?.into_iter().map(PeerSummary::from));
+
+    Ok(Json(peers))
+}
+
+#[utoipa::path(
+    post, path = "/api/v1/peers/join",
+    request_body = JoinRequest,
+    responses(
+        (status = 200, body = PeerSummary),
+        (status = 400, body = Problem),
+        (status = 502, body = Problem)
+    ),
+    tag = "peers"
+)]
+pub(crate) async fn join_peer(
+    State(service): State<AppState>,
+    Json(request): Json<JoinRequest>,
+) -> Result<Json<PeerSummary>, Problem> {
+    let pending = service.join(&request.host).await?;
+    Ok(Json(PeerSummary::from(pending)))
+}
+
+#[utoipa::path(
+    post, path = "/api/v1/peers/refresh",
+    responses((status = 200, body = Refreshed), (status = 500, body = Problem)),
+    tag = "peers"
+)]
+pub(crate) async fn refresh_peers(
+    State(service): State<AppState>,
+) -> Result<Json<Refreshed>, Problem> {
+    Ok(Json(Refreshed {
+        found: service.refresh_peers().await?,
+    }))
+}
+
+#[utoipa::path(
+    post, path = "/api/v1/peers/trust-network",
+    responses((status = 200, body = Vec<PeerSummary>), (status = 500, body = Problem)),
+    tag = "peers"
+)]
+pub(crate) async fn trust_network(
+    State(service): State<AppState>,
+) -> Result<Json<Vec<PeerSummary>>, Problem> {
+    Ok(Json(
+        service
+            .confirm_all_discovered()?
+            .into_iter()
+            .map(PeerSummary::from)
+            .collect(),
+    ))
+}
+
+#[utoipa::path(
+    post, path = "/api/v1/peers/{id}/pair",
+    params(("id" = String, Path, description = "The peer's full or short id")),
+    responses((status = 200, body = PeerSummary), (status = 403, body = Problem)),
+    tag = "peers"
+)]
+pub(crate) async fn confirm_pair(
+    State(service): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<PeerSummary>, Problem> {
+    let peer = service.confirm_pair(service.resolve_peer(&id)?)?;
+    Ok(Json(PeerSummary::from(peer)))
+}
+
+#[utoipa::path(
+    delete, path = "/api/v1/peers/{id}",
+    params(("id" = String, Path, description = "The peer's full or short id")),
+    responses((status = 204, description = "Forgotten"), (status = 403, body = Problem)),
+    tag = "peers"
+)]
+pub(crate) async fn remove_peer(
+    State(service): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, Problem> {
+    service.remove_peer(service.resolve_peer(&id)?)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[utoipa::path(
@@ -434,7 +608,16 @@ mod tests {
     fn app() -> (tempfile::TempDir, Router, NodeId) {
         let dir = tempfile::tempdir().expect("temp dir");
         let identity = NodeId::from_certificate_der(b"this node");
-        let service = MailService::open(dir.path(), identity, SigningKey::from_bytes(&[11u8; 32]))
+        let node = crate::service::NodeDescription {
+            id: identity,
+            certificate: b"this node".to_vec(),
+            private_key: Vec::new(),
+            name: "test".to_owned(),
+            owner: None,
+            callback_host: "127.0.0.1".to_owned(),
+            peer_port: 8400,
+        };
+        let service = MailService::open(dir.path(), node, SigningKey::from_bytes(&[11u8; 32]))
             .expect("service");
         let router = router(Arc::new(service));
         (dir, router, identity)

@@ -65,6 +65,22 @@ impl Client {
     }
 }
 
+impl Client {
+    /// DELETE, discarding the (empty) response body.
+    pub(crate) async fn delete(&self, path: &str) -> Result<()> {
+        let response = self
+            .http
+            .delete(format!("{}{path}", self.base))
+            .send()
+            .await
+            .map_err(|e| not_running(&self.base, e))?;
+        if response.status().is_success() {
+            return Ok(());
+        }
+        Err(problem_error(response).await)
+    }
+}
+
 /// The overwhelmingly likely cause of a connection error is that the daemon is
 /// not running, so say that instead of showing a transport error.
 fn not_running(base: &str, error: reqwest::Error) -> anyhow::Error {

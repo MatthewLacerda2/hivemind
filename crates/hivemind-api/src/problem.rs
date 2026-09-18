@@ -27,6 +27,14 @@ pub enum ProblemType {
     InvalidMessage,
     /// The message was not addressed to anybody.
     NoRecipients,
+    /// The caller is not paired with this node (SPEC §6.2).
+    NotPaired,
+    /// What the caller claimed does not match the certificate it presented.
+    IdentityMismatch,
+    /// The message's signature did not verify.
+    BadSignature,
+    /// A host we were asked to join could not be reached, or refused us.
+    PeerUnreachable,
     /// Something went wrong that is not the caller's fault.
     Internal,
 }
@@ -39,6 +47,10 @@ impl ProblemType {
             Self::MessageNotFound => "message-not-found",
             Self::InvalidMessage => "invalid-message",
             Self::NoRecipients => "no-recipients",
+            Self::NotPaired => "not-paired",
+            Self::IdentityMismatch => "identity-mismatch",
+            Self::BadSignature => "bad-signature",
+            Self::PeerUnreachable => "peer-unreachable",
             Self::Internal => "internal",
         }
     }
@@ -50,6 +62,10 @@ impl ProblemType {
             Self::MessageNotFound => "No such message",
             Self::InvalidMessage => "Message is not acceptable",
             Self::NoRecipients => "Message has no recipients",
+            Self::NotPaired => "Not paired",
+            Self::IdentityMismatch => "Identity does not match the certificate",
+            Self::BadSignature => "Signature does not verify",
+            Self::PeerUnreachable => "Peer could not be reached",
             Self::Internal => "Internal error",
         }
     }
@@ -60,15 +76,25 @@ impl ProblemType {
         match self {
             Self::MessageNotFound => StatusCode::NOT_FOUND,
             Self::InvalidMessage | Self::NoRecipients => StatusCode::UNPROCESSABLE_ENTITY,
+            // SPEC §6.2 names this status explicitly.
+            Self::NotPaired => StatusCode::FORBIDDEN,
+            Self::IdentityMismatch | Self::BadSignature => StatusCode::BAD_REQUEST,
+            // Not this node's fault and not the caller's: the machine it
+            // asked us to talk to did not answer.
+            Self::PeerUnreachable => StatusCode::BAD_GATEWAY,
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
     /// Every slug, for the generated documentation.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 8] = [
         Self::MessageNotFound,
         Self::InvalidMessage,
         Self::NoRecipients,
+        Self::NotPaired,
+        Self::IdentityMismatch,
+        Self::BadSignature,
+        Self::PeerUnreachable,
         Self::Internal,
     ];
 }
@@ -121,9 +147,14 @@ impl From<ServiceError> for Problem {
             ServiceError::NoSuchMessage { .. } => ProblemType::MessageNotFound,
             ServiceError::Invalid(_) => ProblemType::InvalidMessage,
             ServiceError::NoRecipients => ProblemType::NoRecipients,
+            ServiceError::BadSignature => ProblemType::BadSignature,
+            ServiceError::NoSuchPeer { .. } => ProblemType::NotPaired,
+            ServiceError::Peer(_) => ProblemType::PeerUnreachable,
+            ServiceError::IdentityMismatch(_) => ProblemType::IdentityMismatch,
             ServiceError::Store(_)
             | ServiceError::Index(_)
             | ServiceError::Canonical(_)
+            | ServiceError::PeerBook(_)
             | ServiceError::Unavailable => ProblemType::Internal,
         };
 

@@ -31,6 +31,14 @@ pub struct Config {
     pub local_port: u16,
     /// Post a desktop notification when mail arrives (SPEC §9.4).
     pub notifications: bool,
+    /// Advertise on the LAN and browse for peers over mDNS (SPEC §5.1).
+    ///
+    /// On by default, because finding the laptop on the next desk without
+    /// typing an address is most of the point. Worth turning off on a network
+    /// you would rather not announce yourself on — and the integration tests
+    /// turn it off so that daemons on the same machine do not discover each
+    /// other and every other hivemind on the developer's LAN.
+    pub discovery: bool,
     /// Fetch non-inline attachments as soon as a message arrives, rather than
     /// on first access (SPEC §8).
     pub prefetch: bool,
@@ -48,6 +56,7 @@ impl Default for Config {
             peer_port: DEFAULT_PEER_PORT,
             local_port: DEFAULT_LOCAL_PORT,
             notifications: true,
+            discovery: true,
             prefetch: false,
             max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
             inline_max_bytes: DEFAULT_INLINE_MAX_BYTES,
@@ -154,6 +163,11 @@ impl Config {
         {
             self.notifications = flag;
         }
+        if let Ok(value) = std::env::var("HIVEMIND_DISCOVERY")
+            && let Some(flag) = parse_bool(&value)
+        {
+            self.discovery = flag;
+        }
         if let Ok(value) = std::env::var("HIVEMIND_PREFETCH")
             && let Some(flag) = parse_bool(&value)
         {
@@ -212,6 +226,22 @@ fn parse_bool(value: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovery_is_on_unless_it_is_turned_off() {
+        // Finding the laptop on the next desk without typing an address is
+        // most of the point, so this defaults on. Setting the environment
+        // variable is not tested here: `std::env::set_var` is unsafe and this
+        // crate denies unsafe code, which is the better trade.
+        assert!(Config::default().discovery);
+
+        let off: Config = toml::from_str("discovery = false").expect("parses");
+        assert!(!off.discovery);
+        assert!(
+            off.notifications,
+            "an unset field should keep its default, not become false"
+        );
+    }
 
     #[test]
     fn a_missing_config_file_is_the_defaults_not_an_error() {

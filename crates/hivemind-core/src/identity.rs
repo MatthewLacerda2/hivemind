@@ -158,6 +158,20 @@ impl Identity {
     pub fn certificate_der(&self) -> &[u8] {
         &self.certificate_der
     }
+
+    /// The private key as PKCS#8 DER, which is what rustls wants.
+    ///
+    /// # Errors
+    /// [`IdentityError::Certificate`] if the key cannot be encoded.
+    pub fn private_key_pkcs8(&self) -> Result<Vec<u8>, IdentityError> {
+        use ed25519_dalek::pkcs8::EncodePrivateKey as _;
+        Ok(self
+            .signing_key
+            .to_pkcs8_der()
+            .map_err(|e| IdentityError::Certificate(e.to_string()))?
+            .as_bytes()
+            .to_vec())
+    }
 }
 
 /// Write a file only the owner can read.
@@ -209,6 +223,16 @@ mod tests {
         let first = Identity::from_seed([3u8; 32]).expect("identity");
         let second = Identity::from_seed([3u8; 32]).expect("identity");
         assert_eq!(first.node_id(), second.node_id());
+    }
+
+    #[test]
+    fn the_private_key_exports_as_pkcs8_for_rustls() {
+        let identity = Identity::from_seed([3u8; 32]).expect("identity");
+        let pkcs8 = identity.private_key_pkcs8().expect("export");
+        // The same key rcgen was handed, so the certificate and the TLS key
+        // are one identity rather than two that travel together.
+        assert!(!pkcs8.is_empty());
+        assert_eq!(pkcs8, identity.private_key_pkcs8().expect("stable"));
     }
 
     #[test]
