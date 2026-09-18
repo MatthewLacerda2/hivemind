@@ -38,8 +38,24 @@ impl MailService {
     /// claims to be, or [`ServiceError::PeerBook`] if the offer cannot be
     /// written.
     pub async fn join(&self, host: &str) -> Result<PendingPair, ServiceError> {
+        self.greet(host, AddrSource::Manual).await
+    }
+
+    /// `join`, recording how the address was come by.
+    ///
+    /// `join` is what a person typed; discovery reaches the same code and did
+    /// not. The distinction is what `pair --trust-network` turns on: "I found
+    /// this myself, on a network I control" is a different claim from
+    /// "somebody typed a host", and the flag used to cover only mDNS because
+    /// Tailscale's discovery went through `join` and inherited `Manual` (#21).
+    async fn greet(&self, host: &str, source: AddrSource) -> Result<PendingPair, ServiceError> {
         let (hostname, port) = split_host(host, DEFAULT_PEER_PORT);
-        let addr = PeerAddr::manual(hostname.clone(), port);
+        let addr = PeerAddr {
+            host: hostname.clone(),
+            port,
+            source,
+            last_ok: None,
+        };
         let authority = addr.authority();
 
         let client = hivemind_net::client::PeerClient::joining(&self.tls)?;
@@ -150,14 +166,21 @@ impl MailService {
         // agreement: it records a pending offer that still needs a human on
         // both sides (SPEC §6.2). Without it there would be nothing for
         // `hivemind peers` to list and nothing to confirm.
-        let mut found = 0;
+        // Counted by node, not by address. The same machine answers on its
+        // MagicDNS name *and* its IP — trying both is deliberate, since which
+        // one resolves depends on the asking machine's DNS — so counting
+        // greetings reported two nodes where `hivemind peers` then listed one
+        // (#22).
+        let mut greeted: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
         for authority in reachable {
-            match self.join(&authority).await {
-                Ok(_) => found += 1,
+            match self.greet(&authority, AddrSource::Tailscale).await {
+                Ok(pending) => {
+                    greeted.insert(pending.id);
+                }
                 Err(error) => tracing::debug!(%authority, %error, "could not greet a peer"),
             }
         }
-        Ok(found)
+        Ok(greeted.len())
     }
 
     /// Is this node allowed to send us mail?
@@ -255,10 +278,17 @@ impl MailService {
     /// # Errors
     /// [`ServiceError::PeerBook`] if the book cannot be written.
     pub fn confirm_all_discovered(&self) -> Result<Vec<Peer>, ServiceError> {
+        // Both kinds of discovery, not just mDNS. A tailnet is a *stronger*
+        // boundary than a LAN segment, not a weaker one — only what was
+        // authenticated and authorised gets in — and it was excluded by
+        // accident rather than by argument (#21).
+        //
+        // `Manual` is deliberately not here: somebody who typed a host made a
+        // choice, and erasing it with a blanket flag would be a surprise.
         let discovered: Vec<NodeId> = self
             .peers()?
             .pending()
-            .filter(|p| p.addr.source == AddrSource::Mdns)
+            .filter(|p| matches!(p.addr.source, AddrSource::Mdns | AddrSource::Tailscale))
             .map(|p| p.id)
             .collect();
 

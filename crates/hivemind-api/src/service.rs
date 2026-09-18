@@ -1384,6 +1384,77 @@ mod tests {
         (dir, service)
     }
 
+    /// Record an offer as if it had arrived from `source`.
+    fn offer_from(
+        service: &MailService,
+        friend: &hivemind_core::identity::Identity,
+        source: AddrSource,
+    ) {
+        service
+            .record_pairing_offer(
+                friend.node_id(),
+                &crate::peer::Handshake {
+                    id: friend.node_id().to_string(),
+                    name: "theirs".to_owned(),
+                    owner: None,
+                    version: "0.1.0".to_owned(),
+                    callback_host: "10.0.0.2".to_owned(),
+                    callback_port: 8400,
+                    gossip: None,
+                },
+                friend.certificate_der().to_vec(),
+                PeerAddr {
+                    host: "10.0.0.2".to_owned(),
+                    port: 8400,
+                    source,
+                    last_ok: None,
+                },
+            )
+            .expect("offer");
+    }
+
+    #[test]
+    fn trust_network_covers_tailscale_as_well_as_mdns() {
+        // #21. A tailnet is a stronger boundary than a LAN segment, not a
+        // weaker one — only what was authenticated gets in — and it was
+        // excluded because Tailscale's discovery went through `join` and
+        // inherited its `Manual` source.
+        let (_dir, service) = service();
+        let lan = hivemind_core::identity::Identity::from_seed([60u8; 32]).expect("identity");
+        let tailnet = hivemind_core::identity::Identity::from_seed([61u8; 32]).expect("identity");
+
+        offer_from(&service, &lan, AddrSource::Mdns);
+        offer_from(&service, &tailnet, AddrSource::Tailscale);
+
+        let paired = service.confirm_all_discovered().expect("confirm");
+        let ids: std::collections::HashSet<_> = paired.iter().map(|p| p.id).collect();
+
+        assert!(ids.contains(&lan.node_id()), "mDNS was always covered");
+        assert!(
+            ids.contains(&tailnet.node_id()),
+            "and a tailnet is the network somebody is most likely to control"
+        );
+    }
+
+    #[test]
+    fn trust_network_leaves_alone_what_somebody_typed() {
+        // Somebody who typed a host made a choice. Erasing it with a blanket
+        // flag would be a surprise, and the flag is about a *network* being
+        // trusted rather than about one address.
+        let (_dir, service) = service();
+        let typed = hivemind_core::identity::Identity::from_seed([62u8; 32]).expect("identity");
+        offer_from(&service, &typed, AddrSource::Manual);
+
+        assert!(
+            service
+                .confirm_all_discovered()
+                .expect("confirm")
+                .is_empty(),
+            "a manually joined peer still needs its own confirmation"
+        );
+        assert!(!service.is_paired(typed.node_id()).expect("is_paired"));
+    }
+
     #[test]
     fn a_short_id_names_the_peer_it_belongs_to() {
         // It is the form the interface teaches: `peers`, `status` and `init`
