@@ -66,9 +66,26 @@ impl Default for Config {
 
 /// The machine's hostname, or something honest if it will not say.
 fn default_name() -> String {
+    // `HOSTNAME` first, because somebody who exported it meant something by
+    // it — but only first. It is a *shell* variable: bash sets it for
+    // interactive sessions and nothing sets it for a process started without
+    // one, which is how an agent runs commands and how the daemon starts under
+    // systemd. Reading it alone gave every Linux node the name
+    // `hivemind-node`, and worked on macOS by accident, which is worse than
+    // failing on both — it hid the problem from whoever was developing (#20).
     std::env::var("HOSTNAME")
         .ok()
-        .filter(|h| !h.trim().is_empty())
+        .or_else(|| {
+            hostname::get()
+                .ok()
+                .map(|h| h.to_string_lossy().into_owned())
+        })
+        .map(|name| {
+            // `laptop.local` and `laptop.lan` are the same machine as
+            // `laptop`, and the suffix is noise in somebody's inbox.
+            name.split('.').next().unwrap_or(&name).trim().to_owned()
+        })
+        .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "hivemind-node".to_owned())
 }
 
@@ -236,6 +253,48 @@ fn parse_bool(value: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_default_name_does_not_depend_on_a_shell_variable() {
+        // #20. `HOSTNAME` is set by bash for interactive sessions and by
+        // nothing else — not for a process an agent spawns, not for a daemon
+        // under systemd. Reading only that gave every Linux node the name
+        // `hivemind-node`, while macOS worked by accident.
+        //
+        // The environment cannot be cleared here: `std::env::set_var` is
+        // unsafe and this crate forbids unsafe. So the property is asserted
+        // through the machine's real hostname, which is what the fallback
+        // reads — and which on any developer machine or CI runner is neither
+        // empty nor the placeholder.
+        let from_system = hostname::get()
+            .expect("a machine has a hostname")
+            .to_string_lossy()
+            .into_owned();
+
+        assert!(!from_system.trim().is_empty());
+        assert_ne!(
+            from_system, "hivemind-node",
+            "the placeholder is what this test exists to stop being the answer"
+        );
+
+        // And with `HOSTNAME` unset, that is what `default_name` returns.
+        if std::env::var("HOSTNAME").is_err() {
+            assert_eq!(
+                default_name(),
+                from_system.split('.').next().unwrap_or(&from_system)
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_loses_its_domain_suffix() {
+        // `laptop.local` and `laptop.lan` are the same machine as `laptop`,
+        // and the suffix is noise in somebody's inbox.
+        let strip = |name: &str| name.split('.').next().unwrap_or(name).trim().to_owned();
+        assert_eq!(strip("laptop.local"), "laptop");
+        assert_eq!(strip("arch.lan"), "arch");
+        assert_eq!(strip("plain"), "plain");
+    }
 
     #[test]
     fn every_config_key_is_documented_in_the_readme() {
