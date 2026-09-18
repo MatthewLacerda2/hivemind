@@ -13,6 +13,7 @@ hivemind-core.workspace = true
 
 axum.workspace = true
 chrono.workspace = true
+getrandom.workspace = true
 hyper.workspace = true
 http-body-util.workspace = true
 hyper-util.workspace = true
@@ -28,7 +29,10 @@ tracing.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+# `start_paused` lets the delivery loop be tested over simulated hours.
+tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
+ulid.workspace = true
 
 [lints]
 workspace = true

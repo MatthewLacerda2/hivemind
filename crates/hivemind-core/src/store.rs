@@ -82,6 +82,16 @@ pub enum StoreError {
         #[source]
         source: std::io::Error,
     },
+    /// An operation was asked for on a mailbox that cannot support it.
+    ///
+    /// `out/` holds [`Outbound`] envelopes rather than bare messages, so it
+    /// takes [`MailStore::put_outbound`] and leaves by
+    /// [`MailStore::promote_to_sent`]; the generic operations refuse it.
+    #[error("{mailbox}/ holds delivery envelopes, not plain messages")]
+    WrongMailbox {
+        /// The mailbox that was asked for.
+        mailbox: &'static str,
+    },
     /// A file in the store could not be parsed as a message.
     #[error("message file {path} is not readable as a message")]
     Corrupt {
@@ -208,9 +218,40 @@ impl MailStore {
     /// the same id.
     ///
     /// # Errors
-    /// Returns [`StoreError::Io`] if the write or rename fails.
+    /// Returns [`StoreError::WrongMailbox`] for `out/`, which holds
+    /// [`Outbound`] envelopes — use [`MailStore::put_outbound`]. Returns
+    /// [`StoreError::Io`] if the write or rename fails.
     pub fn put(&self, mailbox: Mailbox, message: &Message) -> Result<(), StoreError> {
+        Self::refuse_outbox(mailbox)?;
         self.write_json(mailbox, message.id, message)
+    }
+
+    /// Delete a message, if it is there.
+    ///
+    /// Not an error when it is already gone: the caller wanted it removed, and
+    /// it is removed.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Io`] if the file exists but cannot be deleted.
+    pub fn remove(&self, mailbox: Mailbox, id: Ulid) -> Result<(), StoreError> {
+        match fs::remove_file(self.path_of(mailbox, id)) {
+            Ok(()) => Ok(()),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(StoreError::Io {
+                context: format!("could not remove {id} from {}", mailbox.as_str()),
+                source,
+            }),
+        }
+    }
+
+    /// `out/` is the one mailbox whose files are not bare messages.
+    fn refuse_outbox(mailbox: Mailbox) -> Result<(), StoreError> {
+        if mailbox == Mailbox::Out {
+            return Err(StoreError::WrongMailbox {
+                mailbox: mailbox.as_str(),
+            });
+        }
+        Ok(())
     }
 
     /// Write any JSON body into a mailbox, atomically.
@@ -345,12 +386,32 @@ impl MailStore {
             .collect())
     }
 
+    /// Finish delivery: write the message to `sent/` and drop the envelope.
+    ///
+    /// `sent/` is read like any other mailbox, so the per-recipient delivery
+    /// state is left behind rather than renamed along with the message.
+    ///
+    /// The order is deliberate. `sent/` is written first and `out/` cleared
+    /// after, so a crash between the two leaves the message in both — and
+    /// redelivery is always safe (SPEC §8) where losing it is not.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Io`] if either step fails.
+    pub fn promote_to_sent(&self, outbound: &Outbound) -> Result<(), StoreError> {
+        self.put(Mailbox::Sent, &outbound.message)?;
+        self.remove(Mailbox::Out, outbound.message.id)
+    }
+
     /// Move a message between mailboxes, leaving its bytes untouched.
     ///
     /// # Errors
-    /// Returns [`StoreError::NotFound`] if the message is not in `from`, or
-    /// [`StoreError::Io`] if the rename fails.
+    /// Returns [`StoreError::WrongMailbox`] if either side is `out/`, whose
+    /// files are envelopes rather than messages — delivery leaves it through
+    /// [`MailStore::promote_to_sent`]. Returns [`StoreError::NotFound`] if the
+    /// message is not in `from`, or [`StoreError::Io`] if the rename fails.
     pub fn move_to(&self, from: Mailbox, to: Mailbox, id: Ulid) -> Result<(), StoreError> {
+        Self::refuse_outbox(from)?;
+        Self::refuse_outbox(to)?;
         if from == to {
             return Ok(());
         }
@@ -413,8 +474,8 @@ mod tests {
     fn a_message_written_to_a_mailbox_reads_back_identical() {
         let (_dir, store) = store();
         let message = fixture();
-        store.put(Mailbox::Out, &message).expect("put");
-        assert_eq!(store.get(Mailbox::Out, message.id).expect("get"), message);
+        store.put(Mailbox::Sent, &message).expect("put");
+        assert_eq!(store.get(Mailbox::Sent, message.id).expect("get"), message);
     }
 
     #[test]
@@ -433,9 +494,9 @@ mod tests {
     #[test]
     fn writing_leaves_no_temporary_files_behind() {
         let (dir, store) = store();
-        store.put(Mailbox::Out, &fixture()).expect("put");
+        store.put(Mailbox::Sent, &fixture()).expect("put");
 
-        let entries: Vec<_> = fs::read_dir(dir.path().join("mail").join("out"))
+        let entries: Vec<_> = fs::read_dir(dir.path().join("mail").join("sent"))
             .expect("read dir")
             .filter_map(Result::ok)
             .map(|e| e.file_name().to_string_lossy().into_owned())
@@ -556,8 +617,105 @@ mod tests {
     fn moving_a_message_that_is_not_there_reports_not_found() {
         let (_dir, store) = store();
         assert!(matches!(
-            store.move_to(Mailbox::Out, Mailbox::Sent, fixture().id),
+            store.move_to(Mailbox::New, Mailbox::Cur, fixture().id),
             Err(StoreError::NotFound { .. })
         ));
+    }
+
+    #[test]
+    fn the_outbox_refuses_a_bare_message_because_it_holds_envelopes() {
+        // Writing one here produced a file nothing could read back: `get`
+        // wanted an Outbound and the index skipped it, so the sender could not
+        // see their own message. Refusing it is the only way that cannot
+        // silently recur.
+        let (_dir, store) = store();
+        assert!(matches!(
+            store.put(Mailbox::Out, &fixture()),
+            Err(StoreError::WrongMailbox { .. })
+        ));
+    }
+
+    #[test]
+    fn a_delivered_message_is_promoted_to_sent_as_a_plain_message() {
+        // `sent/` is read like any other mailbox, so the delivery bookkeeping
+        // must be dropped on the way rather than renamed along with it.
+        let (_dir, store) = store();
+        let message = fixture();
+        let outbound = Outbound {
+            recipients: vec![RecipientState::pending(message.from)],
+            message: message.clone(),
+        };
+        store.put_outbound(&outbound).expect("put_outbound");
+
+        store.promote_to_sent(&outbound).expect("promote");
+
+        assert_eq!(
+            store
+                .get(Mailbox::Sent, message.id)
+                .expect("read as a message"),
+            message
+        );
+        assert!(
+            matches!(
+                store.get_outbound(message.id),
+                Err(StoreError::NotFound { .. })
+            ),
+            "the outbox copy should be gone"
+        );
+    }
+
+    #[test]
+    fn promoting_writes_sent_before_removing_out_so_a_crash_redelivers() {
+        // Redelivery is safe (SPEC §8); losing the message is not. If the
+        // order were reversed, a crash between the two steps would drop it.
+        let (_dir, store) = store();
+        let message = fixture();
+        let outbound = Outbound {
+            recipients: vec![RecipientState::pending(message.from)],
+            message: message.clone(),
+        };
+        store.put_outbound(&outbound).expect("put_outbound");
+        store.promote_to_sent(&outbound).expect("promote");
+
+        // Promoting again is a no-op rather than an error, because that is
+        // what resuming after a crash looks like.
+        store.promote_to_sent(&outbound).expect("promote again");
+        assert!(store.get(Mailbox::Sent, message.id).is_ok());
+    }
+
+    #[test]
+    fn moving_into_or_out_of_the_outbox_is_refused() {
+        let (_dir, store) = store();
+        let message = fixture();
+        store.put(Mailbox::New, &message).expect("put");
+
+        assert!(matches!(
+            store.move_to(Mailbox::New, Mailbox::Out, message.id),
+            Err(StoreError::WrongMailbox { .. })
+        ));
+        assert!(matches!(
+            store.move_to(Mailbox::Out, Mailbox::Sent, message.id),
+            Err(StoreError::WrongMailbox { .. })
+        ));
+    }
+
+    #[test]
+    fn removing_a_message_leaves_the_other_mailboxes_alone() {
+        let (_dir, store) = store();
+        let message = fixture();
+        store.put(Mailbox::New, &message).expect("put");
+        store.put(Mailbox::Sent, &message).expect("put");
+
+        store.remove(Mailbox::New, message.id).expect("remove");
+
+        assert!(store.get(Mailbox::New, message.id).is_err());
+        assert!(store.get(Mailbox::Sent, message.id).is_ok());
+    }
+
+    #[test]
+    fn removing_something_that_is_not_there_is_not_an_error() {
+        // The caller wanted it gone and it is gone.
+        let (_dir, store) = store();
+        store.remove(Mailbox::New, fixture().id).expect("remove");
     }
 }

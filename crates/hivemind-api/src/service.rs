@@ -23,7 +23,7 @@ use hivemind_core::peer::NodeId;
 use hivemind_core::peerbook::{
     CertificateDer, Peer, PeerAddr, PeerBook, PeerBookError, PendingPair,
 };
-use hivemind_core::store::{MailStore, Mailbox, StoreError};
+use hivemind_core::store::{MailStore, Mailbox, Outbound, RecipientState, StoreError};
 use tokio::sync::broadcast;
 use ulid::Ulid;
 
@@ -285,21 +285,38 @@ impl MailService {
         message.validate()?;
         message.sign(&self.signing_key)?;
 
-        self.put(Mailbox::Out, &message)?;
+        // SPEC §8: recipients are expanded at send time and the expansion is
+        // stored, so a peer that pairs tomorrow does not receive today's
+        // message to `everyone`.
+        let expanded = self.expand_recipients(&message.to)?;
 
-        // Local delivery. With no peers yet, a message addressed to us is the
-        // whole of M1's round trip (SPEC §14).
-        if self.addresses_us(&message) {
+        // Local delivery happens here rather than over a socket: a node does
+        // not need to be paired with itself.
+        if expanded.contains(&self.identity) {
             let mut received = message.clone();
             received.received_at = Some(Utc::now().trunc_subsecs(3));
             self.put(Mailbox::New, &received)?;
             let _ = self.events.send(Event::MessageReceived { id });
         }
 
-        // Nothing is left to deliver remotely until M3, so the outbox copy is
-        // already done.
-        self.move_message(Mailbox::Out, Mailbox::Sent, id)?;
-        let _ = self.events.send(Event::MessageDelivered { id });
+        let outbound = Outbound {
+            recipients: expanded
+                .into_iter()
+                .filter(|node| *node != self.identity)
+                .map(RecipientState::pending)
+                .collect(),
+            message: message.clone(),
+        };
+
+        // Always through the outbox, even when there is nothing to deliver.
+        // One path means a crash anywhere in it leaves the same recoverable
+        // state, and the sender can see their own message either way.
+        self.store.put_outbound(&outbound)?;
+        self.index()?.upsert(Mailbox::Out, &message)?;
+
+        if outbound.is_complete() {
+            self.complete_delivery(&outbound)?;
+        }
 
         Ok(message)
     }
@@ -628,20 +645,13 @@ impl MailService {
         Ok(())
     }
 
-    fn move_message(&self, from: Mailbox, to: Mailbox, id: Ulid) -> Result<(), ServiceError> {
-        self.store.move_to(from, to, id)?;
-        self.index()?.set_mailbox(id, from, to)?;
+    /// Every recipient has it: move `out/` → `sent/` and say so (SPEC §8).
+    fn complete_delivery(&self, outbound: &Outbound) -> Result<(), ServiceError> {
+        let id = outbound.message.id;
+        self.store.promote_to_sent(outbound)?;
+        self.index()?.set_mailbox(id, Mailbox::Out, Mailbox::Sent)?;
+        let _ = self.events.send(Event::MessageDelivered { id });
         Ok(())
-    }
-
-    fn addresses_us(&self, message: &Message) -> bool {
-        message.to.iter().any(|recipient| match recipient {
-            Recipient::Node(node) => *node == self.identity,
-            // No peer book yet, so we are the only machine `everyone` reaches.
-            Recipient::Everyone => true,
-            // `owner` needs the peer book to resolve; it arrives with M3.
-            Recipient::Owner(_) => false,
-        })
     }
 
     fn thread_id_of(&self, parent: Ulid) -> Result<Ulid, ServiceError> {

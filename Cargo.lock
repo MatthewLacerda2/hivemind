@@ -1072,6 +1072,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "chrono",
+ "getrandom 0.3.4",
  "hivemind-core",
  "http-body-util",
  "hyper",
@@ -1086,6 +1087,7 @@ dependencies = [
  "tokio-rustls",
  "tower",
  "tracing",
+ "ulid",
 ]
 
 [[package]]

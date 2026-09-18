@@ -434,10 +434,19 @@ impl Index {
 
         for mailbox in Mailbox::ALL {
             for id in store.list(mailbox)? {
+                // `out/` holds an Outbound envelope: the signed message plus
+                // the per-recipient delivery state, which cannot live inside
+                // the message because it changes after signing.
+                let message = if mailbox == Mailbox::Out {
+                    store.get_outbound(id).map(|o| o.message)
+                } else {
+                    store.get(mailbox, id)
+                };
+
                 // A message that will not parse is skipped rather than fatal:
                 // the index is a cache, and refusing to start because of one
                 // bad file would take the other thousand with it.
-                if let Ok(message) = store.get(mailbox, id) {
+                if let Ok(message) = message {
                     self.upsert(mailbox, &message)?;
                 }
             }
@@ -841,6 +850,40 @@ mod tests {
     }
 
     #[test]
+    fn a_message_still_being_delivered_is_indexed_from_its_outbox_envelope() {
+        // `out/` holds an Outbound, not a bare Message, because per-recipient
+        // delivery state cannot live inside the signed message. Reading it as
+        // a Message fails, and the index would silently skip it — so a sender
+        // could not see their own message until the last recipient took it.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = MailStore::open(dir.path().join("mail")).expect("store");
+
+        let message = message_at(1_000, "still going out", "body");
+        store
+            .put_outbound(&crate::store::Outbound {
+                recipients: vec![crate::store::RecipientState::pending(message.from)],
+                message: message.clone(),
+            })
+            .expect("put_outbound");
+
+        let mut index = Index::in_memory().expect("index");
+        index.rebuild_from(&store).expect("rebuild");
+
+        let found = index
+            .search(&Query {
+                mailbox: Some(Mailbox::Out),
+                ..Query::default()
+            })
+            .expect("search");
+        assert_eq!(
+            found.len(),
+            1,
+            "a message in the outbox should be visible to its sender"
+        );
+        assert_eq!(found[0].id, message.id);
+    }
+
+    #[test]
     fn rebuilding_from_the_store_reproduces_the_live_index() {
         let dir = tempfile::tempdir().expect("temp dir");
         let store = MailStore::open(dir.path().join("mail")).expect("store");
@@ -853,7 +896,16 @@ mod tests {
             (4_000, Mailbox::Sent),
         ] {
             let message = message_at(millis, &format!("subject {millis}"), "body");
-            store.put(mailbox, &message).expect("put");
+            if mailbox == Mailbox::Out {
+                store
+                    .put_outbound(&crate::store::Outbound {
+                        recipients: vec![crate::store::RecipientState::pending(message.from)],
+                        message: message.clone(),
+                    })
+                    .expect("put_outbound");
+            } else {
+                store.put(mailbox, &message).expect("put");
+            }
             live.upsert(mailbox, &message).expect("upsert");
         }
 
@@ -877,6 +929,10 @@ mod tests {
         /// and the index rebuilt from `mail/` must equal the index that was
         /// maintained as it went. It is the test that makes ADR 0002 safe —
         /// keeping two stores in step is only sound if drift is detectable.
+        ///
+        /// The operations are the ones the daemon actually performs, not any
+        /// pairing of mailboxes: `out/` is only ever entered by sending and
+        /// only ever left by finishing delivery.
         #[test]
         fn a_rebuilt_index_equals_the_index_maintained_along_the_way(
             ops in proptest::collection::vec((0_usize..6, 0_usize..4), 0..40)
@@ -885,31 +941,52 @@ mod tests {
             let store = MailStore::open(dir.path().join("mail")).expect("store");
             let live = Index::in_memory().expect("index");
 
-            // Where each message currently sits, so a repeat placement is a
+            // Where each message currently sits, so a repeat operation is a
             // move rather than a second copy.
             let mut placed: std::collections::HashMap<usize, Mailbox> =
                 std::collections::HashMap::new();
 
-            for (which, mailbox_idx) in ops {
-                let mailbox = Mailbox::ALL[mailbox_idx];
+            for (which, action) in ops {
                 let message = message_at(
                     1_000 + which as u64,
                     &format!("subject {which}"),
                     &format!("body {which}"),
                 );
+                let outbound = crate::store::Outbound {
+                    recipients: vec![crate::store::RecipientState::pending(message.from)],
+                    message: message.clone(),
+                };
 
-                match placed.get(&which).copied() {
-                    Some(from) if from != mailbox => {
-                        store.move_to(from, mailbox, message.id).expect("move");
-                        live.set_mailbox(message.id, from, mailbox).expect("set mailbox");
+                match (action, placed.get(&which).copied()) {
+                    // Arrive from a peer.
+                    (0, None) => {
+                        store.put(Mailbox::New, &message).expect("put");
+                        live.upsert(Mailbox::New, &message).expect("upsert");
+                        placed.insert(which, Mailbox::New);
                     }
-                    Some(_) => {}
-                    None => {
-                        store.put(mailbox, &message).expect("put");
-                        live.upsert(mailbox, &message).expect("upsert");
+                    // Read it.
+                    (1, Some(Mailbox::New)) => {
+                        store.move_to(Mailbox::New, Mailbox::Cur, message.id).expect("move");
+                        live.set_mailbox(message.id, Mailbox::New, Mailbox::Cur)
+                            .expect("set mailbox");
+                        placed.insert(which, Mailbox::Cur);
                     }
+                    // Send it.
+                    (2, None) => {
+                        store.put_outbound(&outbound).expect("put_outbound");
+                        live.upsert(Mailbox::Out, &message).expect("upsert");
+                        placed.insert(which, Mailbox::Out);
+                    }
+                    // Every recipient took it.
+                    (3, Some(Mailbox::Out)) => {
+                        store.promote_to_sent(&outbound).expect("promote");
+                        live.set_mailbox(message.id, Mailbox::Out, Mailbox::Sent)
+                            .expect("set mailbox");
+                        placed.insert(which, Mailbox::Sent);
+                    }
+                    // Anything else is not a thing the daemon can do from here.
+                    _ => {}
                 }
-                placed.insert(which, mailbox);
             }
 
             let mut rebuilt = Index::in_memory().expect("index");
