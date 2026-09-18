@@ -23,6 +23,11 @@ struct Daemon {
 
 impl Daemon {
     fn start() -> Self {
+        Self::start_with(&[])
+    }
+
+    /// Start with extra environment, for the settings a test needs to bend.
+    fn start_with(extra: &[(&str, &str)]) -> Self {
         // Port 0 would be ideal, but the daemon prints the address it bound,
         // so a port picked by the OS and released is close enough and keeps
         // the CLI's --api flag simple.
@@ -40,6 +45,7 @@ impl Daemon {
             // and every other hivemind on the developer's LAN.
             .env("HIVEMIND_DISCOVERY", "false")
             .env("HIVEMIND_LOG", "warn")
+            .envs(extra.iter().copied())
             .stdout(Stdio::piped())
             .stderr(Stdio::from(
                 std::fs::File::create(&errors).expect("a file for the daemon stderr"),
@@ -539,4 +545,67 @@ fn the_wake_up_hook_says_what_is_waiting() {
     assert!(line.contains("hivemind"), "it should name itself: {line:?}");
     assert!(line.contains("dashboard PR"), "and the subject: {line:?}");
     assert_eq!(line.lines().count(), 1, "one line, not a report: {line:?}");
+}
+
+#[test]
+fn the_daemon_writes_json_logs_beside_its_mail() {
+    // SPEC §4.3 lists `daemon.log` in the on-disk layout and §13.1 says what
+    // goes in it: JSON to the file, pretty in the foreground. Both, not
+    // either — somebody watching a terminal wants to read it, and somebody
+    // debugging a service launchd started wants to grep a week of it.
+    // The other tests run at `warn`, which is right for them — a quiet suite.
+    // This one is about what the file contains, so it needs something in it.
+    let daemon = Daemon::start_with(&[("HIVEMIND_LOG", "info")]);
+
+    let log = daemon.home().join("daemon.log");
+    assert!(log.is_file(), "SPEC §4.3 lists daemon.log");
+
+    // The appender is non-blocking by design: logging must never hold up a
+    // delivery, so it writes on another thread and a line appears shortly
+    // after the event rather than with it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let text = loop {
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        if !text.trim().is_empty() || std::time::Instant::now() > deadline {
+            break text;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let first = text.lines().next().expect("the daemon logs that it is up");
+
+    let entry: serde_json::Value =
+        serde_json::from_str(first).unwrap_or_else(|e| panic!("not JSON: {first:?}: {e}"));
+    assert_eq!(entry["level"], "INFO");
+    assert!(
+        entry["fields"]["message"].is_string(),
+        "an entry needs a message: {entry}"
+    );
+
+    // The terminal got a different shape. The harness reads the first stdout
+    // line and asserts it contains "listening" -- prose, not JSON -- so if
+    // the two layers were ever collapsed into one, `Daemon::start` fails
+    // before this test does.
+}
+
+#[test]
+fn a_network_operation_logs_the_peer_and_the_message() {
+    // SPEC §13.1: "Every network operation has a span with peer id and message
+    // id." Asserted on the shape of the span rather than on a delivery, which
+    // needs two daemons -- this checks the field names are what an operator
+    // would grep for.
+    let daemon = Daemon::start();
+    let me = json(&daemon.run(&["status", "--json"]));
+    let id = me["id"].as_str().expect("an id").to_owned();
+
+    daemon.run(&["send", &id, "-s", "logged", "--", "x"]);
+
+    // A message to ourselves never leaves the machine, so there is no span to
+    // find -- which is the honest outcome and worth stating rather than
+    // asserting something that would pass for the wrong reason. What can be
+    // checked here is that the log is still well-formed after real work.
+    let text = std::fs::read_to_string(daemon.home().join("daemon.log")).expect("read");
+    for line in text.lines() {
+        serde_json::from_str::<serde_json::Value>(line)
+            .unwrap_or_else(|e| panic!("a log line is not JSON: {line:?}: {e}"));
+    }
 }

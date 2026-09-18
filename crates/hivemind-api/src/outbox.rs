@@ -111,6 +111,19 @@ impl hivemind_net::delivery::Transport for PeerTransport {
         addr: &str,
         message: &hivemind_core::message::Message,
     ) -> Result<(), hivemind_net::client::ClientError> {
+        // SPEC §13.1: every network operation carries a span naming the peer
+        // and the message. A delivery that failed is looked up by one or the
+        // other — "why has Ana not got it" and "where did 01JXT2 go" are the
+        // two questions anybody asks — and a log line without both answers
+        // neither.
+        let span = tracing::info_span!(
+            "deliver",
+            peer = %node.short(),
+            message = %message.id,
+            %addr
+        );
+        let _entered = span.enter();
+
         // Pinned to this one recipient, rebuilt per attempt. A client trusting
         // every paired peer would let one of them collect another's mail by
         // answering on its address; a cached per-peer client would go on

@@ -30,12 +30,14 @@ pub(crate) async fn daemon(home: Option<&Path>, port: u16) -> Result<()> {
     std::fs::create_dir_all(&home)
         .with_context(|| format!("could not create {}", home.display()))?;
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("HIVEMIND_LOG")
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // SPEC §13.1: JSON to `daemon.log`, pretty in the foreground. Both, not
+    // either — somebody watching a terminal wants to read it, and somebody
+    // debugging a service started by launchd wants to grep a week of it.
+    //
+    // The guard has to outlive the daemon: dropping it flushes, and dropping
+    // it early means the last lines before a crash are the ones that go
+    // missing, which are the ones being looked for.
+    let _logging = start_logging(&home);
 
     let config = Config::load(&home).context("could not read the configuration")?;
     let identity = Identity::load_or_create(&home.join("identity"))
@@ -200,6 +202,59 @@ where
     });
 
     Ok(vec![peer_listener, courier, mdns, prefetch])
+}
+
+/// Log prettily to the terminal and as JSON to `~/.hivemind/daemon.log`.
+///
+/// Returns the appender's guard, which must be held for as long as the daemon
+/// runs: it flushes on drop, so letting it go early loses exactly the lines
+/// written just before whatever went wrong.
+///
+/// A log file that cannot be opened is not a reason to refuse to run. The
+/// terminal layer is set up either way and the failure is said out loud once.
+fn start_logging(home: &Path) -> Option<tracing_appender::non_blocking::WorkerGuard> {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+
+    let filter = tracing_subscriber::EnvFilter::try_from_env("HIVEMIND_LOG")
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    let pretty = tracing_subscriber::fmt::layer().with_target(false);
+
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(home.join("daemon.log"));
+
+    match file {
+        Ok(file) => {
+            let (writer, guard) = tracing_appender::non_blocking(file);
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(pretty)
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .json()
+                        .with_current_span(true)
+                        .with_span_list(true)
+                        .with_writer(writer),
+                )
+                .init();
+            Some(guard)
+        }
+        Err(error) => {
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(pretty)
+                .init();
+            tracing::warn!(
+                %error,
+                path = %home.join("daemon.log").display(),
+                "could not open the log file; logging to the terminal only"
+            );
+            None
+        }
+    }
 }
 
 /// Wait for whichever comes first: Ctrl-C from a terminal, or SIGTERM.

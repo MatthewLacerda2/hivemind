@@ -80,6 +80,9 @@ async fn handshake(
     Extension(caller): Extension<CallerIdentity>,
     Json(request): Json<Handshake>,
 ) -> Result<Json<Handshake>, Problem> {
+    let span = tracing::info_span!("handshake", peer = %caller.node_id.short());
+    let _entered = span.enter();
+
     // The body says who they are; the certificate proves it. When the two
     // disagree, believe neither — a node that misdescribes itself in the one
     // field we can check is not one to record.
@@ -113,6 +116,15 @@ async fn receive_message(
     multipart: axum::extract::Multipart,
 ) -> Result<(StatusCode, Json<Delivered>), Problem> {
     let (message, blobs) = read_delivery(multipart).await?;
+
+    // The inbound half of the same span (SPEC §13.1). Entered after the body
+    // is read because the message id is not knowable before it.
+    let span = tracing::info_span!(
+        "receive",
+        peer = %caller.node_id.short(),
+        message = %message.id
+    );
+    let _entered = span.enter();
     // SPEC §6.2 step 3: until both sides confirm, mail is refused.
     if !service.is_paired(caller.node_id)? {
         return Err(Problem::new(
