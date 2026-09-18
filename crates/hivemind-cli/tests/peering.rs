@@ -202,6 +202,19 @@ impl Drop for Daemon {
     }
 }
 
+/// A port the OS says is free.
+///
+/// Released immediately, which leaves a window: a parallel test can be handed
+/// the same number before this one's daemon binds it. That is a real race and
+/// not a theoretical one -- it is the likeliest cause of the red `main` after
+/// M6, where a daemon died during startup and the CLI reported only that
+/// nothing was listening.
+///
+/// It is not closed here, because closing it properly means the daemon binding
+/// port 0 and reporting what it got, which is a change to the product for the
+/// sake of the tests. Instead [`wait_until_answering`] panics with the
+/// daemon's stderr, so the next occurrence names itself instead of being
+/// guessed at.
 fn free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     listener.local_addr().expect("addr").port()

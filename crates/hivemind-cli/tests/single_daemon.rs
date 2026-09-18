@@ -28,6 +28,7 @@ impl Daemon {
         // the CLI's --api flag simple.
         let port = free_port();
         let home = tempfile::tempdir().expect("temp home");
+        let errors = home.path().join("daemon.stderr");
 
         let mut process = Command::new(env!("CARGO_BIN_EXE_hivemind"))
             .args(["daemon", "--port", &port.to_string()])
@@ -40,12 +41,14 @@ impl Daemon {
             .env("HIVEMIND_DISCOVERY", "false")
             .env("HIVEMIND_LOG", "warn")
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(
+                std::fs::File::create(&errors).expect("a file for the daemon stderr"),
+            ))
             .spawn()
             .expect("the daemon binary starts");
 
-        // Wait for the line it prints once it is listening, rather than
-        // sleeping and hoping.
+        // Wait for the line it prints once it has bound, rather than sleeping
+        // and hoping.
         let stdout = process.stdout.take().expect("stdout");
         let mut reader = BufReader::new(stdout);
         let mut line = String::new();
@@ -53,6 +56,17 @@ impl Daemon {
             .read_line(&mut line)
             .expect("the daemon says it is up");
         assert!(line.contains("listening"), "unexpected first line: {line}");
+
+        // ...and then wait for it to actually answer. The line above is
+        // printed after the socket is bound and before the router serves it,
+        // so a CLI call made on that line alone races the rest of startup:
+        // the peer listener, the courier and mDNS all come up in between.
+        //
+        // This is what turned `main` red after M6. On a loaded runner the
+        // first CLI call arrived before the daemon was answering, and the
+        // error it produced -- "no hivemind daemon at ..." -- named the
+        // symptom and not one of its causes.
+        wait_until_answering(port, &mut process, &errors);
 
         Self {
             process,
@@ -123,6 +137,19 @@ fn stop(process: &mut Child) {
     let _ = process.wait();
 }
 
+/// A port the OS says is free.
+///
+/// Released immediately, which leaves a window: a parallel test can be handed
+/// the same number before this one's daemon binds it. That is a real race and
+/// not a theoretical one -- it is the likeliest cause of the red `main` after
+/// M6, where a daemon died during startup and the CLI reported only that
+/// nothing was listening.
+///
+/// It is not closed here, because closing it properly means the daemon binding
+/// port 0 and reporting what it got, which is a change to the product for the
+/// sake of the tests. Instead [`wait_until_answering`] panics with the
+/// daemon's stderr, so the next occurrence names itself instead of being
+/// guessed at.
 fn free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     listener.local_addr().expect("addr").port()
@@ -395,5 +422,40 @@ fn attaching_a_file_that_is_not_there_fails_before_anything_is_sent() {
             .len(),
         0,
         "nothing should have been sent"
+    );
+}
+
+/// Poll the daemon's health endpoint until it answers, or give up loudly.
+///
+/// Loudly matters more than quickly. When this fails the daemon either died
+/// during startup or never got to serving, and the difference is in its
+/// stderr -- which is why the harness captures it to a file rather than
+/// discarding it. A bind conflict on the peer port reads as "connection
+/// refused" from outside, indistinguishable from slowness, until you can see
+/// what the process said on its way out.
+fn wait_until_answering(port: u16, process: &mut Child, errors: &std::path::Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
+    let url = format!("http://127.0.0.1:{port}/healthz");
+
+    while std::time::Instant::now() < deadline {
+        if let Ok(Some(status)) = process.try_wait() {
+            panic!(
+                "the daemon exited with {status} during startup.\nIts stderr:\n{}",
+                std::fs::read_to_string(errors).unwrap_or_default()
+            );
+        }
+        if std::process::Command::new("curl")
+            .args(["-sf", "-o", "/dev/null", "--max-time", "2", &url])
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    panic!(
+        "the daemon never answered {url}.\nIts stderr:\n{}",
+        std::fs::read_to_string(errors).unwrap_or_default()
     );
 }
