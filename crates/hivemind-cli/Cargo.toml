@@ -14,8 +14,10 @@ path = "src/main.rs"
 
 [dependencies]
 hivemind-core.workspace = true
+hivemind-mcp.workspace = true
 
 anyhow.workspace = true
+axum.workspace = true
 chrono.workspace = true
 clap.workspace = true
 directories.workspace = true
@@ -29,11 +31,10 @@ tracing-subscriber.workspace = true
 ulid.workspace = true
 hivemind-net.workspace = true
 hivemind-api.workspace = true
-hivemind-mcp.workspace = true
 
 [dev-dependencies]
+rmcp-client.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }
-serde_json.workspace = true
 tempfile.workspace = true
 
 [lints]

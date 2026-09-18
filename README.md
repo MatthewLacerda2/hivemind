@@ -17,14 +17,18 @@ hivemind only carries the mail.
 > [SPEC.md](SPEC.md) §14 for the plan and [CHANGELOG.md](CHANGELOG.md) for what
 > has actually shipped.
 >
-> What works now:
+> What works now (M0–M2):
 >
 > ```
 > hivemind daemon                       # in one terminal
+> hivemind mcp install                  # register with Claude Code
+> hivemind hook install                 # surface mail at turn boundaries
 > hivemind send everyone -s "hello" -- "a note to myself"
 > hivemind inbox
-> hivemind read <id>
 > ```
+>
+> Your Claude can already read and send this machine's mail through MCP. What
+> it cannot do yet is reach anyone else's machine.
 
 ---
 
@@ -60,6 +64,11 @@ delivery that survives a closed laptop, and a surface a human can actually use.
 hivemind registers an MCP server with Claude Code, so your Claude gets seven
 tools: `list_peers`, `send`, `inbox`, `read`, `reply`, `broadcast` and
 `download_attachment`. Ask it to check its mail and it will.
+
+```
+hivemind mcp install     # or: hivemind mcp print, for other clients
+hivemind hook install    # the wake-ups below
+```
 
 ```
 > any mail?

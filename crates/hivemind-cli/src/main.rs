@@ -8,6 +8,8 @@
 
 mod client;
 mod commands;
+mod hooks;
+mod notify;
 mod paths;
 
 use anyhow::Result;
@@ -88,12 +90,39 @@ enum Command {
     },
     /// Rebuild the query index from the mail files.
     Reindex,
+    /// Surface unread mail to Claude at turn boundaries.
+    #[command(subcommand)]
+    Hook(HookCommand),
+    /// Register the MCP server with Claude Code and other clients.
+    #[command(subcommand)]
+    Mcp(McpCommand),
     /// Print the `OpenAPI` document. Used by `just openapi-check`.
     Openapi {
         /// Write to stdout.
         #[arg(long)]
         stdout: bool,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum HookCommand {
+    /// Print a one-line summary if there is unread mail, nothing otherwise.
+    ///
+    /// Runs on every Claude turn boundary, so it reads the index directly and
+    /// never touches the network (SPEC §9.3).
+    Check,
+    /// Add the hooks to ~/.claude/settings.json, merging rather than clobbering.
+    Install,
+    /// Take the hooks back out, leaving everything else alone.
+    Uninstall,
+}
+
+#[derive(Debug, Subcommand)]
+enum McpCommand {
+    /// Register with Claude Code for this user.
+    Install,
+    /// Print the JSON snippet other MCP clients need.
+    Print,
 }
 
 #[tokio::main]
@@ -117,5 +146,13 @@ async fn main() -> Result<()> {
         Command::Read { id, json } => commands::read(&cli.api, &id, json).await,
         Command::Reply { id, body } => commands::reply(&cli.api, &id, body.as_deref()).await,
         Command::Reindex => commands::reindex(cli.home.as_deref()),
+        Command::Hook(HookCommand::Check) => {
+            commands::hook_check(cli.home.as_deref());
+            Ok(())
+        }
+        Command::Hook(HookCommand::Install) => hooks::install(),
+        Command::Hook(HookCommand::Uninstall) => hooks::uninstall(),
+        Command::Mcp(McpCommand::Install) => hooks::mcp_install(&cli.api),
+        Command::Mcp(McpCommand::Print) => hooks::mcp_print(&cli.api),
     }
 }

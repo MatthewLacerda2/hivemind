@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use hivemind_api::{ApiDoc, MailService};
+use hivemind_core::config::Config;
 use hivemind_core::identity::Identity;
 use hivemind_core::index::Index;
 use hivemind_core::store::MailStore;
@@ -36,6 +37,7 @@ pub(crate) async fn daemon(home: Option<&Path>, port: u16) -> Result<()> {
         )
         .init();
 
+    let config = Config::load(&home).context("could not read the configuration")?;
     let identity = Identity::load_or_create(&home.join("identity"))
         .context("could not load this node's identity")?;
     let service = MailService::open(&home, identity.node_id(), identity.signing_key().clone())
@@ -60,15 +62,57 @@ pub(crate) async fn daemon(home: Option<&Path>, port: u16) -> Result<()> {
         identity.node_id().short()
     );
     println!("  docs   http://{addr}/docs");
+    println!("  mcp    http://{addr}/mcp");
     println!("  node   {}", identity.node_id());
 
-    hivemind_api::serve(listener, Arc::new(service), shutdown())
+    let service = Arc::new(service);
+
+    // Best effort and detached: a notification that fails must never touch
+    // delivery (SPEC §9.4).
+    tokio::spawn(crate::notify::watch(
+        Arc::clone(&service),
+        config.notifications,
+    ));
+
+    // MCP is mounted here rather than inside hivemind-api, so that the API
+    // crate does not depend on the MCP crate that depends on it (SPEC §3).
+    let router = hivemind_api::router(Arc::clone(&service))
+        .nest_service("/mcp", hivemind_mcp::http_service(Arc::clone(&service)));
+
+    axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown())
         .await
         .context("the server stopped unexpectedly")
 }
 
+/// Wait for whichever comes first: Ctrl-C from a terminal, or SIGTERM.
+///
+/// launchd stops a service with SIGTERM (SPEC §2), so ignoring it would mean
+/// every `hivemind service stop` was really a kill — no graceful shutdown, and
+/// no chance to finish a write in progress.
 async fn shutdown() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let mut terminate = match signal(SignalKind::terminate()) {
+            Ok(signal) => signal,
+            Err(error) => {
+                tracing::warn!(%error, "cannot listen for SIGTERM; Ctrl-C only");
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+
+    #[cfg(not(unix))]
     let _ = tokio::signal::ctrl_c().await;
+
     tracing::info!("shutting down");
 }
 
@@ -296,6 +340,51 @@ fn short_node(id: &str) -> String {
         .and_then(|rest| rest.split('-').next())
         .unwrap_or(id)
         .to_owned()
+}
+
+/// Print a one-line unread summary, or nothing (SPEC §9.3).
+///
+/// This runs on every `SessionStart` and `UserPromptSubmit`, so it has a 100 ms
+/// budget. It reads the index directly rather than going through the daemon:
+/// no HTTP, no network, and it still works when the daemon is down.
+pub(crate) fn hook_check(home: Option<&Path>) {
+    let Ok(home) = paths::home(home) else {
+        // A hook that fails is a hook that interrupts someone's work. Anything
+        // unexpected here means "say nothing", never "print an error".
+        return;
+    };
+
+    let Ok(index) = Index::open(&home.join("index.db")) else {
+        return;
+    };
+    let Ok(summaries) = index.search(&hivemind_core::index::Query {
+        mailbox: Some(hivemind_core::store::Mailbox::New),
+        unread_only: true,
+        limit: Some(3),
+        ..Default::default()
+    }) else {
+        return;
+    };
+
+    if summaries.is_empty() {
+        return;
+    }
+
+    // The preview shows at most three; the count is the real total, and falls
+    // back to what we can see if the count query fails.
+    let visible = summaries.len() as u64;
+    let total = index.unread_count().unwrap_or(visible);
+    let preview: Vec<String> = summaries
+        .iter()
+        .map(|s| format!("{}: {:?}", short_node(&s.from.to_string()), s.subject))
+        .collect();
+
+    // One line, no colour: this goes into a transcript, not a terminal.
+    println!(
+        "hivemind: {} — {}",
+        unread_phrase(total),
+        preview.join(", ")
+    );
 }
 
 #[cfg(test)]
