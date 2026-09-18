@@ -119,7 +119,9 @@ struct Message {
     attachments: Vec<AttachmentRef>,
     sent_at: DateTime<Utc>,
     received_at: Option<DateTime<Utc>>,
-    signature: Signature,           // Ed25519 over the canonical encoding of all fields above
+    signature: Signature,           // Ed25519 over the canonical encoding of the sender-authored
+                                    // fields; `received_at` and `signature` itself are excluded
+                                    // (see docs/protocol.md and ADR 0007)
 }
 
 struct AttachmentRef {

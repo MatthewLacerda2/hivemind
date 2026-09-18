@@ -38,9 +38,9 @@ declaration order of `Message`:
 `id`, `thread_id`, `in_reply_to`, `from`, `to`, `subject`, `body`, `kind`,
 `sender_kind`, `attachments`, `sent_at`.
 
-`received_at` and `signature` are excluded. SPEC §4.1's comment should read
-"over the canonical encoding of the sender-authored fields"; the normative list
-lives in `docs/protocol.md`.
+`received_at` and `signature` are excluded. SPEC §4.1's comment has been amended
+to say "over the canonical encoding of the sender-authored fields"; the
+normative list lives in `docs/protocol.md`.
 
 ## Consequences
 
