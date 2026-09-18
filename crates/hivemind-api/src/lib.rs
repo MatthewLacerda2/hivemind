@@ -12,3 +12,7 @@ pub mod openapi;
 pub mod peer;
 pub mod problem;
 pub mod service;
+
+pub use local::{router, serve};
+pub use openapi::ApiDoc;
+pub use service::{Draft, Event, MailService, ServiceError};

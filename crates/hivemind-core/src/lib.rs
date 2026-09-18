@@ -13,12 +13,14 @@
 //! - [`store`] — the maildir-style store; files are the source of truth (SPEC §4.3).
 //! - [`index`] — the derived `SQLite` cache and its rebuild logic.
 //! - [`crypto`] — Ed25519 key handling, fingerprints and signing.
+//! - [`identity`] — this node's keypair and self-signed certificate.
 //! - [`config`] — `config.toml` parsing and validation.
 
 #![doc(html_root_url = "https://docs.rs/hivemind-core/0.1.0")]
 
 pub mod config;
 pub mod crypto;
+pub mod identity;
 pub mod index;
 pub mod message;
 pub mod peer;

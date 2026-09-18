@@ -32,6 +32,12 @@ impl NodeId {
         Self(Sha256::digest(der).into())
     }
 
+    /// Wrap raw fingerprint bytes, as read back out of the index or the wire.
+    #[must_use]
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     /// The raw fingerprint bytes.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8; 32] {
