@@ -12,6 +12,7 @@ mod doctor;
 mod hooks;
 mod notify;
 mod paths;
+mod service;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -133,6 +134,29 @@ enum Command {
         #[arg(long, conflicts_with = "id")]
         trust_network: bool,
     },
+    /// Set this machine up end to end (SPEC §2).
+    Init {
+        /// The name peers see. Defaults to this machine's hostname.
+        #[arg(long)]
+        name: Option<String>,
+        /// The person who owns this machine, for `to: <owner>` addressing.
+        #[arg(long)]
+        owner: Option<String>,
+        /// Skip the launchd agent.
+        #[arg(long)]
+        no_launchd: bool,
+        /// Skip registering the MCP server with Claude Code.
+        #[arg(long)]
+        no_mcp: bool,
+        /// Skip installing the Claude Code hooks.
+        #[arg(long)]
+        no_hooks: bool,
+    },
+    /// Run hivemind in the background, at login (SPEC §10).
+    Service {
+        #[command(subcommand)]
+        action: ServiceCommand,
+    },
     /// Check that everything hivemind needs is working (SPEC §10).
     Doctor {
         /// Print JSON instead of prose.
@@ -174,6 +198,25 @@ enum HookCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum ServiceCommand {
+    /// Write the launchd agent and start it.
+    Install,
+    /// Stop the agent and remove it.
+    Uninstall,
+    /// Stop and start it, picking up a new binary or config.
+    Restart,
+    /// Show what the daemon has been saying.
+    Logs {
+        /// How many lines to show.
+        #[arg(short = 'n', long, default_value_t = 50)]
+        lines: usize,
+        /// Keep printing as more arrive.
+        #[arg(short, long)]
+        follow: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum McpCommand {
     /// Register with Claude Code for this user.
     Install,
@@ -205,6 +248,31 @@ async fn main() -> Result<()> {
         Command::Read { id, json } => commands::read(&cli.api, &id, json).await,
         Command::Reply { id, body } => commands::reply(&cli.api, &id, body.as_deref()).await,
         Command::Reindex => commands::reindex(cli.home.as_deref()),
+        Command::Init {
+            name,
+            owner,
+            no_launchd,
+            no_mcp,
+            no_hooks,
+        } => commands::init(
+            cli.home.as_deref(),
+            &cli.api,
+            commands::InitOptions {
+                name,
+                owner,
+                launchd: !no_launchd,
+                mcp: !no_mcp,
+                hooks: !no_hooks,
+            },
+        ),
+        Command::Service { action } => match action {
+            ServiceCommand::Install => service::install(cli.home.as_deref()),
+            ServiceCommand::Uninstall => service::uninstall(),
+            ServiceCommand::Restart => service::restart(),
+            ServiceCommand::Logs { lines, follow } => {
+                service::logs(cli.home.as_deref(), lines, follow)
+            }
+        },
         Command::Doctor { json } => doctor::run(cli.home.as_deref(), &cli.api, json).await,
         Command::Join { host } => commands::join(&cli.api, &host).await,
         Command::Pair {
