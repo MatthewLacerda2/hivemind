@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "hivemind local API",
-    "description": "The loopback API on 127.0.0.1:8401. No authentication: reachability is the authorization, and the listener refuses to bind anywhere else.\n\n## Problem types\n\nErrors are RFC 9457 `application/problem+json`. The `type` member is stable:\n\n- `/problems/message-not-found` — No such message (404)\n- `/problems/invalid-message` — Message is not acceptable (422)\n- `/problems/no-recipients` — Message has no recipients (422)\n- `/problems/internal` — Internal error (500)",
+    "description": "The loopback API on 127.0.0.1:8401. No authentication: reachability is the authorization, and the listener refuses to bind anywhere else.\n\n## Problem types\n\nErrors are RFC 9457 `application/problem+json`. The `type` member is stable:\n\n- `/problems/message-not-found` — No such message (404)\n- `/problems/invalid-message` — Message is not acceptable (422)\n- `/problems/no-recipients` — Message has no recipients (422)\n- `/problems/not-paired` — Not paired (403)\n- `/problems/identity-mismatch` — Identity does not match the certificate (400)\n- `/problems/bad-signature` — Signature does not verify (400)\n- `/problems/peer-unreachable` — Peer could not be reached (502)\n- `/problems/internal` — Internal error (500)",
     "contact": {
       "name": "The hivemind contributors"
     },
@@ -328,6 +328,164 @@
         }
       }
     },
+    "/api/v1/peers": {
+      "get": {
+        "tags": [
+          "peers"
+        ],
+        "operationId": "list_peers",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PeerSummary"
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/peers/join": {
+      "post": {
+        "tags": [
+          "peers"
+        ],
+        "operationId": "join_peer",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JoinRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PeerSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/peers/{id}": {
+      "delete": {
+        "tags": [
+          "peers"
+        ],
+        "operationId": "remove_peer",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The peer's full or short id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Forgotten"
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/peers/{id}/pair": {
+      "post": {
+        "tags": [
+          "peers"
+        ],
+        "operationId": "confirm_pair",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The peer's full or short id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PeerSummary"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/threads/{thread_id}": {
       "get": {
         "tags": [
@@ -404,6 +562,20 @@
           "thread_id": {
             "type": "string",
             "description": "The thread it belongs to."
+          }
+        }
+      },
+      "JoinRequest": {
+        "type": "object",
+        "description": "Where to look for a node to introduce ourselves to.",
+        "required": [
+          "host"
+        ],
+        "properties": {
+          "host": {
+            "type": "string",
+            "description": "A hostname or address, with an optional `:port`.",
+            "example": "laptop.local:8400"
           }
         }
       },
@@ -570,6 +742,63 @@
           }
         }
       },
+      "PeerSummary": {
+        "type": "object",
+        "description": "A peer, paired or merely seen (SPEC §7.1).",
+        "required": [
+          "id",
+          "short_id",
+          "name",
+          "addrs",
+          "paired"
+        ],
+        "properties": {
+          "addrs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Where it can be reached, best guess first."
+          },
+          "id": {
+            "type": "string",
+            "description": "Its fingerprint, in display form."
+          },
+          "last_seen": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When we last heard from it."
+          },
+          "name": {
+            "type": "string",
+            "description": "What it calls itself. Unverified (ADR 0003)."
+          },
+          "owner": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Who owns it, if it said. Also unverified."
+          },
+          "paired": {
+            "type": "boolean",
+            "description": "Whether mail will actually flow, or it is still waiting on a\nconfirmation from one side or the other (SPEC §6.2)."
+          },
+          "paired_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When this side confirmed. `null` while still pending."
+          },
+          "short_id": {
+            "type": "string",
+            "description": "The short form people compare by eye."
+          }
+        }
+      },
       "Problem": {
         "type": "object",
         "description": "An RFC 9457 problem document.",
@@ -656,6 +885,10 @@
     {
       "name": "messages",
       "description": "Reading and sending mail"
+    },
+    {
+      "name": "peers",
+      "description": "Pairing and the address book"
     },
     {
       "name": "node",

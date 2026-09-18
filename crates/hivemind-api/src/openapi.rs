@@ -22,6 +22,10 @@ use crate::problem::{Problem, ProblemType};
     paths(
         local::healthz,
         local::me,
+        local::list_peers,
+        local::join_peer,
+        local::confirm_pair,
+        local::remove_peer,
         local::list_messages,
         local::send_message,
         local::get_message,
@@ -32,6 +36,8 @@ use crate::problem::{Problem, ProblemType};
     ),
     components(schemas(
         local::Me,
+        local::PeerSummary,
+        local::JoinRequest,
         local::MessageSummary,
         local::MessageBody,
         local::SendRequest,
@@ -41,6 +47,7 @@ use crate::problem::{Problem, ProblemType};
     )),
     tags(
         (name = "messages", description = "Reading and sending mail"),
+        (name = "peers", description = "Pairing and the address book"),
         (name = "node", description = "This node")
     )
 )]

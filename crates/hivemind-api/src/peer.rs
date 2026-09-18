@@ -120,3 +120,250 @@ async fn receive_message(
     let id = service.receive(caller.node_id, message)?;
     Ok((StatusCode::ACCEPTED, Json(Delivered { id: id.to_string() })))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use hivemind_core::identity::Identity;
+    use hivemind_core::message::{Kind, Recipient, SenderKind};
+    use hivemind_core::peer::NodeId;
+    use http_body_util::BodyExt as _;
+    use tower::ServiceExt as _;
+
+    use crate::service::{Draft, NodeDescription};
+
+    fn identity(seed: u8) -> Identity {
+        Identity::from_seed([seed; 32]).expect("identity")
+    }
+
+    /// A service for `id`, plus the directory it lives in.
+    fn service(id: &Identity) -> (tempfile::TempDir, Arc<MailService>) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let node = NodeDescription {
+            id: id.node_id(),
+            certificate: id.certificate_der().to_vec(),
+            private_key: id.private_key_pkcs8().expect("key"),
+            name: "host".to_owned(),
+            owner: Some("host".to_owned()),
+            callback_host: "127.0.0.1".to_owned(),
+            peer_port: 8400,
+        };
+        let service =
+            MailService::open(dir.path(), node, id.signing_key().clone()).expect("service opens");
+        (dir, Arc::new(service))
+    }
+
+    fn caller(id: &Identity) -> CallerIdentity {
+        CallerIdentity {
+            node_id: id.node_id(),
+            certificate: id.certificate_der().to_vec(),
+        }
+    }
+
+    /// Send one request through the peer router as `who`.
+    async fn call(
+        service: &Arc<MailService>,
+        who: &Identity,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let router = router(Arc::clone(service)).layer(Extension(caller(who)));
+        let request = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("request");
+
+        let response = router.oneshot(request).await.expect("response");
+        let status = response.status();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, json)
+    }
+
+    /// A message from `from` to `to`, signed properly.
+    fn message_from(from: &Identity, to: NodeId, subject: &str) -> serde_json::Value {
+        let (_dir, sender) = service(from);
+        let message = sender
+            .send(
+                Draft {
+                    to: vec![Recipient::Node(to)],
+                    subject: subject.to_owned(),
+                    body: "body".to_owned(),
+                    kind: Kind::Message,
+                    in_reply_to: None,
+                },
+                SenderKind::Human,
+            )
+            .expect("send");
+        serde_json::to_value(message).expect("serialise")
+    }
+
+    #[tokio::test]
+    async fn an_unpaired_caller_is_refused_with_not_paired() {
+        // SPEC §6.2 step 3. Reaching the port is not being trusted (ADR 0010).
+        let host = identity(1);
+        let stranger = identity(2);
+        let (_dir, service) = service(&host);
+        let message = message_from(&stranger, host.node_id(), "let me in");
+
+        let (status, problem) = call(&service, &stranger, "/peer/v1/messages", &message).await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(problem["type"], "/problems/not-paired");
+        assert_eq!(
+            service.unread_count().expect("count"),
+            0,
+            "nothing should have been stored"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_paired_caller_can_deliver() {
+        let host = identity(3);
+        let friend = identity(4);
+        let (_dir, service) = service(&host);
+
+        // Pair, exactly as a handshake followed by a confirmation would.
+        let (status, _) = call(
+            &service,
+            &friend,
+            "/peer/v1/handshake",
+            &serde_json::to_value(Handshake {
+                id: friend.node_id().to_string(),
+                name: "friend".to_owned(),
+                owner: Some("friend".to_owned()),
+                version: "0.1.0".to_owned(),
+                callback_host: "127.0.0.1".to_owned(),
+                callback_port: 8400,
+                gossip: None,
+            })
+            .expect("serialise"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        service.confirm_pair(friend.node_id()).expect("confirm");
+
+        let message = message_from(&friend, host.node_id(), "hello");
+        let (status, body) = call(&service, &friend, "/peer/v1/messages", &message).await;
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(body["id"], message["id"]);
+        assert_eq!(service.unread_count().expect("count"), 1);
+    }
+
+    #[tokio::test]
+    async fn a_peer_may_not_deliver_a_message_signed_by_somebody_else() {
+        // Otherwise any paired node could forge mail from any other.
+        let host = identity(5);
+        let friend = identity(6);
+        let third_party = identity(7);
+        let (_dir, service) = service(&host);
+
+        call(
+            &service,
+            &friend,
+            "/peer/v1/handshake",
+            &serde_json::to_value(Handshake {
+                id: friend.node_id().to_string(),
+                name: "friend".to_owned(),
+                owner: None,
+                version: "0.1.0".to_owned(),
+                callback_host: "127.0.0.1".to_owned(),
+                callback_port: 8400,
+                gossip: None,
+            })
+            .expect("serialise"),
+        )
+        .await;
+        service.confirm_pair(friend.node_id()).expect("confirm");
+
+        let forged = message_from(&third_party, host.node_id(), "not mine");
+        let (status, problem) = call(&service, &friend, "/peer/v1/messages", &forged).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(problem["type"], "/problems/identity-mismatch");
+        assert_eq!(service.unread_count().expect("count"), 0);
+    }
+
+    #[tokio::test]
+    async fn a_handshake_whose_body_disagrees_with_its_certificate_is_refused() {
+        let host = identity(8);
+        let caller_id = identity(9);
+        let someone_else = identity(10);
+        let (_dir, service) = service(&host);
+
+        let (status, problem) = call(
+            &service,
+            &caller_id,
+            "/peer/v1/handshake",
+            &serde_json::to_value(Handshake {
+                // Claims to be someone else.
+                id: someone_else.node_id().to_string(),
+                name: "liar".to_owned(),
+                owner: None,
+                version: "0.1.0".to_owned(),
+                callback_host: "127.0.0.1".to_owned(),
+                callback_port: 8400,
+                gossip: None,
+            })
+            .expect("serialise"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(problem["type"], "/problems/identity-mismatch");
+        assert!(
+            service.pending_pairs().expect("pending").is_empty(),
+            "a node that misdescribes itself should not be recorded at all"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_handshake_from_a_stranger_is_recorded_as_pending_not_paired() {
+        let host = identity(11);
+        let stranger = identity(12);
+        let (_dir, service) = service(&host);
+
+        let (status, answer) = call(
+            &service,
+            &stranger,
+            "/peer/v1/handshake",
+            &serde_json::to_value(Handshake {
+                id: stranger.node_id().to_string(),
+                name: "stranger".to_owned(),
+                owner: Some("someone".to_owned()),
+                version: "0.1.0".to_owned(),
+                callback_host: "10.0.0.7".to_owned(),
+                callback_port: 9000,
+                gossip: None,
+            })
+            .expect("serialise"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(answer["id"], host.node_id().to_string());
+        assert!(
+            !service.is_paired(stranger.node_id()).expect("is_paired"),
+            "a handshake is an introduction, not an agreement"
+        );
+
+        let pending = service.pending_pairs().expect("pending");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, stranger.node_id());
+        assert_eq!(
+            pending[0].addr.authority(),
+            "10.0.0.7:9000",
+            "the callback address it gave should be what we record"
+        );
+    }
+}

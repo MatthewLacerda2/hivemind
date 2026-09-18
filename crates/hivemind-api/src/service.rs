@@ -16,6 +16,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use chrono::{DateTime, SubsecRound as _, Utc};
+use hivemind_core::config::DEFAULT_PEER_PORT;
 use hivemind_core::crypto::{Signature, SigningKey};
 use hivemind_core::index::{Index, IndexError, Query, Summary};
 use hivemind_core::message::{CanonicalError, Kind, Message, MessageError, Recipient, SenderKind};
@@ -134,6 +135,12 @@ pub enum ServiceError {
         /// The id that was asked for.
         id: String,
     },
+    /// The host could not be reached, or refused the handshake.
+    #[error(transparent)]
+    Peer(#[from] hivemind_net::client::ClientError),
+    /// The host answered, but not as the node it claims to be.
+    #[error("{0}")]
+    IdentityMismatch(String),
     /// The index lock was poisoned by a panic in another thread.
     #[error("the index is unavailable after an earlier failure")]
     Unavailable,
@@ -147,6 +154,7 @@ pub struct MailService {
     peers: Mutex<PeerBook>,
     identity: NodeId,
     certificate: Vec<u8>,
+    tls: hivemind_net::tls::LocalIdentity,
     name: String,
     owner: Option<String>,
     callback_host: String,
@@ -162,6 +170,9 @@ pub struct NodeDescription {
     pub id: NodeId,
     /// Its DER-encoded certificate.
     pub certificate: Vec<u8>,
+    /// Its PKCS#8 private key, used to present that certificate when dialling
+    /// a peer. Never leaves this process.
+    pub private_key: Vec<u8>,
     /// Its display name.
     pub name: String,
     /// The human who owns it.
@@ -197,6 +208,7 @@ impl MailService {
             index: Mutex::new(index),
             peers: Mutex::new(peers),
             identity: node.id,
+            tls: hivemind_net::tls::LocalIdentity::new(node.certificate.clone(), node.private_key),
             certificate: node.certificate,
             name: node.name,
             owner: node.owner,
@@ -446,6 +458,82 @@ impl MailService {
             // Reserved for v2 (SPEC §12). Sending nothing today keeps the
             // field's meaning open.
             gossip: None,
+        }
+    }
+
+    /// Introduce ourselves to a host, and record what it says back (SPEC §6.2).
+    ///
+    /// This is the "first use" in trust-on-first-use: the host's certificate is
+    /// accepted so that its fingerprint can be shown to a human, and nothing is
+    /// trusted until [`MailService::confirm_pair`] is called on both sides.
+    ///
+    /// `host` may name a port; without one the peer port is assumed.
+    ///
+    /// # Errors
+    /// [`ServiceError::Peer`] if the host cannot be reached,
+    /// [`ServiceError::IdentityMismatch`] if it does not answer as the node it
+    /// claims to be, or [`ServiceError::PeerBook`] if the offer cannot be
+    /// written.
+    pub async fn join(&self, host: &str) -> Result<PendingPair, ServiceError> {
+        let (hostname, port) = split_host(host, DEFAULT_PEER_PORT);
+        let addr = PeerAddr::manual(hostname.clone(), port);
+        let authority = addr.authority();
+
+        let client = hivemind_net::client::PeerClient::joining(&self.tls)?;
+        let answer: hivemind_net::client::PeerResponse<crate::peer::Handshake> = client
+            .post(&authority, "/peer/v1/handshake", &self.own_handshake())
+            .await?;
+
+        // The certificate is the identity (SPEC §6.1); the body is a claim.
+        // A host whose one checkable claim is wrong is not one to record.
+        let id = NodeId::from_certificate_der(&answer.certificate);
+        if answer.body.id != id.to_string() {
+            return Err(ServiceError::IdentityMismatch(format!(
+                "{authority} calls itself {} but presented {id}",
+                answer.body.id
+            )));
+        }
+        if id == self.identity {
+            return Err(ServiceError::IdentityMismatch(
+                "that address is this node".to_owned(),
+            ));
+        }
+
+        self.record_pairing_offer(id, &answer.body, answer.certificate, addr)?;
+        self.peers()?
+            .pending_pair(id)
+            .cloned()
+            .ok_or_else(|| ServiceError::NoSuchPeer { id: id.to_string() })
+    }
+
+    /// Turn what a human typed into a node id.
+    ///
+    /// Accepts the full `hm1:` form or the eight-character short form people
+    /// actually compare by eye (SPEC §6.1). A short form that matches more than
+    /// one peer is refused rather than guessed at — picking one would be
+    /// picking who gets trusted.
+    ///
+    /// # Errors
+    /// [`ServiceError::NoSuchPeer`] if nothing matches, or more than one does.
+    pub fn resolve_peer(&self, typed: &str) -> Result<NodeId, ServiceError> {
+        if let Ok(id) = typed.parse::<NodeId>() {
+            return Ok(id);
+        }
+
+        let peers = self.peers()?;
+        let mut matches: Vec<NodeId> = peers
+            .peers()
+            .map(|p| p.id)
+            .chain(peers.pending().map(|p| p.id))
+            .filter(|id| id.short().eq_ignore_ascii_case(typed))
+            .collect();
+        matches.dedup();
+
+        match matches.as_slice() {
+            [id] => Ok(*id),
+            _ => Err(ServiceError::NoSuchPeer {
+                id: typed.to_owned(),
+            }),
         }
     }
 
@@ -733,6 +821,35 @@ impl MailService {
     }
 }
 
+/// Split `host[:port]` into its parts, bracketed IPv6 included.
+///
+/// A bare IPv6 address is full of colons and cannot be told from `host:port`
+/// without brackets, so an unbracketed one keeps the default port rather than
+/// having its last group read as one.
+fn split_host(host: &str, default_port: u16) -> (String, u16) {
+    if let Some(rest) = host.strip_prefix('[') {
+        // Unbalanced brackets: nothing sensible to do but keep it whole.
+        let Some((inside, after)) = rest.split_once(']') else {
+            return (host.to_owned(), default_port);
+        };
+        let port = after
+            .strip_prefix(':')
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(default_port);
+        return (inside.to_owned(), port);
+    }
+
+    match host.rsplit_once(':') {
+        // More than one colon and no brackets: a bare IPv6 address.
+        Some(_) if host.matches(':').count() > 1 => (host.to_owned(), default_port),
+        Some((name, port)) => match port.parse() {
+            Ok(port) => (name.to_owned(), port),
+            Err(_) => (host.to_owned(), default_port),
+        },
+        None => (host.to_owned(), default_port),
+    }
+}
+
 /// Pull the Ed25519 public key out of a DER certificate.
 ///
 /// The `SubjectPublicKeyInfo` of an Ed25519 certificate ends with the 32-byte
@@ -756,11 +873,47 @@ fn verifying_key_from_certificate(der: &[u8]) -> Option<hivemind_core::crypto::V
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_host_without_a_port_gets_the_peer_port() {
+        assert_eq!(
+            split_host("laptop.local", 8400),
+            ("laptop.local".into(), 8400)
+        );
+    }
+
+    #[test]
+    fn a_host_with_a_port_keeps_it() {
+        assert_eq!(split_host("10.0.0.5:9001", 8400), ("10.0.0.5".into(), 9001));
+    }
+
+    #[test]
+    fn a_bracketed_ipv6_address_is_unwrapped() {
+        assert_eq!(split_host("[::1]:9001", 8400), ("::1".into(), 9001));
+        assert_eq!(split_host("[fe80::1]", 8400), ("fe80::1".into(), 8400));
+    }
+
+    #[test]
+    fn a_bare_ipv6_address_does_not_lose_its_last_group_to_a_port() {
+        // `fe80::1` has a colon but no port; reading `1` as one would dial the
+        // wrong place and drop part of the address.
+        assert_eq!(split_host("fe80::1", 8400), ("fe80::1".into(), 8400));
+    }
+
+    #[test]
+    fn a_port_that_is_not_a_number_leaves_the_host_alone() {
+        // `machine:name` is likelier a typo than a request to dial port NaN.
+        assert_eq!(
+            split_host("machine:name", 8400),
+            ("machine:name".into(), 8400)
+        );
+    }
+
     /// The bits of a node description the store tests do not care about.
     fn describe(id: NodeId) -> NodeDescription {
         NodeDescription {
             id,
             certificate: b"this node".to_vec(),
+            private_key: Vec::new(),
             name: "test".to_owned(),
             owner: None,
             callback_host: "127.0.0.1".to_owned(),

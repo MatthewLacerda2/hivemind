@@ -102,6 +102,39 @@ enum Command {
         #[arg(long)]
         stdout: bool,
     },
+    /// Introduce yourself to another node (SPEC §6.2).
+    ///
+    /// This is the first half of trust on first use: it records the other
+    /// node's fingerprint but trusts nothing. Both sides then run `pair`.
+    Join {
+        /// A hostname or address, with an optional `:port`.
+        host: String,
+    },
+    /// Confirm a peer, after checking its fingerprint (SPEC §6.2).
+    Pair {
+        /// The peer's short id, or its full `hm1:` form.
+        id: String,
+        /// Skip the confirmation prompt. For scripts, and for tests.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// Who this node knows.
+    Peers {
+        #[command(subcommand)]
+        action: Option<PeerCommand>,
+        /// Print JSON instead of prose.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PeerCommand {
+    /// Forget a peer. Mail from it is refused from that moment on.
+    Remove {
+        /// The peer's short id, or its full `hm1:` form.
+        id: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -146,6 +179,12 @@ async fn main() -> Result<()> {
         Command::Read { id, json } => commands::read(&cli.api, &id, json).await,
         Command::Reply { id, body } => commands::reply(&cli.api, &id, body.as_deref()).await,
         Command::Reindex => commands::reindex(cli.home.as_deref()),
+        Command::Join { host } => commands::join(&cli.api, &host).await,
+        Command::Pair { id, yes } => commands::pair(&cli.api, &id, yes).await,
+        Command::Peers { action, json } => match action {
+            None => commands::peers(&cli.api, json).await,
+            Some(PeerCommand::Remove { id }) => commands::remove_peer(&cli.api, &id).await,
+        },
         Command::Hook(HookCommand::Check) => {
             commands::hook_check(cli.home.as_deref());
             Ok(())
