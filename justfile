@@ -83,6 +83,24 @@ openapi-check:
     cargo run -q -p hivemind-cli --bin hivemind -- openapi --stdout > "$generated"
     diff -u docs/openapi.json "$generated"
 
+# Did CI really run on this pull request's head? `just mergeable PR=12`
+#
+# The last thing to run before `gh pr merge`. "The checks look green" and "the
+# checks ran" are not the same claim, and a loop that waits for checks to
+# finish reads *absent* as settled — see the script's own docstring.
+mergeable PR="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -z "{{PR}}" ]]; then
+        echo "usage: just mergeable PR=12" >&2
+        exit 2
+    fi
+    python3 .github/scripts/mergeable.py "{{PR}}"
+
+# [gate] The scripts under .github/scripts. stdlib unittest, nothing to install.
+scripts:
+    python3 -m unittest discover --start-directory .github/scripts/tests --quiet
+
 # Regenerate the changelog from conventional commits (SPEC §13.5).
 # The v0.1.0 entry is hand-written and stays: there was no previous release to
 # diff against, and a list of commit subjects is not a description of what the
@@ -125,7 +143,7 @@ web-build:
 
 # What ci.yml runs, in its order — including the coverage gate, which runs as a
 # separate job there. Run this before opening a PR (SPEC §16.6).
-ci: fmt-check lint doc test deny openapi-check web-build dist-check cov-gate
+ci: fmt-check lint doc test scripts deny openapi-check web-build dist-check cov-gate
 
 # `ci` plus what nightly.yml runs on a schedule.
 ci-full: ci audit
