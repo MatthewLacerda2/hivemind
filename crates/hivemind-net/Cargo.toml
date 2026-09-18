@@ -14,10 +14,12 @@ hivemind-core.workspace = true
 axum.workspace = true
 chrono.workspace = true
 hyper.workspace = true
+http-body-util.workspace = true
 hyper-util.workspace = true
 rustls.workspace = true
 rustls-pki-types.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
@@ -25,6 +27,7 @@ tower.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+axum.workspace = true
 tempfile.workspace = true
 
 [lints]
