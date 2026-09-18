@@ -2,45 +2,72 @@
 
 All notable changes to this project are documented here.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html),
-and the entries below are generated from conventional commits by
-[`git-cliff`](https://git-cliff.org).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
+and this project adheres to
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html). From v0.2.0 the
+entries are generated from conventional commits by
+[`git-cliff`](https://git-cliff.org) — run `just changelog`. This first entry is
+written by hand, because there is no previous release to diff against and a list
+of commit subjects is not a description of what the thing does.
 
-## [Unreleased]
+## [0.1.0] - 2026-09-18
+
+The first release. A daemon, a CLI, an MCP server and a web UI, for sending
+mail between machines you control.
 
 ### Added
 
-- Cargo workspace, the five crates from SPEC §3.1, and the lint policy from
-  SPEC §13.1.
-- `justfile` defining every check, with `just ci` running exactly what GitHub
-  Actions runs.
-- CI, nightly and release workflows; Dependabot; pre-commit hooks.
-- Architecture decision records 0001–0005, covering the decisions the spec had
-  already made: no central hub, files as the source of truth, per-machine
-  identity, HTTP for attachments, and `rusqlite` for the index.
-- Project documentation: README, CONTRIBUTING, SECURITY with the threat model,
-  CODE_OF_CONDUCT, dual Apache-2.0/MIT licensing.
+**Mail.** Messages with subjects, markdown bodies, threads and full-text search,
+stored one JSON file each under `~/.hivemind/mail/`. The files are the source of
+truth; the SQLite index beside them is a cache that is rebuilt whenever it is
+missing or stale, and `hivemind reindex` rebuilds it on demand.
 
-- **M1, local mail.** The message model and its canonical signed encoding, with
-  golden vectors derived from an independent reference encoder. The maildir
-  store, where files are the source of truth and every write is an atomic
-  rename. The SQLite index with full-text search, rebuilt from `mail/` whenever
-  it is missing or stale. Node identity: one Ed25519 key that both signs
-  messages and backs the self-signed certificate peers will pin. The local HTTP
-  API with OpenAPI, Swagger UI, RFC 9457 errors and an SSE event stream. A CLI
-  with `daemon`, `status`, `send`, `inbox`, `read`, `reply` and `reindex`.
-- Decision records 0006 (node id display), 0007 (`received_at` is not signed)
-  and 0008 (the service layer is synchronous).
+**Peers.** `hivemind join <host>` introduces two machines; `hivemind pair
+<short-id>` on both sides confirms a fingerprint, once, like SSH's first
+connection. After that mail flows over TLS 1.3 with mutual authentication,
+pinned to the exact certificate each side confirmed. There is no CA, no hostname
+trust, and no broker. An unpaired node gets `403`.
 
-- **M2, Claude.** The MCP server at `/mcp`, with the seven tools and two
-  resources from SPEC §9.1, reachable by Claude Code after
-  `hivemind mcp install`. Wake-up hooks (`hivemind hook install`) that print a
-  one-line unread summary on `SessionStart` and `UserPromptSubmit` in about
-  10 ms, merging into `~/.claude/settings.json` rather than clobbering it.
-  Desktop notifications on arriving mail. `config.toml` with `HIVEMIND_*`
-  environment overrides and validation. `docs/mcp.md`.
+**Delivery that survives a closed laptop.** Sending writes to the outbox and
+returns; a worker retries with jittered exponential backoff from 2 seconds to 5
+minutes, indefinitely. A laptop that comes to the office on Monday receives
+Friday's mail. Every message is signed independently of the transport, so one
+read off disk a year later still verifies.
 
-There are no peers yet: `join`, `pair` and delivery to another machine are M3.
+**Attachments.** Files up to 2 GiB, content-addressed and deduplicated. Anything
+at or below 8 MiB travels with the message; larger files are fetched on first
+access, and an interrupted transfer resumes from where it stopped rather than
+starting again.
 
-[Unreleased]: https://github.com/MatthewLacerda2/hivemind/commits/main
+**Discovery.** mDNS on a LAN and `hivemind peers refresh` over Tailscale.
+Neither can pair anything — discovery only ever says a node exists.
+
+**Claude Code integration.** An MCP server at `/mcp` with seven tools —
+`list_peers`, `send`, `inbox`, `read`, `reply`, `broadcast`,
+`download_attachment` — and two resources. Hooks surface unread mail at turn
+boundaries. Every message records whether a person or an agent wrote it, and a
+caller cannot claim otherwise: it is decided by which entrypoint the request
+arrived through.
+
+**A web UI** at `http://127.0.0.1:8401/`: inbox, threads, compose with
+drag-and-drop attachments, and pairing with the fingerprints shown. Reading works
+with JavaScript switched off.
+
+**Setup.** `hivemind init` generates the identity, writes the config, installs a
+launchd agent, registers the MCP server, installs the hooks and prints where the
+machine can be reached. Running it twice keeps everything it already made.
+`hivemind doctor` checks the parts that break and says what to do about each.
+
+### Known limitations
+
+- No `brew install hivemind` until the tap is published; build from source or
+  use the shell installer from the release.
+- x86_64 macOS binaries are not ad-hoc codesigned, so an Intel Mac asks about
+  the firewall again after an upgrade. Apple Silicon does not.
+  See [ADR 0011](docs/decisions/0011-cargo-dist-generates-the-release.md).
+- No autoreply: a message cannot trigger `claude -p` on the receiving machine.
+  Deliberate — see the FAQ in the README.
+- Windows is not supported. Linux builds and is tested in CI; macOS is the
+  primary target.
+
+[0.1.0]: https://github.com/MatthewLacerda2/hivemind/releases/tag/v0.1.0

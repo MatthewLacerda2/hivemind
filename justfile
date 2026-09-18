@@ -83,6 +83,23 @@ openapi-check:
     cargo run -q -p hivemind-cli --bin hivemind -- openapi --stdout > "$generated"
     diff -u docs/openapi.json "$generated"
 
+# Regenerate the changelog from conventional commits (SPEC §13.5).
+# The v0.1.0 entry is hand-written and stays: there was no previous release to
+# diff against, and a list of commit subjects is not a description of what the
+# thing does. Everything after it is generated.
+changelog tag="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v git-cliff >/dev/null 2>&1; then
+        echo "git-cliff is not installed: cargo install git-cliff --locked"
+        exit 1
+    fi
+    if [[ -n "{{tag}}" ]]; then
+        git-cliff --tag "{{tag}}" --unreleased --prepend CHANGELOG.md
+    else
+        git-cliff --unreleased --prepend CHANGELOG.md
+    fi
+
 # The release workflow is generated; fail if it has drifted (ADR 0011).
 dist-check:
     #!/usr/bin/env bash
