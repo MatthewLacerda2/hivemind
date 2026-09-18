@@ -1,4 +1,411 @@
 //! The maildir-style message store.
 //!
-//! Files under `~/.hivemind/mail/` are the source of truth (SPEC §4.3). Every
-//! write is write-to-temp plus atomic rename; nothing is ever edited in place.
+//! Files under `~/.hivemind/mail/` are the source of truth (SPEC §4.3,
+//! `docs/decisions/0002-files-are-source-of-truth.md`). Every write is
+//! write-to-temp plus atomic rename; nothing is ever edited in place.
+
+use std::fs;
+use std::path::PathBuf;
+use std::str::FromStr as _;
+
+use ulid::Ulid;
+
+use crate::message::Message;
+
+/// Which of the four directories a message is sitting in (SPEC §4.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Mailbox {
+    /// Received and unread.
+    New,
+    /// Received and read.
+    Cur,
+    /// Written by us, not yet delivered to every recipient.
+    Out,
+    /// Written by us and delivered to everyone.
+    Sent,
+}
+
+impl std::fmt::Display for Mailbox {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Mailbox {
+    /// Every mailbox, in the order they appear in SPEC §4.3.
+    pub const ALL: [Self; 4] = [Self::New, Self::Cur, Self::Out, Self::Sent];
+
+    /// The directory name under `mail/`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Cur => "cur",
+            Self::Out => "out",
+            Self::Sent => "sent",
+        }
+    }
+}
+
+/// Why a store operation failed.
+#[derive(Debug, thiserror::Error)]
+pub enum StoreError {
+    /// No message with that id in that mailbox.
+    #[error("no message {id} in {mailbox}")]
+    NotFound {
+        /// The id that was looked for.
+        id: Ulid,
+        /// Where it was looked for.
+        mailbox: &'static str,
+    },
+    /// The filesystem said no.
+    #[error("{context}")]
+    Io {
+        /// What we were trying to do.
+        context: String,
+        /// What went wrong.
+        #[source]
+        source: std::io::Error,
+    },
+    /// A file in the store could not be parsed as a message.
+    #[error("message file {path} is not readable as a message")]
+    Corrupt {
+        /// The offending file.
+        path: PathBuf,
+        /// What the parser said.
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+/// The on-disk mail store.
+#[derive(Debug, Clone)]
+pub struct MailStore {
+    root: PathBuf,
+}
+
+impl MailStore {
+    /// Open the store rooted at `mail/`, creating the four mailboxes if needed.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Io`] if a directory cannot be created.
+    pub fn open(root: impl Into<PathBuf>) -> Result<Self, StoreError> {
+        let root = root.into();
+        for mailbox in Mailbox::ALL {
+            let dir = root.join(mailbox.as_str());
+            fs::create_dir_all(&dir).map_err(|source| StoreError::Io {
+                context: format!("could not create {}", dir.display()),
+                source,
+            })?;
+        }
+        Ok(Self { root })
+    }
+
+    /// Where a message would live.
+    #[must_use]
+    pub fn path_of(&self, mailbox: Mailbox, id: Ulid) -> PathBuf {
+        self.root.join(mailbox.as_str()).join(format!("{id}.json"))
+    }
+
+    /// Write a message into a mailbox, replacing any message already there with
+    /// the same id.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Io`] if the write or rename fails.
+    pub fn put(&self, mailbox: Mailbox, message: &Message) -> Result<(), StoreError> {
+        let final_path = self.path_of(mailbox, message.id);
+        // Same directory as the destination, so the rename below cannot cross a
+        // filesystem boundary and stop being atomic. The suffix keeps it out of
+        // `list`, which only accepts `.json`.
+        let temp_path = final_path.with_extension("json.tmp");
+
+        let json = serde_json::to_vec_pretty(message).map_err(|source| StoreError::Io {
+            context: format!("could not encode message {}", message.id),
+            source: std::io::Error::other(source),
+        })?;
+
+        fs::write(&temp_path, &json).map_err(|source| StoreError::Io {
+            context: format!("could not write {}", temp_path.display()),
+            source,
+        })?;
+
+        // The only step that is visible to a reader, and it is atomic: the
+        // message is either absent or complete, never half-written (ADR 0002).
+        fs::rename(&temp_path, &final_path).map_err(|source| StoreError::Io {
+            context: format!("could not move {} into place", temp_path.display()),
+            source,
+        })
+    }
+
+    /// Read a message out of a mailbox.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] if it is not there, [`StoreError::Corrupt`] if
+    /// the file will not parse.
+    pub fn get(&self, mailbox: Mailbox, id: Ulid) -> Result<Message, StoreError> {
+        let path = self.path_of(mailbox, id);
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Err(StoreError::NotFound {
+                    id,
+                    mailbox: mailbox.as_str(),
+                });
+            }
+            Err(source) => {
+                return Err(StoreError::Io {
+                    context: format!("could not read {}", path.display()),
+                    source,
+                });
+            }
+        };
+
+        // A file that will not parse is a different problem from a file that is
+        // not there, and saying "not found" would send someone looking in the
+        // wrong place.
+        serde_json::from_slice(&bytes).map_err(|source| StoreError::Corrupt { path, source })
+    }
+
+    /// Every message id in a mailbox, oldest first.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Io`] if the directory cannot be read.
+    pub fn list(&self, mailbox: Mailbox) -> Result<Vec<Ulid>, StoreError> {
+        let dir = self.root.join(mailbox.as_str());
+        let entries = fs::read_dir(&dir).map_err(|source| StoreError::Io {
+            context: format!("could not list {}", dir.display()),
+            source,
+        })?;
+
+        let mut ids: Vec<Ulid> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .filter_map(|name| {
+                // Anything that is not `<ulid>.json` is somebody else's file:
+                // an editor backup, a .DS_Store, a half-finished download.
+                let name = name.to_str()?;
+                let stem = name.strip_suffix(".json")?;
+                Ulid::from_str(stem).ok()
+            })
+            .collect();
+
+        // ULIDs sort lexicographically in time order, so this is oldest first.
+        ids.sort_unstable();
+        Ok(ids)
+    }
+
+    /// Move a message between mailboxes.
+    ///
+    /// # Errors
+    /// [`StoreError::NotFound`] if it is not in `from`.
+    pub fn move_to(&self, from: Mailbox, to: Mailbox, id: Ulid) -> Result<(), StoreError> {
+        if from == to {
+            return Ok(());
+        }
+
+        let source_path = self.path_of(from, id);
+        let target_path = self.path_of(to, id);
+
+        // A rename, not a read-and-rewrite: the bytes are signed, and moving a
+        // message between mailboxes must not be able to change them.
+        match fs::rename(&source_path, &target_path) {
+            Ok(()) => Ok(()),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                Err(StoreError::NotFound {
+                    id,
+                    mailbox: from.as_str(),
+                })
+            }
+            Err(source) => Err(StoreError::Io {
+                context: format!(
+                    "could not move {} to {}",
+                    source_path.display(),
+                    target_path.display()
+                ),
+                source,
+            }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::message::{fixture, test_signing_key};
+
+    fn store() -> (tempfile::TempDir, MailStore) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = MailStore::open(dir.path().join("mail")).expect("store opens");
+        (dir, store)
+    }
+
+    #[test]
+    fn opening_a_store_creates_the_four_mailboxes() {
+        let (dir, _store) = store();
+        for name in ["new", "cur", "out", "sent"] {
+            assert!(
+                dir.path().join("mail").join(name).is_dir(),
+                "mail/{name} should exist"
+            );
+        }
+    }
+
+    #[test]
+    fn opening_an_existing_store_is_not_an_error() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        MailStore::open(dir.path().join("mail")).expect("first open");
+        MailStore::open(dir.path().join("mail")).expect("second open must succeed");
+    }
+
+    #[test]
+    fn a_message_written_to_a_mailbox_reads_back_identical() {
+        let (_dir, store) = store();
+        let message = fixture();
+        store.put(Mailbox::Out, &message).expect("put");
+        assert_eq!(store.get(Mailbox::Out, message.id).expect("get"), message);
+    }
+
+    #[test]
+    fn a_signed_message_still_verifies_after_a_round_trip_through_the_store() {
+        // Files are the source of truth (ADR 0002) and a stored message must
+        // stay verifiable (ADR 0007). This is both claims at once.
+        let (_dir, store) = store();
+        let mut message = fixture();
+        message.sign(&test_signing_key()).expect("sign");
+        store.put(Mailbox::New, &message).expect("put");
+
+        let read = store.get(Mailbox::New, message.id).expect("get");
+        assert!(read.verify(&test_signing_key().verifying_key()).is_ok());
+    }
+
+    #[test]
+    fn writing_leaves_no_temporary_files_behind() {
+        let (dir, store) = store();
+        store.put(Mailbox::Out, &fixture()).expect("put");
+
+        let entries: Vec<_> = fs::read_dir(dir.path().join("mail").join("out"))
+            .expect("read dir")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            entries.len(),
+            1,
+            "expected exactly one file, got {entries:?}"
+        );
+        assert_eq!(
+            std::path::Path::new(&entries[0]).extension(),
+            Some("json".as_ref()),
+            "a leftover .json.tmp would mean the rename never happened; got {entries:?}"
+        );
+    }
+
+    #[test]
+    fn writing_the_same_message_twice_is_idempotent() {
+        // Redelivery is always safe: a recipient dedupes on message id (SPEC §8).
+        let (_dir, store) = store();
+        let message = fixture();
+        store.put(Mailbox::New, &message).expect("first put");
+        store.put(Mailbox::New, &message).expect("second put");
+        assert_eq!(store.list(Mailbox::New).expect("list"), vec![message.id]);
+    }
+
+    #[test]
+    fn listing_an_empty_mailbox_returns_nothing() {
+        let (_dir, store) = store();
+        assert!(store.list(Mailbox::Cur).expect("list").is_empty());
+    }
+
+    #[test]
+    fn listing_returns_ids_oldest_first() {
+        let (_dir, store) = store();
+        let mut ids = Vec::new();
+        for millis in [3_000_u64, 1_000, 2_000] {
+            let mut message = fixture();
+            message.id = Ulid::from_parts(millis, 0);
+            store.put(Mailbox::New, &message).expect("put");
+            ids.push(message.id);
+        }
+        ids.sort_unstable();
+        assert_eq!(store.list(Mailbox::New).expect("list"), ids);
+    }
+
+    #[test]
+    fn listing_ignores_files_that_are_not_messages() {
+        // A stray editor backup or a half-finished download must not be
+        // mistaken for mail.
+        let (dir, store) = store();
+        store.put(Mailbox::New, &fixture()).expect("put");
+        let boxdir = dir.path().join("mail").join("new");
+        fs::write(boxdir.join("notes.txt"), b"scratch").expect("write");
+        fs::write(boxdir.join(".DS_Store"), b"junk").expect("write");
+        fs::write(boxdir.join("not-a-ulid.json"), b"{}").expect("write");
+
+        assert_eq!(store.list(Mailbox::New).expect("list"), vec![fixture().id]);
+    }
+
+    #[test]
+    fn reading_a_message_that_is_not_there_reports_not_found() {
+        let (_dir, store) = store();
+        let missing = fixture().id;
+        assert!(matches!(
+            store.get(Mailbox::Cur, missing),
+            Err(StoreError::NotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn reading_a_corrupt_message_file_says_so_rather_than_pretending_it_is_missing() {
+        let (dir, store) = store();
+        let message = fixture();
+        store.put(Mailbox::New, &message).expect("put");
+        fs::write(
+            dir.path()
+                .join("mail")
+                .join("new")
+                .join(format!("{}.json", message.id)),
+            b"{ this is not json",
+        )
+        .expect("write");
+
+        assert!(matches!(
+            store.get(Mailbox::New, message.id),
+            Err(StoreError::Corrupt { .. })
+        ));
+    }
+
+    #[test]
+    fn moving_a_message_removes_it_from_the_source_mailbox() {
+        let (_dir, store) = store();
+        let message = fixture();
+        store.put(Mailbox::New, &message).expect("put");
+        store
+            .move_to(Mailbox::New, Mailbox::Cur, message.id)
+            .expect("move");
+
+        assert!(store.list(Mailbox::New).expect("list").is_empty());
+        assert_eq!(store.list(Mailbox::Cur).expect("list"), vec![message.id]);
+    }
+
+    #[test]
+    fn a_moved_message_is_unchanged() {
+        let (_dir, store) = store();
+        let mut message = fixture();
+        message.sign(&test_signing_key()).expect("sign");
+        store.put(Mailbox::New, &message).expect("put");
+        store
+            .move_to(Mailbox::New, Mailbox::Cur, message.id)
+            .expect("move");
+
+        assert_eq!(store.get(Mailbox::Cur, message.id).expect("get"), message);
+    }
+
+    #[test]
+    fn moving_a_message_that_is_not_there_reports_not_found() {
+        let (_dir, store) = store();
+        assert!(matches!(
+            store.move_to(Mailbox::Out, Mailbox::Sent, fixture().id),
+            Err(StoreError::NotFound { .. })
+        ));
+    }
+}

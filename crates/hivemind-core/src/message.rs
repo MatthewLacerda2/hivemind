@@ -290,41 +290,51 @@ fn is_plain_file_name(name: &str) -> bool {
         && !name.chars().any(char::is_control)
 }
 
+/// A message built to match `docs/reference/canonical_reference.py`, the
+/// independent encoder the golden vector comes from.
+///
+/// Lives outside the test module so the store and index tests can build a
+/// realistic message without each inventing their own.
+#[cfg(test)]
+pub(crate) fn fixture() -> Message {
+    let id = Ulid::from_parts(1_750_000_000_000, 0x0102_0304_0506_0708_090A);
+    Message {
+        id,
+        thread_id: id,
+        in_reply_to: None,
+        from: NodeId::from_certificate_der(b"hivemind test certificate"),
+        to: vec![
+            Recipient::Node(NodeId::from_certificate_der(b"recipient certificate")),
+            Recipient::Owner("rafael".to_owned()),
+            Recipient::Everyone,
+        ],
+        subject: "dashboard PR".to_owned(),
+        body: "Take a look when you get a chance.".to_owned(),
+        kind: Kind::Message,
+        sender_kind: SenderKind::Human,
+        attachments: vec![AttachmentRef {
+            name: "notes.md".to_owned(),
+            size: 42,
+            sha256: Sha256Digest::of(b"notes"),
+            mime: "text/markdown".to_owned(),
+            inline: true,
+        }],
+        sent_at: DateTime::from_timestamp_millis(1_750_000_000_000)
+            .expect("fixture timestamp is in range"),
+        received_at: None,
+        signature: Signature::from_bytes([0u8; 64]),
+    }
+}
+
+/// A fixed key, so a failure is reproducible rather than one run in a million.
+#[cfg(test)]
+pub(crate) fn test_signing_key() -> SigningKey {
+    SigningKey::from_bytes(&[7u8; 32])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Built to match `canonical_reference.py`, an independent encoder that
-    /// follows `docs/protocol.md` rather than this code.
-    fn fixture() -> Message {
-        let id = Ulid::from_parts(1_750_000_000_000, 0x0102_0304_0506_0708_090A);
-        Message {
-            id,
-            thread_id: id,
-            in_reply_to: None,
-            from: NodeId::from_certificate_der(b"hivemind test certificate"),
-            to: vec![
-                Recipient::Node(NodeId::from_certificate_der(b"recipient certificate")),
-                Recipient::Owner("rafael".to_owned()),
-                Recipient::Everyone,
-            ],
-            subject: "dashboard PR".to_owned(),
-            body: "Take a look when you get a chance.".to_owned(),
-            kind: Kind::Message,
-            sender_kind: SenderKind::Human,
-            attachments: vec![AttachmentRef {
-                name: "notes.md".to_owned(),
-                size: 42,
-                sha256: Sha256Digest::of(b"notes"),
-                mime: "text/markdown".to_owned(),
-                inline: true,
-            }],
-            sent_at: DateTime::from_timestamp_millis(1_750_000_000_000)
-                .expect("fixture timestamp is in range"),
-            received_at: None,
-            signature: Signature::from_bytes([0u8; 64]),
-        }
-    }
 
     /// Produced by `canonical_reference.py`. If this test fails, the wire
     /// format changed: that is a compatibility break needing an ADR, not a
@@ -413,17 +423,13 @@ mod tests {
         );
     }
 
-    /// A fixed key so a failure is reproducible rather than one run in a
-    /// million.
-    fn signing_key() -> SigningKey {
-        SigningKey::from_bytes(&[7u8; 32])
-    }
-
     #[test]
     fn a_signed_message_verifies() {
         let mut message = fixture();
-        message.sign(&signing_key()).expect("signing must succeed");
-        assert!(message.verify(&signing_key().verifying_key()).is_ok());
+        message
+            .sign(&test_signing_key())
+            .expect("signing must succeed");
+        assert!(message.verify(&test_signing_key().verifying_key()).is_ok());
     }
 
     #[test]
@@ -433,18 +439,24 @@ mod tests {
         // into the canonical encoding.
         let mut first = fixture();
         let mut second = fixture();
-        first.sign(&signing_key()).expect("signing must succeed");
-        second.sign(&signing_key()).expect("signing must succeed");
+        first
+            .sign(&test_signing_key())
+            .expect("signing must succeed");
+        second
+            .sign(&test_signing_key())
+            .expect("signing must succeed");
         assert_eq!(first.signature, second.signature);
     }
 
     #[test]
     fn verification_fails_after_the_body_is_edited() {
         let mut message = fixture();
-        message.sign(&signing_key()).expect("signing must succeed");
+        message
+            .sign(&test_signing_key())
+            .expect("signing must succeed");
         message.body.push_str(" actually, never mind.");
         assert!(matches!(
-            message.verify(&signing_key().verifying_key()),
+            message.verify(&test_signing_key().verifying_key()),
             Err(CanonicalError::BadSignature)
         ));
     }
@@ -452,7 +464,9 @@ mod tests {
     #[test]
     fn verification_fails_against_a_different_nodes_key() {
         let mut message = fixture();
-        message.sign(&signing_key()).expect("signing must succeed");
+        message
+            .sign(&test_signing_key())
+            .expect("signing must succeed");
         let impostor = SigningKey::from_bytes(&[9u8; 32]).verifying_key();
         assert!(matches!(
             message.verify(&impostor),
@@ -465,17 +479,21 @@ mod tests {
         // The whole point of ADR 0007: the recipient stamps received_at on
         // arrival, and the message must stay verifiable on disk afterwards.
         let mut message = fixture();
-        message.sign(&signing_key()).expect("signing must succeed");
+        message
+            .sign(&test_signing_key())
+            .expect("signing must succeed");
         message.received_at = Some(
             DateTime::from_timestamp_millis(1_750_000_042_000).expect("timestamp is in range"),
         );
-        assert!(message.verify(&signing_key().verifying_key()).is_ok());
+        assert!(message.verify(&test_signing_key().verifying_key()).is_ok());
     }
 
     #[test]
     fn a_message_round_trips_through_the_json_stored_on_disk() {
         let mut message = fixture();
-        message.sign(&signing_key()).expect("signing must succeed");
+        message
+            .sign(&test_signing_key())
+            .expect("signing must succeed");
         let json = serde_json::to_string(&message).expect("must serialise");
         let back: Message = serde_json::from_str(&json).expect("must deserialise");
         assert_eq!(back, message);
@@ -486,10 +504,12 @@ mod tests {
         // This is the property ADR 0002 and ADR 0007 are both for: files are
         // the source of truth, and what is read back off disk is verifiable.
         let mut message = fixture();
-        message.sign(&signing_key()).expect("signing must succeed");
+        message
+            .sign(&test_signing_key())
+            .expect("signing must succeed");
         let json = serde_json::to_string(&message).expect("must serialise");
         let back: Message = serde_json::from_str(&json).expect("must deserialise");
-        assert!(back.verify(&signing_key().verifying_key()).is_ok());
+        assert!(back.verify(&test_signing_key().verifying_key()).is_ok());
     }
 
     #[test]
