@@ -47,7 +47,15 @@ Conventional commits (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`),
 enforced by a `commit-msg` hook. `CHANGELOG.md` is generated from them with
 `git-cliff`, so an unparseable commit is a hole in the changelog.
 
-Branch protection on `main`: CI must pass, one approving review, squash merge.
+Branch protection on `main`: CI must pass, one approving review, **merge commit
+— not squash** ([ADR 0009](docs/decisions/0009-merge-commits-not-squash.md)).
+
+That last one has teeth: **every commit on your branch must build and pass its
+own tests on its own.** The whole reason we keep individual commits is so
+`git bisect` can name the one that broke something, and a history containing
+commits that do not compile only looks bisectable. If you need to fix something
+you did three commits ago, amend or rebase it away before you open the PR —
+do not add a "fix the thing I broke earlier" commit.
 
 Your PR description says which sections of the spec it implements. Reviewers
 check the code against the spec, so make that easy.

@@ -379,7 +379,7 @@ This section is not optional and is not "later".
 - `nightly.yml`: fuzz targets (short budget), `cargo-audit`, MSRV check, `cargo update` dry-run report.
 - `release.yml`: on tag `v*`, `cargo-dist` builds macOS (arm64 + x86_64) and Linux binaries, generates checksums, creates the GitHub release, and updates the Homebrew formula in `packaging/homebrew` (and, later, a tap repo). Binaries ad-hoc codesigned on macOS (`codesign -s -`) so the firewall prompt appears once.
 - Dependabot for cargo and actions, weekly, grouped.
-- Branch protection notes in `CONTRIBUTING.md`: CI must pass, one review, squash merge, conventional commits.
+- Branch protection notes in `CONTRIBUTING.md`: CI must pass, one review, merge commit (**not** squash — see `docs/decisions/0009-merge-commits-not-squash.md`; every commit on a branch must build and pass on its own), conventional commits.
 
 ### 13.5 Repo hygiene
 - `README.md`: what/why, 60-second quick start, how Claude uses it (with a screenshot placeholder), config reference, FAQ (why no central server, why not SSH, what about autoreply, security model), comparison table with claude-peers-mcp / Claude Bridge / Agent Room / agent-inbox.
