@@ -2,6 +2,16 @@
 
 [graph]
 all-features = true
+# Only the platforms we ship (SPEC §1: macOS primary, Linux in CI; no Windows
+# in v1). Without this, the dependency graph includes branches we never
+# compile — rusqlite's wasm VFS, for one — and the duplicate-version ban
+# starts reporting conflicts that do not exist in any binary we produce.
+targets = [
+    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-apple-darwin" },
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+]
 
 [advisories]
 version = 2

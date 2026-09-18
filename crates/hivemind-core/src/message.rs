@@ -33,6 +33,29 @@ pub enum Kind {
     Notification,
 }
 
+impl Kind {
+    /// The stable string used in the index and on the wire.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Message => "message",
+            Self::Task => "task",
+            Self::Notification => "notification",
+        }
+    }
+
+    /// Parse [`Kind::as_str`].
+    #[must_use]
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        match s {
+            "message" => Some(Self::Message),
+            "task" => Some(Self::Task),
+            "notification" => Some(Self::Notification),
+            _ => None,
+        }
+    }
+}
+
 /// Whether a person or an agent wrote this.
 ///
 /// Set by the entrypoint — CLI and web UI mean [`SenderKind::Human`], MCP means
@@ -44,6 +67,27 @@ pub enum SenderKind {
     Human,
     /// A Claude sent this through the MCP server.
     Agent,
+}
+
+impl SenderKind {
+    /// The stable string used in the index and on the wire.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Human => "human",
+            Self::Agent => "agent",
+        }
+    }
+
+    /// Parse [`SenderKind::as_str`].
+    #[must_use]
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        match s {
+            "human" => Some(Self::Human),
+            "agent" => Some(Self::Agent),
+            _ => None,
+        }
+    }
 }
 
 /// Who a message is addressed to.

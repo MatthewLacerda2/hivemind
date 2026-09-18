@@ -25,6 +25,7 @@ ciborium = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
 data-encoding = "2"
 ed25519-dalek = { version = "3", features = ["alloc", "rand_core"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.11"
 thiserror = "2"

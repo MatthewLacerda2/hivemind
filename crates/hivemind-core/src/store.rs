@@ -47,6 +47,20 @@ impl Mailbox {
     }
 }
 
+impl Mailbox {
+    /// Parse [`Mailbox::as_str`].
+    #[must_use]
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.as_str() == s)
+    }
+
+    /// Whether messages here are unread (SPEC §4.3).
+    #[must_use]
+    pub fn is_unread(self) -> bool {
+        matches!(self, Self::New)
+    }
+}
+
 /// Why a store operation failed.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
