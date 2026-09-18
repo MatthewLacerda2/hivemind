@@ -8,6 +8,7 @@
 
 mod client;
 mod commands;
+mod doctor;
 mod hooks;
 mod notify;
 mod paths;
@@ -132,6 +133,12 @@ enum Command {
         #[arg(long, conflicts_with = "id")]
         trust_network: bool,
     },
+    /// Check that everything hivemind needs is working (SPEC §10).
+    Doctor {
+        /// Print JSON instead of prose.
+        #[arg(long)]
+        json: bool,
+    },
     /// Who this node knows.
     Peers {
         #[command(subcommand)]
@@ -198,6 +205,7 @@ async fn main() -> Result<()> {
         Command::Read { id, json } => commands::read(&cli.api, &id, json).await,
         Command::Reply { id, body } => commands::reply(&cli.api, &id, body.as_deref()).await,
         Command::Reindex => commands::reindex(cli.home.as_deref()),
+        Command::Doctor { json } => doctor::run(cli.home.as_deref(), &cli.api, json).await,
         Command::Join { host } => commands::join(&cli.api, &host).await,
         Command::Pair {
             id,

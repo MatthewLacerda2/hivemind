@@ -39,6 +39,18 @@ pub struct Me {
     pub version: String,
     /// How many unread messages there are.
     pub unread: u64,
+    /// The display name peers see.
+    pub name: String,
+    /// The human who owns this machine, if they said.
+    pub owner: Option<String>,
+    /// The port the peer listener is on.
+    pub peer_port: u16,
+    /// How many peers are paired.
+    pub peers: usize,
+    /// How many introductions are waiting for a confirmation (SPEC §6.2).
+    pub pending_pairs: usize,
+    /// How many messages are still on their way out.
+    pub outbox: usize,
 }
 
 /// A peer, paired or merely seen (SPEC §7.1).
@@ -358,6 +370,12 @@ pub(crate) async fn me(State(service): State<AppState>) -> Result<Json<Me>, Prob
         short_id: id.short(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
         unread: service.unread_count()?,
+        name: service.name().to_owned(),
+        owner: service.owner().map(ToOwned::to_owned),
+        peer_port: service.peer_port(),
+        peers: service.paired_peers()?.len(),
+        pending_pairs: service.pending_pairs()?.len(),
+        outbox: service.pending_outbound()?.len(),
     }))
 }
 
