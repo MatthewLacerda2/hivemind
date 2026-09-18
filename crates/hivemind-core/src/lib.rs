@@ -9,6 +9,7 @@
 //! # Layout
 //!
 //! - [`message`] — the `Message` type, its canonical encoding and signature.
+//! - [`blobs`] — content-addressed attachment storage (SPEC §4.3).
 //! - [`peer`] — node identity and fingerprints.
 //! - [`peerbook`] — the address book: who we have paired with (SPEC §4.2).
 //! - [`store`] — the maildir-style store; files are the source of truth (SPEC §4.3).
@@ -19,6 +20,7 @@
 
 #![doc(html_root_url = "https://docs.rs/hivemind-core/0.1.0")]
 
+pub mod blobs;
 pub mod config;
 pub mod crypto;
 pub mod identity;

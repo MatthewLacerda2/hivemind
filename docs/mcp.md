@@ -128,14 +128,54 @@ An empty list means nothing is paired yet, so `send` can only reach this
 machine. Pairing is a one-time fingerprint confirmation on both sides
 (SPEC §6.2).
 
+### Attachments
+
+`send` and `reply` take `attachments`: a list of paths on this machine. Each
+file is copied into hivemind's own storage as it is sent, so the original can
+be moved or deleted straight afterwards.
+
+```json
+{
+  "to": ["matheus"],
+  "subject": "the plan",
+  "body": "Draft attached — the open question is in §3.",
+  "attachments": ["/Users/me/work/plan.md"]
+}
+```
+
+`read` gives each attachment back with a `path`, so the file is opened with
+ordinary file tools rather than pushed through the protocol:
+
+```json
+{
+  "attachments": [
+    {
+      "name": "plan.md",
+      "sha": "ab5aa970…",
+      "size": 4096,
+      "path": "/Users/me/.hivemind/blobs/ab5aa970…"
+    }
+  ]
+}
+```
+
+`path` is `null` when the bytes are not here yet. A file larger than the
+sender's inline limit (8 MiB by default) travels as a reference and is fetched
+on first access.
+
 ### `download_attachment`
 
-Returns a path on this machine, so the file can be read with ordinary file
-tools. Use the `sha` from `read`.
+Fetches one, if it is not already here, and returns its path. Use the `sha`
+from `read`. It blocks until the file exists — there is nothing to do with a
+half-fetched attachment.
 
 ```json
 { "id": "01JXT2…", "sha": "ab5aa97074c454a0632057e704220d9a6678fbf773a0a5806fc09b8173b07309" }
 ```
+
+A fetch that was interrupted resumes from wherever it stopped, so calling this
+again after a dropped connection costs the bytes not yet received rather than
+all of them.
 
 ## Resources
 

@@ -106,7 +106,59 @@ impl Sha256Digest {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+
+    /// Lowercase hex, which is also how a blob is named on disk (SPEC §4.3).
+    #[must_use]
+    pub fn to_hex(&self) -> String {
+        hex_encode(&self.0)
+    }
+
+    /// Start hashing something too large to hold in memory.
+    #[must_use]
+    pub fn hasher() -> DigestWriter {
+        DigestWriter(Sha256::new())
+    }
 }
+
+/// An incremental SHA-256, for attachments that do not fit in memory.
+#[derive(Debug, Clone)]
+pub struct DigestWriter(Sha256);
+
+impl DigestWriter {
+    /// Add more bytes.
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+
+    /// The digest of everything added.
+    #[must_use]
+    pub fn finish(self) -> Sha256Digest {
+        Sha256Digest(self.0.finalize().into())
+    }
+}
+
+impl std::str::FromStr for Sha256Digest {
+    type Err = InvalidDigest;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // A blob name arrives in a URL path, so this parses what a stranger
+        // typed rather than what we wrote.
+        if s.len() != 64 {
+            return Err(InvalidDigest);
+        }
+        let mut out = [0u8; 32];
+        for (i, slot) in out.iter_mut().enumerate() {
+            let pair = s.get(i * 2..i * 2 + 2).ok_or(InvalidDigest)?;
+            *slot = u8::from_str_radix(pair, 16).map_err(|_| InvalidDigest)?;
+        }
+        Ok(Self(out))
+    }
+}
+
+/// That was not a SHA-256 digest.
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+#[error("expected 64 lowercase hex characters")]
+pub struct InvalidDigest;
 
 impl fmt::Display for Sha256Digest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

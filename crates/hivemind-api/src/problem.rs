@@ -13,6 +13,8 @@ use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use utoipa::ToSchema;
 
+use hivemind_core::blobs::BlobError;
+
 use crate::service::ServiceError;
 
 /// The stable identity of a failure.
@@ -35,6 +37,12 @@ pub enum ProblemType {
     BadSignature,
     /// A host we were asked to join could not be reached, or refused us.
     PeerUnreachable,
+    /// No attachment with that digest, here or at the sender.
+    BlobNotFound,
+    /// The attachment is larger than this node accepts (SPEC §6.3).
+    BlobTooLarge,
+    /// The attachment's name is not a name (SPEC §6.3).
+    UnsafeAttachmentName,
     /// Something went wrong that is not the caller's fault.
     Internal,
 }
@@ -51,6 +59,9 @@ impl ProblemType {
             Self::IdentityMismatch => "identity-mismatch",
             Self::BadSignature => "bad-signature",
             Self::PeerUnreachable => "peer-unreachable",
+            Self::BlobNotFound => "blob-not-found",
+            Self::BlobTooLarge => "blob-too-large",
+            Self::UnsafeAttachmentName => "unsafe-attachment-name",
             Self::Internal => "internal",
         }
     }
@@ -66,6 +77,9 @@ impl ProblemType {
             Self::IdentityMismatch => "Identity does not match the certificate",
             Self::BadSignature => "Signature does not verify",
             Self::PeerUnreachable => "Peer could not be reached",
+            Self::BlobNotFound => "No such attachment",
+            Self::BlobTooLarge => "Attachment is too large",
+            Self::UnsafeAttachmentName => "Attachment name is not a file name",
             Self::Internal => "Internal error",
         }
     }
@@ -74,8 +88,13 @@ impl ProblemType {
     #[must_use]
     pub fn status(self) -> StatusCode {
         match self {
-            Self::MessageNotFound => StatusCode::NOT_FOUND,
-            Self::InvalidMessage | Self::NoRecipients => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::MessageNotFound | Self::BlobNotFound => StatusCode::NOT_FOUND,
+            // 413 rather than 422: the request was well formed, it is the
+            // thing it carries that is too big.
+            Self::BlobTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::UnsafeAttachmentName | Self::InvalidMessage | Self::NoRecipients => {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
             // SPEC §6.2 names this status explicitly.
             Self::NotPaired => StatusCode::FORBIDDEN,
             Self::IdentityMismatch | Self::BadSignature => StatusCode::BAD_REQUEST,
@@ -87,7 +106,7 @@ impl ProblemType {
     }
 
     /// Every slug, for the generated documentation.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 11] = [
         Self::MessageNotFound,
         Self::InvalidMessage,
         Self::NoRecipients,
@@ -95,6 +114,9 @@ impl ProblemType {
         Self::IdentityMismatch,
         Self::BadSignature,
         Self::PeerUnreachable,
+        Self::BlobNotFound,
+        Self::BlobTooLarge,
+        Self::UnsafeAttachmentName,
         Self::Internal,
     ];
 }
@@ -150,6 +172,14 @@ impl From<ServiceError> for Problem {
             ServiceError::BadSignature => ProblemType::BadSignature,
             ServiceError::NoSuchPeer { .. } => ProblemType::NotPaired,
             ServiceError::Peer(_) => ProblemType::PeerUnreachable,
+            ServiceError::Blob(BlobError::NotFound { .. }) => ProblemType::BlobNotFound,
+            ServiceError::Blob(BlobError::TooLarge { .. }) => ProblemType::BlobTooLarge,
+            ServiceError::Blob(BlobError::UnsafeName(_)) => ProblemType::UnsafeAttachmentName,
+            // A digest mismatch or a failed write is this node's problem, not
+            // the caller's, and says nothing useful to them.
+            ServiceError::Blob(BlobError::DigestMismatch { .. } | BlobError::Io { .. }) => {
+                ProblemType::Internal
+            }
             ServiceError::IdentityMismatch(_) => ProblemType::IdentityMismatch,
             ServiceError::Store(_)
             | ServiceError::Index(_)

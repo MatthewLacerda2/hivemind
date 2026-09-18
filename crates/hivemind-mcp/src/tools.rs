@@ -62,6 +62,23 @@ pub struct SendParams {
     pub body: String,
     /// `message` (the default), `task`, or `notification`.
     pub kind: Option<String>,
+    /// Absolute paths to local files to send with the message. They are copied
+    /// into hivemind's own storage immediately, so the originals can be moved
+    /// or deleted afterwards.
+    pub attachments: Option<Vec<String>>,
+}
+
+/// Turn the paths an agent supplied into real ones.
+///
+/// No validation here beyond the shape: whether a path exists, is readable and
+/// is within the size limit is the blob store's answer to give, with a message
+/// the agent can act on.
+fn local_paths(paths: Option<Vec<String>>) -> Vec<std::path::PathBuf> {
+    paths
+        .unwrap_or_default()
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .collect()
 }
 
 /// Arguments for `inbox`.
@@ -89,6 +106,10 @@ pub struct ReplyParams {
     pub id: String,
     /// The reply body, as markdown.
     pub body: String,
+    /// Absolute paths to local files to send with the message. They are copied
+    /// into hivemind's own storage immediately, so the originals can be moved
+    /// or deleted afterwards.
+    pub attachments: Option<Vec<String>>,
 }
 
 /// Arguments for `broadcast`.
@@ -275,7 +296,16 @@ impl HivemindMcp {
                     name: a.name.clone(),
                     sha: a.sha256.to_string(),
                     size: a.size,
-                    path: None,
+                    // A path only when the bytes are actually here. Handing
+                    // back a path to a file that does not exist would send a
+                    // Claude off to open nothing (SPEC §9.1).
+                    path: self.service.blobs().has(&a.sha256).then(|| {
+                        self.service
+                            .blobs()
+                            .path_of(&a.sha256)
+                            .to_string_lossy()
+                            .into_owned()
+                    }),
                 })
                 .collect(),
         }))
@@ -303,6 +333,7 @@ impl HivemindMcp {
                 .and_then(Kind::from_str_opt)
                 .unwrap_or(Kind::Message),
             in_reply_to: None,
+            attachments: local_paths(params.attachments),
         };
 
         // MCP means an agent, always. The caller does not get to say otherwise
@@ -331,7 +362,12 @@ impl HivemindMcp {
         let id = parse_id(&params.id)?;
         let message = self
             .service
-            .reply(id, params.body, SenderKind::Agent)
+            .reply(
+                id,
+                params.body,
+                local_paths(params.attachments),
+                SenderKind::Agent,
+            )
             .map_err(|e| mcp_error(&e))?;
 
         Ok(Json(Sent {
@@ -359,6 +395,9 @@ impl HivemindMcp {
                 .and_then(Kind::from_str_opt)
                 .unwrap_or(Kind::Message),
             in_reply_to: None,
+            // SPEC §9.1: broadcast takes no attachments. Sending a large file
+            // to everybody is rarely what was meant, and `send` is right there.
+            attachments: Vec::new(),
         };
 
         let message = self
@@ -401,12 +440,19 @@ impl HivemindMcp {
             .find(|a| a.sha256.to_string() == params.sha);
 
         match found {
-            // Blob storage arrives in M4 (SPEC §14); until a message can carry
-            // one, this is unreachable rather than unimplemented.
-            Some(_) => Err(McpError::internal_error(
-                "attachment transfer is not available in this version",
-                None,
-            )),
+            Some(attachment) => {
+                // Blocks until it is here. An agent asked for the file, not
+                // for a progress report, and it has nothing to do until the
+                // bytes exist.
+                let path = self
+                    .service
+                    .fetch_attachment(id, attachment.sha256)
+                    .await
+                    .map_err(|e| mcp_error(&e))?;
+                Ok(Json(Downloaded {
+                    path: path.to_string_lossy().into_owned(),
+                }))
+            }
             None => Err(McpError::invalid_params(
                 format!("message {id} has no attachment with sha {}", params.sha),
                 None,

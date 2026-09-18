@@ -182,10 +182,30 @@ pub struct MessageBody {
     pub received_at: Option<DateTime<Utc>>,
     /// Which mailbox it is in.
     pub mailbox: String,
+    /// The files that came with it.
+    pub attachments: Vec<Attachment>,
+}
+
+/// One attachment, as the local API describes it (SPEC §7.1).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct Attachment {
+    /// The name to save it as. Checked on arrival, never a path (SPEC §6.3).
+    pub name: String,
+    /// Its size in bytes.
+    pub size: u64,
+    /// Its content address, and the `sha` in the attachment URL.
+    pub sha256: String,
+    /// What the sender says it is. Advisory (SPEC §4.1).
+    pub mime: String,
+    /// Whether it travelled with the message or is fetched on demand.
+    pub inline: bool,
+    /// Whether the bytes are already on this machine. `false` means the first
+    /// read of it will go to the sender.
+    pub cached: bool,
 }
 
 impl MessageBody {
-    fn new(mailbox: Mailbox, message: Message) -> Self {
+    fn new(mailbox: Mailbox, message: Message, blobs: &hivemind_core::blobs::BlobStore) -> Self {
         Self {
             id: message.id.to_string(),
             thread_id: message.thread_id.to_string(),
@@ -198,6 +218,21 @@ impl MessageBody {
             sent_at: message.sent_at,
             received_at: message.received_at,
             mailbox: mailbox.as_str().to_owned(),
+            attachments: message
+                .attachments
+                .into_iter()
+                .map(|a| Attachment {
+                    // Whether the bytes are here is asked now rather than
+                    // stored: a lazy attachment becomes cached the moment
+                    // somebody reads it.
+                    cached: blobs.has(&a.sha256),
+                    sha256: a.sha256.to_hex(),
+                    name: a.name,
+                    size: a.size,
+                    mime: a.mime,
+                    inline: a.inline,
+                })
+                .collect(),
         }
     }
 }
@@ -218,6 +253,9 @@ pub struct SendRequest {
     pub body: String,
     /// `message`, `task` or `notification`. Defaults to `message`.
     pub kind: Option<String>,
+    /// Absolute paths to local files to send with it. The API is loopback
+    /// only, so these are paths on this machine (SPEC §7.1).
+    pub attachments: Option<Vec<String>>,
 }
 
 /// What to say in a reply.
@@ -225,6 +263,9 @@ pub struct SendRequest {
 pub struct ReplyRequest {
     /// The body, as markdown.
     pub body: String,
+    /// Absolute paths to local files to send with it. The API is loopback
+    /// only, so these are paths on this machine (SPEC §7.1).
+    pub attachments: Option<Vec<String>>,
 }
 
 /// What a send returns (SPEC §8: accepted, not delivered).
@@ -254,6 +295,19 @@ pub struct ListParams {
     pub limit: Option<usize>,
 }
 
+/// Turn the paths a local caller supplied into real ones.
+///
+/// Nothing is validated here: whether a path exists, is readable and fits
+/// under the size limit is the blob store's answer to give, with a message the
+/// caller can act on.
+fn local_paths(paths: Option<Vec<String>>) -> Vec<std::path::PathBuf> {
+    paths
+        .unwrap_or_default()
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .collect()
+}
+
 /// Build the loopback router, including the Swagger UI at `/docs` (SPEC §7).
 pub fn router(state: AppState) -> Router {
     use utoipa::OpenApi as _;
@@ -274,6 +328,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/messages/{id}", get(get_message))
         .route("/api/v1/messages/{id}/reply", post(reply_to_message))
         .route("/api/v1/messages/{id}/read", post(mark_read))
+        .route(
+            "/api/v1/messages/{id}/attachments/{sha}",
+            get(get_attachment),
+        )
         .route("/api/v1/threads/{thread_id}", get(get_thread))
         .route("/api/v1/events", get(events))
         .route("/healthz", get(healthz))
@@ -298,6 +356,75 @@ pub(crate) async fn me(State(service): State<AppState>) -> Result<Json<Me>, Prob
         version: env!("CARGO_PKG_VERSION").to_owned(),
         unread: service.unread_count()?,
     }))
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/messages/{id}/attachments/{sha}",
+    params(
+        ("id" = String, Path, description = "The message the attachment belongs to"),
+        ("sha" = String, Path, description = "The attachment's SHA-256, in hex")
+    ),
+    responses(
+        (status = 200, description = "The attachment's bytes", content_type = "application/octet-stream"),
+        (status = 404, body = Problem),
+        (status = 502, body = Problem)
+    ),
+    tag = "messages"
+)]
+pub(crate) async fn get_attachment(
+    State(service): State<AppState>,
+    Path((id, sha)): Path<(String, String)>,
+) -> Result<axum::response::Response, Problem> {
+    let id = parse_id(&id)?;
+    let digest: hivemind_core::crypto::Sha256Digest = sha.parse().map_err(|_| {
+        Problem::new(
+            crate::problem::ProblemType::BlobNotFound,
+            "that is not a SHA-256 digest, so there is no such attachment",
+        )
+    })?;
+
+    // Blocks until the fetch finishes on a first access (SPEC §7.1). A
+    // progress stream would be nicer; a partial file served as if whole would
+    // be worse than waiting.
+    let path = service.fetch_attachment(id, digest).await?;
+    let (_, message) = service.get(id)?;
+    let attachment = message
+        .attachments
+        .iter()
+        .find(|a| a.sha256 == digest)
+        .ok_or_else(|| {
+            Problem::new(
+                crate::problem::ProblemType::BlobNotFound,
+                "this message has no such attachment",
+            )
+        })?;
+
+    let file = tokio::fs::File::open(&path).await.map_err(|_| {
+        Problem::new(
+            crate::problem::ProblemType::BlobNotFound,
+            "the attachment is no longer on disk",
+        )
+    })?;
+
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, attachment.mime.clone())
+        .header(axum::http::header::CONTENT_LENGTH, attachment.size)
+        // The name came from another machine and is checked on arrival, but it
+        // is quoted here too: a header is not the place to find out.
+        .header(
+            axum::http::header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}\"", attachment.name),
+        )
+        .body(axum::body::Body::from_stream(
+            tokio_util::io::ReaderStream::new(file),
+        ))
+        .map_err(|_| {
+            Problem::new(
+                crate::problem::ProblemType::Internal,
+                "could not build a response",
+            )
+        })
 }
 
 #[utoipa::path(
@@ -436,7 +563,7 @@ pub(crate) async fn get_message(
 ) -> Result<Json<MessageBody>, Problem> {
     let id = parse_id(&id)?;
     let (mailbox, message) = service.get(id)?;
-    Ok(Json(MessageBody::new(mailbox, message)))
+    Ok(Json(MessageBody::new(mailbox, message, service.blobs())))
 }
 
 #[utoipa::path(
@@ -458,6 +585,7 @@ pub(crate) async fn send_message(
             .and_then(Kind::from_str_opt)
             .unwrap_or(Kind::Message),
         in_reply_to: None,
+        attachments: local_paths(request.attachments),
     };
 
     // HTTP means a human at the CLI or the web UI. MCP sets Agent instead, and
@@ -484,7 +612,12 @@ pub(crate) async fn reply_to_message(
     Json(request): Json<ReplyRequest>,
 ) -> Result<(StatusCode, Json<Accepted>), Problem> {
     let id = parse_id(&id)?;
-    let message = service.reply(id, request.body, SenderKind::Human)?;
+    let message = service.reply(
+        id,
+        request.body,
+        local_paths(request.attachments),
+        SenderKind::Human,
+    )?;
     Ok((
         StatusCode::ACCEPTED,
         Json(Accepted {
@@ -616,6 +749,9 @@ mod tests {
             owner: None,
             callback_host: "127.0.0.1".to_owned(),
             peer_port: 8400,
+            max_attachment_bytes: hivemind_core::config::DEFAULT_MAX_ATTACHMENT_BYTES,
+            inline_max_bytes: hivemind_core::config::DEFAULT_INLINE_MAX_BYTES,
+            prefetch: false,
         };
         let service = MailService::open(dir.path(), node, SigningKey::from_bytes(&[11u8; 32]))
             .expect("service");

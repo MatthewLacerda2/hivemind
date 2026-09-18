@@ -55,6 +55,9 @@ pub(crate) async fn daemon(home: Option<&Path>, port: u16) -> Result<()> {
                 owner: config.owner.clone(),
                 callback_host: "127.0.0.1".to_owned(),
                 peer_port: config.peer_port,
+                max_attachment_bytes: config.max_attachment_bytes,
+                inline_max_bytes: config.inline_max_bytes,
+                prefetch: config.prefetch,
             },
             identity.signing_key().clone(),
         )
@@ -160,6 +163,13 @@ where
         stop(),
     ));
 
+    // SPEC §8: `prefetch = true` fetches lazy attachments on arrival rather
+    // than on first access. Off by default.
+    let prefetch = tokio::spawn(hivemind_api::outbox::prefetch_attachments(
+        Arc::clone(service),
+        stop(),
+    ));
+
     // SPEC §8: sending writes to out/ and returns; this is what empties it.
     let courier = tokio::spawn({
         let outbox = hivemind_api::ServiceOutbox::new(Arc::clone(service));
@@ -189,7 +199,7 @@ where
         }
     });
 
-    Ok(vec![peer_listener, courier, mdns])
+    Ok(vec![peer_listener, courier, mdns, prefetch])
 }
 
 /// Wait for whichever comes first: Ctrl-C from a terminal, or SIGTERM.
@@ -269,6 +279,7 @@ pub(crate) async fn send(
     api: &str,
     to: &[String],
     subject: &str,
+    attach: &[std::path::PathBuf],
     body: Option<&str>,
 ) -> Result<()> {
     anyhow::ensure!(
@@ -277,10 +288,25 @@ pub(crate) async fn send(
     );
     let body = body_from_arg_or_stdin(body)?;
 
+    // Absolute, because the daemon reads them and it is not in this directory.
+    let attachments = attach
+        .iter()
+        .map(|path| {
+            std::fs::canonicalize(path)
+                .map(|p| p.to_string_lossy().into_owned())
+                .with_context(|| format!("cannot read {}", path.display()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
     let accepted: Accepted = Client::new(api)
         .post(
             "/api/v1/messages",
-            &serde_json::json!({ "to": to, "subject": subject, "body": body }),
+            &serde_json::json!({
+                "to": to,
+                "subject": subject,
+                "body": body,
+                "attachments": attachments,
+            }),
         )
         .await?;
 
@@ -369,6 +395,19 @@ struct MessageBody {
     body: String,
     sender_kind: String,
     sent_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default)]
+    attachments: Vec<Attachment>,
+}
+
+/// One attachment, as the local API reports it.
+#[derive(Debug, Deserialize, serde::Serialize)]
+struct Attachment {
+    name: String,
+    size: u64,
+    sha256: String,
+    mime: String,
+    inline: bool,
+    cached: bool,
 }
 
 /// Read one message and mark it read (SPEC §10).
@@ -387,7 +426,7 @@ pub(crate) async fn read(api: &str, id: &str, json: bool) -> Result<()> {
             serde_json::to_string_pretty(&serde_json::json!({
                 "id": message.id, "from": message.from, "subject": message.subject,
                 "body": message.body, "sender_kind": message.sender_kind,
-                "sent_at": message.sent_at,
+                "sent_at": message.sent_at, "attachments": message.attachments,
             }))?
         );
         return Ok(());
@@ -403,6 +442,28 @@ pub(crate) async fn read(api: &str, id: &str, json: bool) -> Result<()> {
     );
     println!();
     println!("{}", message.body);
+
+    if !message.attachments.is_empty() {
+        println!();
+        println!("{}", "attachments".dimmed());
+        for attachment in &message.attachments {
+            // "on disk" vs "fetch on read" is the difference between opening
+            // it now and waiting for the sender's laptop to be awake.
+            let state = if attachment.cached {
+                "on disk".green().to_string()
+            } else {
+                "fetch on read".yellow().to_string()
+            };
+            println!(
+                "  {}  {}  {}  {}",
+                attachment.name.bold(),
+                human_size(attachment.size),
+                attachment.mime.dimmed(),
+                state
+            );
+            println!("    {}", attachment.sha256.dimmed());
+        }
+    }
     Ok(())
 }
 
@@ -732,4 +793,27 @@ pub(crate) async fn trust_network(api: &str, yes: bool) -> Result<()> {
         println!("paired with {} ({})", peer.name.bold(), peer.short_id);
     }
     Ok(())
+}
+
+/// A size a person can read at a glance.
+fn human_size(bytes: u64) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    const UNITS: [(&str, u64); 4] = [
+        ("GiB", 1024 * 1024 * 1024),
+        ("MiB", 1024 * 1024),
+        ("KiB", 1024),
+        ("B", 1),
+    ];
+
+    for (unit, scale) in UNITS {
+        if bytes >= scale {
+            if scale == 1 {
+                return format!("{bytes} B");
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let value = bytes as f64 / scale as f64;
+            return format!("{value:.1} {unit}");
+        }
+    }
+    "0 B".to_owned()
 }

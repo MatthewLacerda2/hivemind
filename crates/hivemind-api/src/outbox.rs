@@ -68,6 +68,40 @@ impl PeerTransport {
     pub fn new(service: Arc<MailService>, identity: hivemind_net::tls::LocalIdentity) -> Self {
         Self { service, identity }
     }
+
+    /// The attachments that travel with the message (SPEC §8).
+    ///
+    /// A blob we no longer hold is left out rather than failing the delivery:
+    /// the recipient can still fetch it lazily, and a missing file is a worse
+    /// reason to stop delivering mail than to deliver it without the file.
+    fn inline_parts(
+        &self,
+        message: &hivemind_core::message::Message,
+    ) -> Vec<hivemind_net::client::Part> {
+        message
+            .attachments
+            .iter()
+            .filter(|attachment| attachment.inline)
+            .filter_map(|attachment| {
+                let path = self.service.blobs().path_of(&attachment.sha256);
+                match std::fs::read(&path) {
+                    Ok(bytes) => Some(hivemind_net::client::Part {
+                        name: attachment.sha256.to_hex(),
+                        content_type: attachment.mime.clone(),
+                        bytes,
+                    }),
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            name = %attachment.name,
+                            "an inline attachment is missing; sending without it"
+                        );
+                        None
+                    }
+                }
+            })
+            .collect()
+    }
 }
 
 impl hivemind_net::delivery::Transport for PeerTransport {
@@ -89,8 +123,10 @@ impl hivemind_net::delivery::Transport for PeerTransport {
             });
 
         let client = hivemind_net::client::PeerClient::pinned(&self.identity, trusted)?;
-        let _: hivemind_net::client::PeerResponse<crate::peer::Delivered> =
-            client.post(addr, "/peer/v1/messages", message).await?;
+        let parts = self.inline_parts(message);
+        let _: hivemind_net::client::PeerResponse<crate::peer::Delivered> = client
+            .post_multipart(addr, "/peer/v1/messages", message, &parts)
+            .await?;
         Ok(())
     }
 }
@@ -164,5 +200,49 @@ impl hivemind_net::discovery::Seen for ServiceSink {
                 tracing::debug!(%authority, %error, "could not greet a node seen on the LAN");
             }
         });
+    }
+}
+
+/// Fetches lazy attachments as soon as their message arrives (SPEC §8).
+///
+/// Only when `prefetch = true`. The default is to wait until somebody asks,
+/// because the common case is a laptop on a metered connection that will never
+/// open most of what it receives.
+///
+/// Failures are logged and dropped: a fetch that did not work is exactly the
+/// situation the lazy path already handles, so the message is still readable
+/// and the attachment is still fetchable on first access.
+pub async fn prefetch_attachments<F>(service: Arc<MailService>, shutdown: F)
+where
+    F: std::future::Future<Output = ()> + Send,
+{
+    if !service.prefetches() {
+        return;
+    }
+
+    let mut events = service.subscribe();
+    let mut shutdown = std::pin::pin!(shutdown);
+
+    loop {
+        let event = tokio::select! {
+            () = &mut shutdown => break,
+            event = events.recv() => event,
+        };
+
+        let Ok(crate::service::Event::MessageReceived { id }) = event else {
+            // A lagged receiver has missed messages; their attachments will be
+            // fetched on first access like any other. Not worth stopping for.
+            continue;
+        };
+
+        let Ok((_, message)) = service.get(id) else {
+            continue;
+        };
+
+        for digest in service.missing_attachments(&message) {
+            if let Err(error) = service.fetch_attachment(id, digest).await {
+                tracing::debug!(%error, %id, "could not prefetch an attachment");
+            }
+        }
     }
 }

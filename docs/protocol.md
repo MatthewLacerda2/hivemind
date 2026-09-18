@@ -21,7 +21,84 @@ GET  /peer/v1/blobs/{sha}      range requests supported (resume)
 
 Delivery is push. Recipients never poll senders for mail — only for lazy blobs.
 
-<!-- TODO(M3): request and response bodies, once the peer router exists. -->
+### `POST /peer/v1/handshake`
+
+Both sides send the same shape. The certificate presented in the TLS handshake
+is the identity; `id` is a claim, and a mismatch between the two is rejected
+rather than resolved in either direction.
+
+```json
+{
+  "id": "hm1:w2mq-xor2-…",
+  "name": "laptop",
+  "owner": "matheus",
+  "version": "0.1.0",
+  "callback_host": "10.0.0.5",
+  "callback_port": 8400
+}
+```
+
+`callback_host` and `callback_port` are where the sender can be reached. The
+receiver records them rather than guessing which of its own interfaces the
+connection arrived through. A `gossip` field is reserved for v2 (SPEC §12); it
+is never sent today and is ignored on receipt.
+
+The endpoint is open to anyone who completes a TLS handshake — see
+`decisions/0010-tls-admits-strangers-the-application-rejects-them.md`. It
+records a pending pair and reveals nothing about the mailbox. Everything else
+requires a paired peer and answers `403 not_paired`.
+
+### `POST /peer/v1/messages`
+
+`multipart/form-data`. The first part is named `message` and carries the signed
+message as JSON. Each further part is one inline attachment, named by its
+SHA-256 in lowercase hex:
+
+```
+--boundary
+Content-Disposition: form-data; name="message"
+Content-Type: application/json
+
+{"id":"01JXT2…","from":"hm1:…","attachments":[…],"signature":"…"}
+--boundary
+Content-Disposition: form-data; name="ab5aa970…"; filename="ab5aa970…"
+Content-Type: text/markdown
+
+# notes
+--boundary--
+```
+
+A part is accepted only if the message declares an inline attachment with that
+digest, **and** the bytes hash to it. Without the first check a paired peer
+could write arbitrary files into the recipient's blob store; without the second
+it could substitute different content for something it did declare.
+
+Answers `202 Accepted` with `{"id": "<the message id>"}`. Idempotent: a
+redelivery of something already held is a success and does not reset its read
+state.
+
+The recipient bounds the request at its own inline budget plus the message. A
+sender configured more generously gets `413`.
+
+### `HEAD /peer/v1/blobs/{sha}`
+
+`200` with `Content-Length` if the sender still holds it, `404` otherwise. A
+recipient asks before resuming, so a sender that deleted the file gives an
+answer rather than a stalled download.
+
+### `GET /peer/v1/blobs/{sha}`
+
+Streams the blob. `Range: bytes=N-` resumes from byte `N` and is answered with
+`206` and `Content-Range: bytes N-M/total`. Only that form is honoured — it is
+the one resuming needs; any other range gets the whole blob.
+
+A resume point past the end answers `416` with `Content-Range: bytes */total`,
+which tells the caller to start over rather than leaving it waiting for bytes
+that are not coming.
+
+A client that asked to resume and received `200` must treat it as a failure:
+the server started from zero, and appending that to what is already held would
+corrupt the file.
 
 ---
 

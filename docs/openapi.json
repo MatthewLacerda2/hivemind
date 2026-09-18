@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "hivemind local API",
-    "description": "The loopback API on 127.0.0.1:8401. No authentication: reachability is the authorization, and the listener refuses to bind anywhere else.\n\n## Problem types\n\nErrors are RFC 9457 `application/problem+json`. The `type` member is stable:\n\n- `/problems/message-not-found` — No such message (404)\n- `/problems/invalid-message` — Message is not acceptable (422)\n- `/problems/no-recipients` — Message has no recipients (422)\n- `/problems/not-paired` — Not paired (403)\n- `/problems/identity-mismatch` — Identity does not match the certificate (400)\n- `/problems/bad-signature` — Signature does not verify (400)\n- `/problems/peer-unreachable` — Peer could not be reached (502)\n- `/problems/internal` — Internal error (500)",
+    "description": "The loopback API on 127.0.0.1:8401. No authentication: reachability is the authorization, and the listener refuses to bind anywhere else.\n\n## Problem types\n\nErrors are RFC 9457 `application/problem+json`. The `type` member is stable:\n\n- `/problems/message-not-found` — No such message (404)\n- `/problems/invalid-message` — Message is not acceptable (422)\n- `/problems/no-recipients` — Message has no recipients (422)\n- `/problems/not-paired` — Not paired (403)\n- `/problems/identity-mismatch` — Identity does not match the certificate (400)\n- `/problems/bad-signature` — Signature does not verify (400)\n- `/problems/peer-unreachable` — Peer could not be reached (502)\n- `/problems/blob-not-found` — No such attachment (404)\n- `/problems/blob-too-large` — Attachment is too large (413)\n- `/problems/unsafe-attachment-name` — Attachment name is not a file name (422)\n- `/problems/internal` — Internal error (500)",
     "contact": {
       "name": "The hivemind contributors"
     },
@@ -231,6 +231,62 @@
             }
           },
           "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/messages/{id}/attachments/{sha}": {
+      "get": {
+        "tags": [
+          "messages"
+        ],
+        "operationId": "get_attachment",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The message the attachment belongs to",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sha",
+            "in": "path",
+            "description": "The attachment's SHA-256, in hex",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The attachment's bytes",
+            "content": {
+              "application/octet-stream": {}
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "502": {
             "description": "",
             "content": {
               "application/json": {
@@ -628,6 +684,46 @@
           }
         }
       },
+      "Attachment": {
+        "type": "object",
+        "description": "One attachment, as the local API describes it (SPEC §7.1).",
+        "required": [
+          "name",
+          "size",
+          "sha256",
+          "mime",
+          "inline",
+          "cached"
+        ],
+        "properties": {
+          "cached": {
+            "type": "boolean",
+            "description": "Whether the bytes are already on this machine. `false` means the first\nread of it will go to the sender."
+          },
+          "inline": {
+            "type": "boolean",
+            "description": "Whether it travelled with the message or is fetched on demand."
+          },
+          "mime": {
+            "type": "string",
+            "description": "What the sender says it is. Advisory (SPEC §4.1)."
+          },
+          "name": {
+            "type": "string",
+            "description": "The name to save it as. Checked on arrival, never a path (SPEC §6.3)."
+          },
+          "sha256": {
+            "type": "string",
+            "description": "Its content address, and the `sha` in the attachment URL."
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Its size in bytes.",
+            "minimum": 0
+          }
+        }
+      },
       "JoinRequest": {
         "type": "object",
         "description": "Where to look for a node to introduce ourselves to.",
@@ -686,9 +782,17 @@
           "kind",
           "sender_kind",
           "sent_at",
-          "mailbox"
+          "mailbox",
+          "attachments"
         ],
         "properties": {
+          "attachments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Attachment"
+            },
+            "description": "The files that came with it."
+          },
           "body": {
             "type": "string",
             "description": "Its body, as markdown."
@@ -914,6 +1018,16 @@
           "body"
         ],
         "properties": {
+          "attachments": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Absolute paths to local files to send with it. The API is loopback\nonly, so these are paths on this machine (SPEC §7.1)."
+          },
           "body": {
             "type": "string",
             "description": "The body, as markdown."
@@ -929,6 +1043,16 @@
           "body"
         ],
         "properties": {
+          "attachments": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Absolute paths to local files to send with it. The API is loopback\nonly, so these are paths on this machine (SPEC §7.1)."
+          },
           "body": {
             "type": "string",
             "description": "The body, as markdown."

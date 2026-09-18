@@ -417,3 +417,107 @@ fn free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     listener.local_addr().expect("addr").port()
 }
+
+#[tokio::test]
+async fn an_attachment_sent_to_ourselves_is_readable_by_path() {
+    // SPEC §9.1: `read` gives back a local filesystem path, so a Claude can
+    // open the file rather than being handed bytes through the protocol.
+    let daemon = Daemon::start();
+    let client = connect(&daemon).await;
+
+    let files = tempfile::tempdir().expect("temp dir");
+    let path = files.path().join("plan.md");
+    std::fs::write(&path, b"# the plan\n\nstep one").expect("write");
+
+    let sent = call(
+        &client,
+        "send",
+        serde_json::json!({
+            "to": ["everyone"],
+            "subject": "the plan",
+            "body": "attached",
+            "attachments": [path.to_string_lossy()],
+        }),
+    )
+    .await;
+
+    let message = call(&client, "read", serde_json::json!({ "id": sent["id"] })).await;
+
+    let attachment = &message["attachments"][0];
+    assert_eq!(attachment["name"], "plan.md");
+    assert_eq!(attachment["size"], 20);
+
+    let stored = attachment["path"]
+        .as_str()
+        .expect("a path, since we hold it");
+    assert_eq!(
+        std::fs::read(stored).expect("the path should point at the file"),
+        b"# the plan\n\nstep one"
+    );
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn download_attachment_returns_a_path_for_something_already_here() {
+    let daemon = Daemon::start();
+    let client = connect(&daemon).await;
+
+    let files = tempfile::tempdir().expect("temp dir");
+    let path = files.path().join("notes.txt");
+    std::fs::write(&path, b"already local").expect("write");
+
+    let sent = call(
+        &client,
+        "send",
+        serde_json::json!({
+            "to": ["everyone"],
+            "subject": "notes",
+            "body": "x",
+            "attachments": [path.to_string_lossy()],
+        }),
+    )
+    .await;
+
+    let message = call(&client, "read", serde_json::json!({ "id": sent["id"] })).await;
+    let sha = message["attachments"][0]["sha"].as_str().expect("a digest");
+
+    let downloaded = call(
+        &client,
+        "download_attachment",
+        serde_json::json!({ "id": sent["id"], "sha": sha }),
+    )
+    .await;
+
+    let stored = downloaded["path"].as_str().expect("a path");
+    assert_eq!(std::fs::read(stored).expect("read"), b"already local");
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn an_attachment_name_that_is_a_path_is_refused() {
+    // SPEC §6.3. The name is derived from the path, so this is about what a
+    // caller can talk the daemon into naming a file.
+    let daemon = Daemon::start();
+    let client = connect(&daemon).await;
+
+    let result = client
+        .call_tool(with_args(
+            CallToolRequestParams::new("send"),
+            &serde_json::json!({
+                "to": ["everyone"],
+                "subject": "sneaky",
+                "body": "x",
+                "attachments": ["/etc/passwd/.."],
+            }),
+        ))
+        .await;
+
+    assert!(
+        result.is_err() || result.is_ok_and(|r| r.is_error == Some(true)),
+        "a path that does not name a file should be refused"
+    );
+
+    client.cancel().await.ok();
+}
