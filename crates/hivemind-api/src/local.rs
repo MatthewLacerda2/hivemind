@@ -98,6 +98,13 @@ impl From<hivemind_core::peerbook::PendingPair> for PeerSummary {
     }
 }
 
+/// What a discovery run turned up.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct Refreshed {
+    /// How many nodes answered and were greeted.
+    pub found: usize,
+}
+
 /// Where to look for a node to introduce ourselves to.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct JoinRequest {
@@ -259,6 +266,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/me", get(me))
         .route("/api/v1/peers", get(list_peers))
         .route("/api/v1/peers/join", post(join_peer))
+        .route("/api/v1/peers/refresh", post(refresh_peers))
+        .route("/api/v1/peers/trust-network", post(trust_network))
         .route("/api/v1/peers/{id}", axum::routing::delete(remove_peer))
         .route("/api/v1/peers/{id}/pair", post(confirm_pair))
         .route("/api/v1/messages", get(list_messages).post(send_message))
@@ -327,6 +336,36 @@ pub(crate) async fn join_peer(
 ) -> Result<Json<PeerSummary>, Problem> {
     let pending = service.join(&request.host).await?;
     Ok(Json(PeerSummary::from(pending)))
+}
+
+#[utoipa::path(
+    post, path = "/api/v1/peers/refresh",
+    responses((status = 200, body = Refreshed), (status = 500, body = Problem)),
+    tag = "peers"
+)]
+pub(crate) async fn refresh_peers(
+    State(service): State<AppState>,
+) -> Result<Json<Refreshed>, Problem> {
+    Ok(Json(Refreshed {
+        found: service.refresh_peers().await?,
+    }))
+}
+
+#[utoipa::path(
+    post, path = "/api/v1/peers/trust-network",
+    responses((status = 200, body = Vec<PeerSummary>), (status = 500, body = Problem)),
+    tag = "peers"
+)]
+pub(crate) async fn trust_network(
+    State(service): State<AppState>,
+) -> Result<Json<Vec<PeerSummary>>, Problem> {
+    Ok(Json(
+        service
+            .confirm_all_discovered()?
+            .into_iter()
+            .map(PeerSummary::from)
+            .collect(),
+    ))
 }
 
 #[utoipa::path(

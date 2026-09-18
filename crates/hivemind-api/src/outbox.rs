@@ -94,3 +94,75 @@ impl hivemind_net::delivery::Transport for PeerTransport {
         Ok(())
     }
 }
+
+/// Feeds mDNS results into the address book (SPEC §5.4).
+///
+/// A known peer gets its address refreshed. An unknown one is greeted, which
+/// records a pending offer — an introduction, not an agreement, still needing
+/// a human on both sides (SPEC §6.2). Without that there would be nothing for
+/// `hivemind peers` to list and nothing for anyone to confirm.
+#[derive(Debug, Clone)]
+pub struct ServiceSink {
+    service: Arc<MailService>,
+    /// Nodes greeted recently, so a browse result arriving several times a
+    /// minute does not become a handshake several times a minute.
+    greeted: Arc<std::sync::Mutex<std::collections::HashMap<NodeId, std::time::Instant>>>,
+}
+
+/// How long a greeting counts for before the same node is greeted again.
+const GREETING_INTERVAL: std::time::Duration = std::time::Duration::from_mins(5);
+
+impl ServiceSink {
+    /// Wrap a service.
+    #[must_use]
+    pub fn new(service: Arc<MailService>) -> Self {
+        Self {
+            service,
+            greeted: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        }
+    }
+
+    /// Whether this node is due a greeting, marking it greeted if so.
+    fn due_a_greeting(&self, node: NodeId) -> bool {
+        let Ok(mut greeted) = self.greeted.lock() else {
+            // A poisoned lock here would mean never greeting anyone again.
+            return false;
+        };
+        let now = std::time::Instant::now();
+        match greeted.get(&node) {
+            Some(last) if now.duration_since(*last) < GREETING_INTERVAL => false,
+            _ => {
+                greeted.insert(node, now);
+                true
+            }
+        }
+    }
+}
+
+impl hivemind_net::discovery::Seen for ServiceSink {
+    fn seen(&self, node: hivemind_net::discovery::Discovered) {
+        match self
+            .service
+            .learn_discovered_addr(node.id, node.addr.clone())
+        {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(%error, id = %node.id, "could not record a discovered address");
+                return;
+            }
+        }
+
+        if !self.due_a_greeting(node.id) {
+            return;
+        }
+
+        let service = Arc::clone(&self.service);
+        let authority = node.addr.authority();
+        tokio::spawn(async move {
+            if let Err(error) = service.join(&authority).await {
+                tracing::debug!(%authority, %error, "could not greet a node seen on the LAN");
+            }
+        });
+    }
+}

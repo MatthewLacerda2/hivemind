@@ -22,7 +22,7 @@ use hivemind_core::index::{Index, IndexError, Query, Summary};
 use hivemind_core::message::{CanonicalError, Kind, Message, MessageError, Recipient, SenderKind};
 use hivemind_core::peer::NodeId;
 use hivemind_core::peerbook::{
-    CertificateDer, Peer, PeerAddr, PeerBook, PeerBookError, PendingPair,
+    AddrSource, CertificateDer, Peer, PeerAddr, PeerBook, PeerBookError, PendingPair,
 };
 use hivemind_core::store::{MailStore, Mailbox, Outbound, RecipientState, StoreError};
 use tokio::sync::broadcast;
@@ -537,6 +537,66 @@ impl MailService {
         }
     }
 
+    /// Record an address discovery found for a peer we already know.
+    ///
+    /// Returns whether it was one. SPEC §5.4: discovery keeps the address book
+    /// current for known peers and never creates trust — a node we have not
+    /// paired with gets nothing from being on the same LAN.
+    ///
+    /// # Errors
+    /// [`ServiceError::PeerBook`] if the book cannot be written.
+    pub fn learn_discovered_addr(&self, id: NodeId, addr: PeerAddr) -> Result<bool, ServiceError> {
+        let mut peers = self.peers()?;
+        let Some(peer) = peers.peer_mut(id) else {
+            return Ok(false);
+        };
+        peer.learn_addr(addr);
+        peer.last_seen = Some(Utc::now());
+        peers.save()?;
+        Ok(true)
+    }
+
+    /// Re-run discovery now and return how many nodes it turned up (SPEC §5.2).
+    ///
+    /// Tailscale is a source, never a requirement: if it is not installed, not
+    /// logged in, or answers with nonsense, that is zero nodes rather than an
+    /// error.
+    ///
+    /// # Errors
+    /// [`ServiceError::Unavailable`] if the address book is poisoned.
+    pub async fn refresh_peers(&self) -> Result<usize, ServiceError> {
+        use hivemind_net::discovery::{Tailscale as _, hosts_from_status, probe};
+
+        let status = hivemind_net::discovery::TailscaleCli.status_json();
+        let hosts = match status {
+            Ok(json) => hosts_from_status(&json),
+            Err(reason) => {
+                tracing::debug!(%reason, "no Tailscale peers to refresh from");
+                Vec::new()
+            }
+        };
+
+        let reachable = probe(
+            hosts,
+            self.peer_port,
+            hivemind_net::discovery::PROBE_TIMEOUT,
+        )
+        .await;
+
+        // Each one gets a handshake, which is an introduction and not an
+        // agreement: it records a pending offer that still needs a human on
+        // both sides (SPEC §6.2). Without it there would be nothing for
+        // `hivemind peers` to list and nothing to confirm.
+        let mut found = 0;
+        for authority in reachable {
+            match self.join(&authority).await {
+                Ok(_) => found += 1,
+                Err(error) => tracing::debug!(%authority, %error, "could not greet a peer"),
+            }
+        }
+        Ok(found)
+    }
+
     /// Is this node allowed to send us mail?
     ///
     /// # Errors
@@ -621,6 +681,28 @@ impl MailService {
         peers.insert_peer(peer.clone());
         peers.save()?;
         Ok(peer)
+    }
+
+    /// Confirm every pending offer discovery found on the LAN (SPEC §6.2.4).
+    ///
+    /// For a network you fully trust and nothing else. It skips offers that
+    /// arrived any other way — a node that dialled in from a manual address is
+    /// not on "the network you trust", it is whoever could reach the port.
+    ///
+    /// # Errors
+    /// [`ServiceError::PeerBook`] if the book cannot be written.
+    pub fn confirm_all_discovered(&self) -> Result<Vec<Peer>, ServiceError> {
+        let discovered: Vec<NodeId> = self
+            .peers()?
+            .pending()
+            .filter(|p| p.addr.source == AddrSource::Mdns)
+            .map(|p| p.id)
+            .collect();
+
+        discovered
+            .into_iter()
+            .map(|id| self.confirm_pair(id))
+            .collect()
     }
 
     /// Forget a peer.

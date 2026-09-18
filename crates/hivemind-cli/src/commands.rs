@@ -40,19 +40,26 @@ pub(crate) async fn daemon(home: Option<&Path>, port: u16) -> Result<()> {
     let config = Config::load(&home).context("could not read the configuration")?;
     let identity = Identity::load_or_create(&home.join("identity"))
         .context("could not load this node's identity")?;
-    let node = NodeDescription {
-        id: identity.node_id(),
-        certificate: identity.certificate_der().to_vec(),
-        private_key: identity
-            .private_key_pkcs8()
-            .context("could not read this node's private key")?,
-        name: config.name.clone(),
-        owner: config.owner.clone(),
-        callback_host: "127.0.0.1".to_owned(),
-        peer_port: config.peer_port,
-    };
-    let service = MailService::open(&home, node, identity.signing_key().clone())
-        .context("could not open the mail store")?;
+    let private_key = identity
+        .private_key_pkcs8()
+        .context("could not read this node's private key")?;
+
+    let service = Arc::new(
+        MailService::open(
+            &home,
+            NodeDescription {
+                id: identity.node_id(),
+                certificate: identity.certificate_der().to_vec(),
+                private_key: private_key.clone(),
+                name: config.name.clone(),
+                owner: config.owner.clone(),
+                callback_host: "127.0.0.1".to_owned(),
+                peer_port: config.peer_port,
+            },
+            identity.signing_key().clone(),
+        )
+        .context("could not open the mail store")?,
+    );
 
     // SPEC §6.3: loopback only, and it fails closed. The address is not
     // configurable, because "bind somewhere else" is not a preference — it is
@@ -62,12 +69,8 @@ pub(crate) async fn daemon(home: Option<&Path>, port: u16) -> Result<()> {
         .await
         .with_context(|| format!("could not bind {addr}"))?;
 
-    tracing::info!(
-        node = %identity.node_id(),
-        short = %identity.node_id().short(),
-        %addr,
-        "hivemind is up"
-    );
+    // The first line is what the integration tests wait for, so it is printed
+    // before anything that could be slow.
     println!(
         "hivemind {} listening on http://{addr}",
         identity.node_id().short()
@@ -75,22 +78,9 @@ pub(crate) async fn daemon(home: Option<&Path>, port: u16) -> Result<()> {
     println!("  docs   http://{addr}/docs");
     println!("  mcp    http://{addr}/mcp");
     println!("  node   {}", identity.node_id());
+    tracing::info!(node = %identity.node_id(), %addr, "hivemind is up");
 
-    let service = Arc::new(service);
-
-    // Best effort and detached: a notification that fails must never touch
-    // delivery (SPEC §9.4).
-    tokio::spawn(crate::notify::watch(
-        Arc::clone(&service),
-        config.notifications,
-    ));
-
-    // MCP is mounted here rather than inside hivemind-api, so that the API
-    // crate does not depend on the MCP crate that depends on it (SPEC §3).
-    let router = hivemind_api::router(Arc::clone(&service))
-        .nest_service("/mcp", hivemind_mcp::http_service(Arc::clone(&service)));
-
-    // One shutdown signal, three listeners. `shutdown()` can only be awaited
+    // One shutdown signal, several listeners. `shutdown()` can only be awaited
     // once, so it is fanned out: a Ctrl-C that stopped the local API but left
     // the peer port open would be worse than no graceful shutdown at all.
     let (stopping, _) = tokio::sync::broadcast::channel::<()>(1);
@@ -108,13 +98,52 @@ pub(crate) async fn daemon(home: Option<&Path>, port: u16) -> Result<()> {
         }
     };
 
-    let local = hivemind_net::tls::LocalIdentity::new(
-        identity.certificate_der().to_vec(),
-        identity
-            .private_key_pkcs8()
-            .context("could not read this node's private key")?,
-    );
+    // Best effort and detached: a notification that fails must never touch
+    // delivery (SPEC §9.4).
+    tokio::spawn(crate::notify::watch(
+        Arc::clone(&service),
+        config.notifications,
+    ));
 
+    let background = spawn_background(
+        &service,
+        &config,
+        hivemind_net::tls::LocalIdentity::new(identity.certificate_der().to_vec(), private_key),
+        &stop,
+    )
+    .await?;
+
+    // MCP is mounted here rather than inside hivemind-api, so that the API
+    // crate does not depend on the MCP crate that depends on it (SPEC §3).
+    let router = hivemind_api::router(Arc::clone(&service))
+        .nest_service("/mcp", hivemind_mcp::http_service(Arc::clone(&service)));
+
+    axum::serve(listener, router)
+        .with_graceful_shutdown(stop())
+        .await
+        .context("the server stopped unexpectedly")?;
+
+    // All driven by the same signal, so this is a join rather than a wait: it
+    // keeps the process alive until a delivery in flight finishes.
+    for task in background {
+        let _ = task.await;
+    }
+    Ok(())
+}
+
+/// Start the peer listener, the delivery worker and mDNS.
+///
+/// Returns their handles so the caller can wait for them on the way out.
+async fn spawn_background<F, S>(
+    service: &Arc<MailService>,
+    config: &Config,
+    local: hivemind_net::tls::LocalIdentity,
+    stop: &F,
+) -> Result<Vec<tokio::task::JoinHandle<()>>>
+where
+    F: Fn() -> S,
+    S: std::future::Future<Output = ()> + Send + 'static,
+{
     // SPEC §6.3 and ADR 0010: the peer port admits any client that can
     // complete a TLS handshake, and the router refuses anyone unpaired.
     let peer_addr = std::net::SocketAddr::from(([0, 0, 0, 0], config.peer_port));
@@ -123,35 +152,44 @@ pub(crate) async fn daemon(home: Option<&Path>, port: u16) -> Result<()> {
         .with_context(|| format!("could not bind {peer_addr}"))?;
     println!("  peers  https://{peer_addr}");
 
-    let peer_tls = hivemind_net::tls::peer_listener_config(&local)
-        .context("could not configure the peer listener")?;
-    let peer_router = hivemind_api::peer::router(Arc::clone(&service));
     let peer_listener = tokio::spawn(hivemind_net::listener::serve(
         peers,
-        peer_tls,
-        peer_router,
+        hivemind_net::tls::peer_listener_config(&local)
+            .context("could not configure the peer listener")?,
+        hivemind_api::peer::router(Arc::clone(service)),
         stop(),
     ));
 
     // SPEC §8: sending writes to out/ and returns; this is what empties it.
     let courier = tokio::spawn({
-        let outbox = hivemind_api::ServiceOutbox::new(Arc::clone(&service));
-        let transport = hivemind_api::outbox::PeerTransport::new(Arc::clone(&service), local);
+        let outbox = hivemind_api::ServiceOutbox::new(Arc::clone(service));
+        let transport = hivemind_api::outbox::PeerTransport::new(Arc::clone(service), local);
         let stop = stop();
         async move {
             hivemind_net::delivery::run(&outbox, &transport, chrono::Utc::now, stop).await;
         }
     });
 
-    axum::serve(listener, router)
-        .with_graceful_shutdown(stop())
-        .await
-        .context("the server stopped unexpectedly")?;
+    // SPEC §5.1: advertise on start, browse continuously. Discovery only ever
+    // updates addresses — pairing still needs a human on both sides.
+    let mdns = tokio::spawn({
+        let enabled = config.discovery;
+        let sink = hivemind_api::ServiceSink::new(Arc::clone(service));
+        let id = service.identity();
+        let name = config.name.clone();
+        let owner = config.owner.clone();
+        let peer_port = config.peer_port;
+        let stop = stop();
+        async move {
+            if !enabled {
+                return;
+            }
+            hivemind_net::discovery::run_mdns(id, &name, owner.as_deref(), peer_port, &sink, stop)
+                .await;
+        }
+    });
 
-    // Both are driven by the same signal, so this is a join rather than a
-    // wait: it keeps the process alive until a delivery in flight finishes.
-    let _ = tokio::join!(peer_listener, courier);
-    Ok(())
+    Ok(vec![peer_listener, courier, mdns])
 }
 
 /// Wait for whichever comes first: Ctrl-C from a terminal, or SIGTERM.
@@ -640,4 +678,58 @@ fn confirm(question: &str) -> Result<bool> {
         .read_line(&mut answer)
         .context("could not read your answer")?;
     Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "Yes"))
+}
+
+/// What `peers refresh` reports.
+#[derive(Debug, Deserialize)]
+struct Refreshed {
+    found: usize,
+}
+
+/// Re-run discovery now (SPEC §5.2, §10).
+pub(crate) async fn refresh_peers(api: &str) -> Result<()> {
+    let result: Refreshed = Client::new(api)
+        .post("/api/v1/peers/refresh", &serde_json::json!({}))
+        .await?;
+
+    match result.found {
+        0 => println!("no new nodes answered"),
+        1 => println!("greeted 1 node — `hivemind peers` to see it"),
+        n => println!("greeted {n} nodes — `hivemind peers` to see them"),
+    }
+    Ok(())
+}
+
+/// Trust everything discovery found on this LAN (SPEC §6.2.4).
+///
+/// The loud warning is the point. This is the one command that hands the
+/// pairing decision to whoever is on the network, so it says so plainly and
+/// asks once, and `--yes` is the only way past it.
+pub(crate) async fn trust_network(api: &str, yes: bool) -> Result<()> {
+    if !yes {
+        eprintln!(
+            "{}  every node discovered on this network will be trusted.",
+            "WARNING".yellow().bold()
+        );
+        eprintln!("         Anyone who can reach this LAN can then send this machine mail,");
+        eprintln!("         and will be trusted until you run `hivemind peers remove`.");
+        eprintln!();
+        if !confirm("Do you control every machine on this network?")? {
+            println!("nothing trusted");
+            return Ok(());
+        }
+    }
+
+    let paired: Vec<PeerRow> = Client::new(api)
+        .post("/api/v1/peers/trust-network", &serde_json::json!({}))
+        .await?;
+
+    if paired.is_empty() {
+        println!("nothing was waiting — `hivemind peers refresh` to look again");
+        return Ok(());
+    }
+    for peer in &paired {
+        println!("paired with {} ({})", peer.name.bold(), peer.short_id);
+    }
+    Ok(())
 }

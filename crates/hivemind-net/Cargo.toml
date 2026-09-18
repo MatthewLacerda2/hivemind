@@ -17,6 +17,7 @@ getrandom.workspace = true
 hyper.workspace = true
 http-body-util.workspace = true
 hyper-util.workspace = true
+mdns-sd.workspace = true
 rustls.workspace = true
 rustls-pki-types.workspace = true
 serde.workspace = true

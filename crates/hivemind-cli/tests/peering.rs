@@ -1,5 +1,5 @@
-//! M3's integration test: two real daemons, pairing and exchanging mail over
-//! mutual TLS (SPEC §13.2, §14).
+//! M3's integration tests: two and three real daemons, pairing and exchanging
+//! mail over mutual TLS (SPEC §13.2, §14).
 //!
 //! Everything here goes through the shipped binary and a real socket. The
 //! things this is for — a certificate that does not verify, a peer port that
@@ -34,6 +34,9 @@ impl Daemon {
             .env("HIVEMIND_NAME", name)
             .env("HIVEMIND_OWNER", name)
             .env("HIVEMIND_NOTIFICATIONS", "false")
+            // Off, or daemons on this machine would discover each other
+            // and every other hivemind on the developer's LAN.
+            .env("HIVEMIND_DISCOVERY", "false")
             .env("HIVEMIND_LOG", "warn")
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -260,4 +263,84 @@ fn a_node_that_was_never_joined_cannot_send_us_mail() {
     let peers = json(&alice.run(&["peers", "--json"]));
     assert_eq!(peers.as_array().expect("array").len(), 1);
     assert_eq!(peers[0]["paired"], false);
+}
+
+#[test]
+fn everyone_reaches_every_paired_peer_and_nobody_else() {
+    // SPEC §8: `everyone` expands at send time to the peers paired *then*.
+    let alice = Daemon::start("alice");
+    let bob = Daemon::start("bob");
+    let carol = Daemon::start("carol");
+
+    pair(&alice, &bob);
+    pair(&alice, &carol);
+    // Bob and Carol have never met. Alice is the only one paired with both.
+
+    alice.run(&["send", "everyone", "-s", "standup", "--", "in five"]);
+
+    bob.wait_for("standup");
+    carol.wait_for("standup");
+
+    // And Bob still does not know Carol exists.
+    let bobs_peers = json(&bob.run(&["peers", "--json"]));
+    let names: Vec<&str> = bobs_peers
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|p| p["name"].as_str().expect("a name"))
+        .collect();
+    assert_eq!(names, vec!["alice"], "there is no gossip in v1 (SPEC §5.4)");
+}
+
+#[test]
+fn a_late_joiner_does_not_receive_what_everyone_meant_before_it_arrived() {
+    // The expansion is stored, so this is decided at send time and cannot
+    // change afterwards (SPEC §8).
+    let alice = Daemon::start("alice");
+    let bob = Daemon::start("bob");
+    let carol = Daemon::start("carol");
+
+    pair(&alice, &bob);
+    alice.run(&["send", "everyone", "-s", "early", "--", "before carol"]);
+    bob.wait_for("early");
+
+    pair(&alice, &carol);
+    alice.run(&["send", "everyone", "-s", "late", "--", "after carol"]);
+    carol.wait_for("late");
+
+    let carols_inbox = carol.inbox();
+    let subjects: Vec<&str> = carols_inbox
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|m| m["subject"].as_str().expect("a subject"))
+        .collect();
+    assert_eq!(
+        subjects,
+        vec!["late"],
+        "carol should not receive mail sent before she was paired"
+    );
+}
+
+#[test]
+fn mail_addressed_to_an_owner_reaches_every_machine_they_have() {
+    // SPEC §8: `to: <owner>` expands to all paired peers with that owner.
+    let alice = Daemon::start("alice");
+    let laptop = Daemon::start("bob");
+    let desktop = Daemon::start("bob");
+
+    pair(&alice, &laptop);
+    pair(&alice, &desktop);
+
+    alice.run(&[
+        "send",
+        "bob",
+        "-s",
+        "both machines",
+        "--",
+        "wherever you are",
+    ]);
+
+    laptop.wait_for("both machines");
+    desktop.wait_for("both machines");
 }
