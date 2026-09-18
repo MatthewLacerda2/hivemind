@@ -377,7 +377,7 @@ This section is not optional and is not "later".
 ### 13.4 GitHub Actions
 - `ci.yml` on push and PR: matrix `macos-latest`, `ubuntu-latest`; steps: fmt check, clippy, nextest, doc build with `-D warnings`, openapi drift check, web build, `cargo-deny`, coverage upload (Codecov or artifact + summary). Cache with `Swatinem/rust-cache`. Concurrency group cancels superseded runs.
 - `nightly.yml`: fuzz targets (short budget), `cargo-audit`, MSRV check, `cargo update` dry-run report.
-- `release.yml`: on tag `v*`, `cargo-dist` builds macOS (arm64 + x86_64) and Linux binaries, generates checksums, creates the GitHub release, and updates the Homebrew formula in `packaging/homebrew` (and, later, a tap repo). Binaries ad-hoc codesigned on macOS (`codesign -s -`) so the firewall prompt appears once.
+- `release.yml`: on tag `v*`, `dist` (formerly `cargo-dist`) builds macOS (arm64 + x86_64) and Linux binaries, generates checksums and a shell installer, creates the GitHub release, and pushes the Homebrew formula to the tap repo. **The file is generated — edit `[workspace.metadata.dist]` and `.github/build-setup.yml`, then run `dist generate`.** On macOS the ad-hoc signature comes from the linker on arm64 (`flags=0x20002(adhoc,linker-signed)`), which is what makes the firewall prompt appear once; x86_64 binaries are not signed, because `dist` has no hook between linking and packaging. See `docs/decisions/0011-cargo-dist-generates-the-release.md`.
 - Dependabot for cargo and actions, weekly, grouped.
 - Branch protection notes in `CONTRIBUTING.md`: CI must pass, one review, merge commit (**not** squash — see `docs/decisions/0009-merge-commits-not-squash.md`; every commit on a branch must build and pass on its own), conventional commits.
 

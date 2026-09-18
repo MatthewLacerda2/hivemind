@@ -83,6 +83,16 @@ openapi-check:
     cargo run -q -p hivemind-cli --bin hivemind -- openapi --stdout > "$generated"
     diff -u docs/openapi.json "$generated"
 
+# The release workflow is generated; fail if it has drifted (ADR 0011).
+dist-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v dist >/dev/null 2>&1; then
+        echo "dist: not installed — `cargo install cargo-dist --locked` to check the release workflow"
+        exit 0
+    fi
+    dist generate --mode=ci --check
+
 # Build the web UI into assets the binary embeds (SPEC §11).
 web-build:
     #!/usr/bin/env bash
@@ -98,7 +108,7 @@ web-build:
 
 # What ci.yml runs, in its order — including the coverage gate, which runs as a
 # separate job there. Run this before opening a PR (SPEC §16.6).
-ci: fmt-check lint doc test deny openapi-check web-build cov-gate
+ci: fmt-check lint doc test deny openapi-check web-build dist-check cov-gate
 
 # `ci` plus what nightly.yml runs on a schedule.
 ci-full: ci audit

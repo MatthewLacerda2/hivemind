@@ -1,13 +1,13 @@
 # Homebrew packaging
 
-`hivemind.rb` is generated at release time (M6) by the release workflow, which
-fills in the version, the per-architecture tarball URLs and their SHA-256
-checksums from the artifacts it just built.
+Nothing to render here any more. `dist` generates `hivemind.rb` at release time
+with the right per-architecture URLs and checksums and pushes it to the tap at
+`MatthewLacerda2/homebrew-tap`, which is what `brew install hivemind` reads.
 
-Writing the formula by hand now would mean checking in a version and three
-checksums that are wrong until the first tag, which is worse than not having the
-file: a stale formula looks installable.
+See `docs/decisions/0011-cargo-dist-generates-the-release.md` for why, and for
+the one thing adopting `dist` cost us.
 
-The eventual home is a tap repository (`MatthewLacerda2/homebrew-tap`) so that
-`brew install hivemind` works as SPEC §2 promises. Until then this directory
-holds the template the release job renders.
+To change the formula's name or the tap, edit `[workspace.metadata.dist]` in the
+workspace `Cargo.toml` and run `dist generate`. Do not edit
+`.github/workflows/release.yml` — it is generated and your changes will be
+reverted the next time anybody runs that command.

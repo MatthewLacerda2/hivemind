@@ -1,0 +1,15 @@
+# Injected into the generated release workflow by `dist` (SPEC §13.4).
+#
+# Two things dist does not do for us and SPEC asks for.
+- name: Set up Node
+  uses: actions/setup-node@v7
+  with:
+    node-version: 24
+    cache: npm
+    cache-dependency-path: web/package-lock.json
+
+# The bundle is checked in and embedded at compile time, so a release does not
+# strictly need this — it is here so a tag cannot ship a bundle older than the
+# source it was built from.
+- name: Build the web UI
+  run: cd web && npm ci && npm run build
