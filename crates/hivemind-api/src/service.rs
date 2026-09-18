@@ -155,6 +155,8 @@ pub enum ServiceError {
     Unavailable,
 }
 
+mod peering;
+
 /// Everything the local API and the MCP adapter can do.
 #[derive(Debug)]
 pub struct MailService {
@@ -333,6 +335,14 @@ impl MailService {
         // message to `everyone`.
         let expanded = self.expand_recipients(&message.to)?;
 
+        // A `to` that resolves to nobody is an empty `to` with a better
+        // disguise, and used to be filed straight into `sent/` — the message
+        // went nowhere and reported success (#19). One typo in a person's name
+        // was enough.
+        if expanded.is_empty() {
+            return Err(ServiceError::NoRecipients);
+        }
+
         // Local delivery happens here rather than over a socket: a node does
         // not need to be paired with itself.
         if expanded.contains(&self.identity) {
@@ -476,288 +486,6 @@ impl MailService {
         Ok(())
     }
 
-    // ------------------------------------------------------------- peers ---
-
-    /// How this node introduces itself (SPEC §7.2).
-    #[must_use]
-    pub fn own_handshake(&self) -> crate::peer::Handshake {
-        crate::peer::Handshake {
-            id: self.identity.to_string(),
-            name: self.name.clone(),
-            owner: self.owner.clone(),
-            version: env!("CARGO_PKG_VERSION").to_owned(),
-            callback_host: self.callback_host.clone(),
-            callback_port: self.peer_port,
-            // Reserved for v2 (SPEC §12). Sending nothing today keeps the
-            // field's meaning open.
-            gossip: None,
-        }
-    }
-
-    /// Introduce ourselves to a host, and record what it says back (SPEC §6.2).
-    ///
-    /// This is the "first use" in trust-on-first-use: the host's certificate is
-    /// accepted so that its fingerprint can be shown to a human, and nothing is
-    /// trusted until [`MailService::confirm_pair`] is called on both sides.
-    ///
-    /// `host` may name a port; without one the peer port is assumed.
-    ///
-    /// # Errors
-    /// [`ServiceError::Peer`] if the host cannot be reached,
-    /// [`ServiceError::IdentityMismatch`] if it does not answer as the node it
-    /// claims to be, or [`ServiceError::PeerBook`] if the offer cannot be
-    /// written.
-    pub async fn join(&self, host: &str) -> Result<PendingPair, ServiceError> {
-        let (hostname, port) = split_host(host, DEFAULT_PEER_PORT);
-        let addr = PeerAddr::manual(hostname.clone(), port);
-        let authority = addr.authority();
-
-        let client = hivemind_net::client::PeerClient::joining(&self.tls)?;
-        let answer: hivemind_net::client::PeerResponse<crate::peer::Handshake> = client
-            .post(&authority, "/peer/v1/handshake", &self.own_handshake())
-            .await?;
-
-        // The certificate is the identity (SPEC §6.1); the body is a claim.
-        // A host whose one checkable claim is wrong is not one to record.
-        let id = NodeId::from_certificate_der(&answer.certificate);
-        if answer.body.id != id.to_string() {
-            return Err(ServiceError::IdentityMismatch(format!(
-                "{authority} calls itself {} but presented {id}",
-                answer.body.id
-            )));
-        }
-        if id == self.identity {
-            return Err(ServiceError::IdentityMismatch(
-                "that address is this node".to_owned(),
-            ));
-        }
-
-        self.record_pairing_offer(id, &answer.body, answer.certificate, addr)?;
-        self.peers()?
-            .pending_pair(id)
-            .cloned()
-            .ok_or_else(|| ServiceError::NoSuchPeer { id: id.to_string() })
-    }
-
-    /// Turn what a human typed into a node id.
-    ///
-    /// Accepts the full `hm1:` form or the eight-character short form people
-    /// actually compare by eye (SPEC §6.1). A short form that matches more than
-    /// one peer is refused rather than guessed at — picking one would be
-    /// picking who gets trusted.
-    ///
-    /// # Errors
-    /// [`ServiceError::NoSuchPeer`] if nothing matches, or more than one does.
-    pub fn resolve_peer(&self, typed: &str) -> Result<NodeId, ServiceError> {
-        if let Ok(id) = typed.parse::<NodeId>() {
-            return Ok(id);
-        }
-
-        let peers = self.peers()?;
-        let mut matches: Vec<NodeId> = peers
-            .peers()
-            .map(|p| p.id)
-            .chain(peers.pending().map(|p| p.id))
-            .filter(|id| id.short().eq_ignore_ascii_case(typed))
-            .collect();
-        matches.dedup();
-
-        match matches.as_slice() {
-            [id] => Ok(*id),
-            _ => Err(ServiceError::NoSuchPeer {
-                id: typed.to_owned(),
-            }),
-        }
-    }
-
-    /// Record an address discovery found for a peer we already know.
-    ///
-    /// Returns whether it was one. SPEC §5.4: discovery keeps the address book
-    /// current for known peers and never creates trust — a node we have not
-    /// paired with gets nothing from being on the same LAN.
-    ///
-    /// # Errors
-    /// [`ServiceError::PeerBook`] if the book cannot be written.
-    pub fn learn_discovered_addr(&self, id: NodeId, addr: PeerAddr) -> Result<bool, ServiceError> {
-        let mut peers = self.peers()?;
-        let Some(peer) = peers.peer_mut(id) else {
-            return Ok(false);
-        };
-        peer.learn_addr(addr);
-        peer.last_seen = Some(Utc::now());
-        peers.save()?;
-        Ok(true)
-    }
-
-    /// Re-run discovery now and return how many nodes it turned up (SPEC §5.2).
-    ///
-    /// Tailscale is a source, never a requirement: if it is not installed, not
-    /// logged in, or answers with nonsense, that is zero nodes rather than an
-    /// error.
-    ///
-    /// # Errors
-    /// [`ServiceError::Unavailable`] if the address book is poisoned.
-    pub async fn refresh_peers(&self) -> Result<usize, ServiceError> {
-        use hivemind_net::discovery::{Tailscale as _, hosts_from_status, probe};
-
-        let status = hivemind_net::discovery::TailscaleCli.status_json();
-        let hosts = match status {
-            Ok(json) => hosts_from_status(&json),
-            Err(reason) => {
-                tracing::debug!(%reason, "no Tailscale peers to refresh from");
-                Vec::new()
-            }
-        };
-
-        let reachable = probe(
-            hosts,
-            self.peer_port,
-            hivemind_net::discovery::PROBE_TIMEOUT,
-        )
-        .await;
-
-        // Each one gets a handshake, which is an introduction and not an
-        // agreement: it records a pending offer that still needs a human on
-        // both sides (SPEC §6.2). Without it there would be nothing for
-        // `hivemind peers` to list and nothing to confirm.
-        let mut found = 0;
-        for authority in reachable {
-            match self.join(&authority).await {
-                Ok(_) => found += 1,
-                Err(error) => tracing::debug!(%authority, %error, "could not greet a peer"),
-            }
-        }
-        Ok(found)
-    }
-
-    /// Is this node allowed to send us mail?
-    ///
-    /// # Errors
-    /// [`ServiceError::Unavailable`] if the address book lock is poisoned.
-    pub fn is_paired(&self, id: NodeId) -> Result<bool, ServiceError> {
-        Ok(self.peers()?.is_paired(id))
-    }
-
-    /// Every paired peer.
-    ///
-    /// # Errors
-    /// [`ServiceError::Unavailable`] if the address book lock is poisoned.
-    pub fn paired_peers(&self) -> Result<Vec<Peer>, ServiceError> {
-        Ok(self.peers()?.peers().cloned().collect())
-    }
-
-    /// Everything waiting on a confirmation.
-    ///
-    /// # Errors
-    /// [`ServiceError::Unavailable`] if the address book lock is poisoned.
-    pub fn pending_pairs(&self) -> Result<Vec<PendingPair>, ServiceError> {
-        Ok(self.peers()?.pending().cloned().collect())
-    }
-
-    /// Record that a node introduced itself, without trusting it yet.
-    ///
-    /// # Errors
-    /// [`ServiceError::PeerBook`] if the book cannot be written.
-    pub fn record_pairing_offer(
-        &self,
-        id: NodeId,
-        handshake: &crate::peer::Handshake,
-        certificate: Vec<u8>,
-        addr: PeerAddr,
-    ) -> Result<(), ServiceError> {
-        let mut peers = self.peers()?;
-
-        // Already paired: this is a peer saying hello again, not an offer.
-        // Refresh where it can be reached and leave the trust decision alone.
-        if let Some(peer) = peers.peer_mut(id) {
-            peer.learn_addr(addr);
-            peer.last_seen = Some(Utc::now());
-            return peers.save().map_err(Into::into);
-        }
-
-        peers.insert_pending(PendingPair {
-            id,
-            name: handshake.name.clone(),
-            owner: handshake.owner.clone(),
-            certificate: CertificateDer::new(certificate),
-            addr,
-            first_seen: Utc::now(),
-            confirmed_by_us: false,
-        });
-        peers.save()?;
-        let _ = self.events.send(Event::PairPending { id });
-        Ok(())
-    }
-
-    /// Confirm a pending pair from this side (SPEC §6.2).
-    ///
-    /// Promotes it to a real peer once *we* have agreed; the other side does
-    /// the same independently, and neither will accept mail until it has.
-    ///
-    /// # Errors
-    /// [`ServiceError::NoSuchPeer`] if nothing is pending for that id.
-    pub fn confirm_pair(&self, id: NodeId) -> Result<Peer, ServiceError> {
-        let mut peers = self.peers()?;
-        let Some(pending) = peers.remove_pending(id) else {
-            return Err(ServiceError::NoSuchPeer { id: id.to_string() });
-        };
-
-        let peer = Peer {
-            id: pending.id,
-            name: pending.name,
-            owner: pending.owner,
-            certificate: pending.certificate,
-            addrs: vec![pending.addr],
-            paired_at: Utc::now(),
-            last_seen: None,
-        };
-        peers.insert_peer(peer.clone());
-        peers.save()?;
-        Ok(peer)
-    }
-
-    /// Confirm every pending offer discovery found on the LAN (SPEC §6.2.4).
-    ///
-    /// For a network you fully trust and nothing else. It skips offers that
-    /// arrived any other way — a node that dialled in from a manual address is
-    /// not on "the network you trust", it is whoever could reach the port.
-    ///
-    /// # Errors
-    /// [`ServiceError::PeerBook`] if the book cannot be written.
-    pub fn confirm_all_discovered(&self) -> Result<Vec<Peer>, ServiceError> {
-        let discovered: Vec<NodeId> = self
-            .peers()?
-            .pending()
-            .filter(|p| p.addr.source == AddrSource::Mdns)
-            .map(|p| p.id)
-            .collect();
-
-        discovered
-            .into_iter()
-            .map(|id| self.confirm_pair(id))
-            .collect()
-    }
-
-    /// Forget a peer.
-    ///
-    /// # Errors
-    /// [`ServiceError::NoSuchPeer`] if it was not there.
-    pub fn remove_peer(&self, id: NodeId) -> Result<(), ServiceError> {
-        let mut peers = self.peers()?;
-        if !peers.remove_peer(id) {
-            peers.remove_pending(id);
-        }
-        peers.save().map_err(Into::into)
-    }
-
-    /// The certificates TLS should accept, for rebuilding the trust set.
-    ///
-    /// # Errors
-    /// [`ServiceError::Unavailable`] if the address book lock is poisoned.
-    pub fn trusted_certificates(&self) -> Result<Vec<(NodeId, Vec<u8>)>, ServiceError> {
-        Ok(self.peers()?.acceptable_certificates())
-    }
-
     /// Accept a message delivered by a paired peer.
     ///
     /// Idempotent on message id, because redelivery is always safe (SPEC §8).
@@ -800,6 +528,72 @@ impl MailService {
 
         let _ = self.events.send(Event::MessageReceived { id });
         Ok(id)
+    }
+
+    /// Turn what somebody typed in a `To` box into a recipient.
+    ///
+    /// Three forms, in this order:
+    ///
+    /// 1. the full `hm1:` fingerprint,
+    /// 2. `everyone`,
+    /// 3. a **short id** of a peer we know, which is the form the interface
+    ///    teaches — `peers`, `status` and `init` all print it and `pair` takes
+    ///    it — and which used to be read as a person's name, delivering the
+    ///    message to nobody and saying it was sent (#19),
+    /// 4. anything else: a person's name.
+    ///
+    /// An owner's name wins over a short id that looks like it. That ordering
+    /// is decided rather than discovered: what somebody called themselves is
+    /// what they meant by it.
+    ///
+    /// # Errors
+    /// [`ServiceError::NoSuchPeer`] for a short id that matches more than one
+    /// peer, or for an empty string. Guessing which peer gets somebody's mail
+    /// is not a thing to do by accident.
+    pub fn parse_recipient(&self, typed: &str) -> Result<Recipient, ServiceError> {
+        let typed = typed.trim();
+        if typed.is_empty() {
+            return Err(ServiceError::NoSuchPeer { id: String::new() });
+        }
+
+        if let Ok(id) = typed.parse::<NodeId>() {
+            return Ok(Recipient::Node(id));
+        }
+        if typed.eq_ignore_ascii_case("everyone") {
+            return Ok(Recipient::Everyone);
+        }
+
+        let peers = self.peers()?;
+
+        // A person's name first, including this machine's own owner.
+        let names_somebody = peers.peers().any(|p| {
+            p.owner
+                .as_deref()
+                .is_some_and(|o| o.eq_ignore_ascii_case(typed))
+        }) || self
+            .owner
+            .as_deref()
+            .is_some_and(|o| o.eq_ignore_ascii_case(typed));
+        if names_somebody {
+            return Ok(Recipient::Owner(typed.to_owned()));
+        }
+
+        let mut matches = peers
+            .peers()
+            .map(|p| p.id)
+            .chain(std::iter::once(self.identity))
+            .filter(|id| id.short().eq_ignore_ascii_case(typed));
+
+        match (matches.next(), matches.next()) {
+            (Some(id), None) => Ok(Recipient::Node(id)),
+            (Some(_), Some(_)) => Err(ServiceError::NoSuchPeer {
+                id: typed.to_owned(),
+            }),
+            // Not a fingerprint, not `everyone`, not a short id we know: a
+            // person we have not met. Expansion will then find nobody, and
+            // `send` refuses rather than filing it as sent.
+            (None, _) => Ok(Recipient::Owner(typed.to_owned())),
+        }
     }
 
     /// Which nodes a recipient list actually reaches, at this moment.
@@ -1563,6 +1357,224 @@ mod tests {
             in_reply_to: None,
             attachments,
         }
+    }
+
+    /// A service that has already paired with `friend`.
+    fn service_knowing(
+        friend: &hivemind_core::identity::Identity,
+    ) -> (tempfile::TempDir, MailService) {
+        let (dir, service) = service();
+        service
+            .record_pairing_offer(
+                friend.node_id(),
+                &crate::peer::Handshake {
+                    id: friend.node_id().to_string(),
+                    name: "their-laptop".to_owned(),
+                    owner: Some("ana".to_owned()),
+                    version: "0.1.0".to_owned(),
+                    callback_host: "10.0.0.2".to_owned(),
+                    callback_port: 8400,
+                    gossip: None,
+                },
+                friend.certificate_der().to_vec(),
+                PeerAddr::manual("10.0.0.2", 8400),
+            )
+            .expect("offer");
+        service.confirm_pair(friend.node_id()).expect("confirm");
+        (dir, service)
+    }
+
+    /// Record an offer as if it had arrived from `source`.
+    fn offer_from(
+        service: &MailService,
+        friend: &hivemind_core::identity::Identity,
+        source: AddrSource,
+    ) {
+        service
+            .record_pairing_offer(
+                friend.node_id(),
+                &crate::peer::Handshake {
+                    id: friend.node_id().to_string(),
+                    name: "theirs".to_owned(),
+                    owner: None,
+                    version: "0.1.0".to_owned(),
+                    callback_host: "10.0.0.2".to_owned(),
+                    callback_port: 8400,
+                    gossip: None,
+                },
+                friend.certificate_der().to_vec(),
+                PeerAddr {
+                    host: "10.0.0.2".to_owned(),
+                    port: 8400,
+                    source,
+                    last_ok: None,
+                },
+            )
+            .expect("offer");
+    }
+
+    #[test]
+    fn trust_network_covers_tailscale_as_well_as_mdns() {
+        // #21. A tailnet is a stronger boundary than a LAN segment, not a
+        // weaker one — only what was authenticated gets in — and it was
+        // excluded because Tailscale's discovery went through `join` and
+        // inherited its `Manual` source.
+        let (_dir, service) = service();
+        let lan = hivemind_core::identity::Identity::from_seed([60u8; 32]).expect("identity");
+        let tailnet = hivemind_core::identity::Identity::from_seed([61u8; 32]).expect("identity");
+
+        offer_from(&service, &lan, AddrSource::Mdns);
+        offer_from(&service, &tailnet, AddrSource::Tailscale);
+
+        let paired = service.confirm_all_discovered().expect("confirm");
+        let ids: std::collections::HashSet<_> = paired.iter().map(|p| p.id).collect();
+
+        assert!(ids.contains(&lan.node_id()), "mDNS was always covered");
+        assert!(
+            ids.contains(&tailnet.node_id()),
+            "and a tailnet is the network somebody is most likely to control"
+        );
+    }
+
+    #[test]
+    fn trust_network_leaves_alone_what_somebody_typed() {
+        // Somebody who typed a host made a choice. Erasing it with a blanket
+        // flag would be a surprise, and the flag is about a *network* being
+        // trusted rather than about one address.
+        let (_dir, service) = service();
+        let typed = hivemind_core::identity::Identity::from_seed([62u8; 32]).expect("identity");
+        offer_from(&service, &typed, AddrSource::Manual);
+
+        assert!(
+            service
+                .confirm_all_discovered()
+                .expect("confirm")
+                .is_empty(),
+            "a manually joined peer still needs its own confirmation"
+        );
+        assert!(!service.is_paired(typed.node_id()).expect("is_paired"));
+    }
+
+    #[test]
+    fn a_short_id_names_the_peer_it_belongs_to() {
+        // It is the form the interface teaches: `peers`, `status` and `init`
+        // all print it, and `pair` takes it. Issue #19 — sending to one
+        // silently delivered to nobody, and fooled an agent on another
+        // machine into reporting it had made contact.
+        let friend = hivemind_core::identity::Identity::from_seed([5u8; 32]).expect("identity");
+        let (_dir, service) = service_knowing(&friend);
+
+        assert_eq!(
+            service
+                .parse_recipient(&friend.node_id().short())
+                .expect("resolves"),
+            Recipient::Node(friend.node_id())
+        );
+        // And case does not matter, since people copy it by eye.
+        assert_eq!(
+            service
+                .parse_recipient(&friend.node_id().short().to_uppercase())
+                .expect("resolves"),
+            Recipient::Node(friend.node_id())
+        );
+    }
+
+    #[test]
+    fn the_full_form_and_everyone_still_mean_what_they_did() {
+        let friend = hivemind_core::identity::Identity::from_seed([6u8; 32]).expect("identity");
+        let (_dir, service) = service_knowing(&friend);
+
+        assert_eq!(
+            service
+                .parse_recipient(&friend.node_id().to_string())
+                .expect("resolves"),
+            Recipient::Node(friend.node_id())
+        );
+        assert_eq!(
+            service.parse_recipient("EVERYONE").expect("resolves"),
+            Recipient::Everyone
+        );
+        assert_eq!(
+            service.parse_recipient("ana").expect("resolves"),
+            Recipient::Owner("ana".to_owned()),
+            "a name that is not a short id is still a person"
+        );
+    }
+
+    #[test]
+    fn an_owner_name_wins_over_a_short_id_that_looks_like_it() {
+        // Vanishingly unlikely, and the order has to be decided rather than
+        // discovered: what somebody called themselves is what they meant.
+        let friend = hivemind_core::identity::Identity::from_seed([7u8; 32]).expect("identity");
+        let short = friend.node_id().short();
+        let (_dir, service) = service();
+        service
+            .record_pairing_offer(
+                friend.node_id(),
+                &crate::peer::Handshake {
+                    id: friend.node_id().to_string(),
+                    name: "odd".to_owned(),
+                    owner: Some(short.clone()),
+                    version: "0.1.0".to_owned(),
+                    callback_host: "10.0.0.3".to_owned(),
+                    callback_port: 8400,
+                    gossip: None,
+                },
+                friend.certificate_der().to_vec(),
+                PeerAddr::manual("10.0.0.3", 8400),
+            )
+            .expect("offer");
+        service.confirm_pair(friend.node_id()).expect("confirm");
+
+        assert_eq!(
+            service.parse_recipient(&short).expect("resolves"),
+            Recipient::Owner(short),
+            "somebody's name is what they meant by it"
+        );
+    }
+
+    #[test]
+    fn a_message_that_reaches_nobody_is_refused_rather_than_filed_as_sent() {
+        // The other half of #19, and the half that closes the class. A `to`
+        // that resolves to nothing is the same outcome as an empty `to` with
+        // a better disguise: the message went nowhere and said it was sent.
+        let (_dir, service) = service();
+
+        let error = service
+            .send(
+                Draft {
+                    to: vec![Recipient::Owner("nobody-by-that-name".to_owned())],
+                    subject: "into the void".to_owned(),
+                    body: "x".to_owned(),
+                    kind: Kind::Message,
+                    in_reply_to: None,
+                    attachments: Vec::new(),
+                },
+                SenderKind::Human,
+            )
+            .expect_err("it reaches nobody");
+
+        assert!(
+            matches!(error, ServiceError::NoRecipients),
+            "expected NoRecipients, got {error:?}"
+        );
+        assert_eq!(
+            service.list(&Query::default()).expect("list").len(),
+            0,
+            "and nothing should have been written anywhere"
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_short_id_is_refused_rather_than_guessed() {
+        // Two peers cannot share a short id in practice — it is 40 bits of a
+        // hash — but guessing which one gets the mail is not a thing to do by
+        // accident, so the code says so rather than relying on that.
+        let (_dir, service) = service();
+        assert!(matches!(
+            service.parse_recipient(""),
+            Err(ServiceError::NoSuchPeer { .. })
+        ));
     }
 
     #[test]

@@ -67,6 +67,9 @@ toml = "1"
 ulid = { version = "3", features = ["serde"] }
 
 hex = "0.4"
+# One function, and libc is already in the tree behind `sha2`. The alternative
+# was reading /etc/hostname on Linux and shelling out to `scutil` on macOS.
+hostname = "0.4"
 http-body-util = "0.1"
 proptest = "1"
 serde_json = "1"

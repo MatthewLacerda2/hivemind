@@ -93,15 +93,7 @@ async fn handshake(
         ));
     }
 
-    // Where they reached us from is not knowable here — the address we record
-    // is the one they tell us to call back on, which `hivemind join` fills in
-    // from the host the user typed.
-    let addr = PeerAddr {
-        host: request.callback_host.clone(),
-        port: request.callback_port,
-        source: AddrSource::Manual,
-        last_ok: None,
-    };
+    let addr = callback_address(&caller, &request);
 
     service.record_pairing_offer(caller.node_id, &request, caller.certificate.clone(), addr)?;
     Ok(Json(service.own_handshake()))
@@ -198,6 +190,40 @@ async fn read_delivery(
         )
     })?;
     Ok((message, blobs))
+}
+
+/// Where to call this peer back, believing the socket over the claim.
+///
+/// The connection's source address is a fact; `callback_host` is an opinion,
+/// and every daemon used to claim `127.0.0.1` — so every peer learned its own
+/// loopback as the way to reach the other one, and then delivered to itself
+/// (#23).
+///
+/// The **port** still has to be claimed: the source port of an outbound
+/// connection is ephemeral and says nothing about where that node listens.
+///
+/// A peer genuinely on this machine keeps its loopback address, because there
+/// it is true — and that is the case every integration test exercises, which
+/// is why the bug survived to be found on two real machines.
+fn callback_address(caller: &CallerIdentity, request: &Handshake) -> PeerAddr {
+    let observed = caller.remote.ip();
+
+    // A claimed *address* is always replaced by the observed one: the socket
+    // knows and the claim only guesses. A claimed *name* is kept, because a
+    // hostname outlives the address behind it — a MagicDNS name still resolves
+    // after the peer moves — and because this node cannot check it anyway.
+    let host = if request.callback_host.parse::<std::net::IpAddr>().is_ok() {
+        observed.to_string()
+    } else {
+        request.callback_host.clone()
+    };
+
+    PeerAddr {
+        host,
+        port: request.callback_port,
+        source: AddrSource::Manual,
+        last_ok: None,
+    }
 }
 
 /// Where a range request wants to start.
@@ -369,9 +395,15 @@ mod tests {
     }
 
     pub(super) fn caller(id: &Identity) -> CallerIdentity {
+        caller_from(id, "10.0.0.2:51234")
+    }
+
+    /// A caller that reached us from a named address.
+    pub(super) fn caller_from(id: &Identity, remote: &str) -> CallerIdentity {
         CallerIdentity {
             node_id: id.node_id(),
             certificate: id.certificate_der().to_vec(),
+            remote: remote.parse().expect("an address"),
         }
     }
 
@@ -823,6 +855,105 @@ mod tests {
         );
     }
 
+    /// A handshake claiming `host:port`, arriving from `remote`.
+    fn offer(id: &Identity, host: &str, port: u16) -> serde_json::Value {
+        serde_json::to_value(Handshake {
+            id: id.node_id().to_string(),
+            name: "theirs".to_owned(),
+            owner: None,
+            version: "0.1.0".to_owned(),
+            callback_host: host.to_owned(),
+            callback_port: port,
+            gossip: None,
+        })
+        .expect("serialise")
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_claims_loopback_from_elsewhere_is_not_believed() {
+        // #23. Every daemon claimed `127.0.0.1`, so every peer learned its own
+        // loopback as the way to reach the other one and then delivered to
+        // itself. The socket knows where the connection came from; the claim
+        // is only an opinion.
+        let host = identity(40);
+        let stranger = identity(41);
+        let (_dir, service) = service(&host);
+
+        let router = router(Arc::clone(&service))
+            .layer(Extension(caller_from(&stranger, "100.64.0.7:51234")));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/peer/v1/handshake")
+            .header("content-type", "application/json")
+            .body(Body::from(offer(&stranger, "127.0.0.1", 8400).to_string()))
+            .expect("request");
+        let response = router.oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let pending = service.pending_pairs().expect("pending");
+        assert_eq!(
+            pending[0].addr.authority(),
+            "100.64.0.7:8400",
+            "the address seen, with the port claimed — a source port is ephemeral"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_peer_genuinely_on_this_machine_keeps_its_loopback() {
+        // Where `127.0.0.1` is true it stays true. This is the case every
+        // integration test exercises, which is why #23 survived until two real
+        // machines met.
+        let host = identity(42);
+        let neighbour = identity(43);
+        let (_dir, service) = service(&host);
+
+        let router = router(Arc::clone(&service))
+            .layer(Extension(caller_from(&neighbour, "127.0.0.1:51234")));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/peer/v1/handshake")
+            .header("content-type", "application/json")
+            .body(Body::from(offer(&neighbour, "127.0.0.1", 9000).to_string()))
+            .expect("request");
+        router.oneshot(request).await.expect("response");
+
+        assert_eq!(
+            service.pending_pairs().expect("pending")[0]
+                .addr
+                .authority(),
+            "127.0.0.1:9000"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hostname_is_kept_because_it_may_resolve_where_we_cannot_see() {
+        // A MagicDNS name is more useful than the IP behind it — it survives
+        // the peer moving — so a non-IP claim is kept when the connection did
+        // not come from loopback.
+        let host = identity(44);
+        let friend = identity(45);
+        let (_dir, service) = service(&host);
+
+        let router =
+            router(Arc::clone(&service)).layer(Extension(caller_from(&friend, "100.64.0.9:51234")));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/peer/v1/handshake")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                offer(&friend, "laptop.tail1234.ts.net", 8400).to_string(),
+            ))
+            .expect("request");
+        router.oneshot(request).await.expect("response");
+
+        assert_eq!(
+            service.pending_pairs().expect("pending")[0]
+                .addr
+                .authority(),
+            "laptop.tail1234.ts.net:8400"
+        );
+    }
+
     #[tokio::test]
     async fn a_handshake_from_a_stranger_is_recorded_as_pending_not_paired() {
         let host = identity(11);
@@ -858,8 +989,10 @@ mod tests {
         assert_eq!(pending[0].id, stranger.node_id());
         assert_eq!(
             pending[0].addr.authority(),
-            "10.0.0.7:9000",
-            "the callback address it gave should be what we record"
+            "10.0.0.2:9000",
+            "the address the connection came from, with the port it claimed — \
+             this used to record the claimed host, and every daemon claimed \
+             its own loopback (#23)"
         );
     }
 }
