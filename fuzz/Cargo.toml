@@ -1,0 +1,47 @@
+[package]
+name = "hivemind-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+# Its own package, outside the workspace, because `cargo-fuzz` needs nightly
+# and the workspace pins stable. Joining the workspace would drag
+# `libfuzzer-sys` into every ordinary build for the sake of a nightly job.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+hivemind-core = { path = "../crates/hivemind-core" }
+
+axum = { version = "0.8", features = ["multipart"] }
+chrono = "0.4"
+serde_json = "1"
+tokio = { version = "1", features = ["rt"] }
+
+[profile.release]
+debug = true
+
+# Each target is one thing that reads bytes another machine sent.
+[[bin]]
+name = "message_json"
+path = "fuzz_targets/message_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "canonical_encoding"
+path = "fuzz_targets/canonical_encoding.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "multipart_delivery"
+path = "fuzz_targets/multipart_delivery.rs"
+test = false
+doc = false
+bench = false

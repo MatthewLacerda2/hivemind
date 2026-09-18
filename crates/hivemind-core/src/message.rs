@@ -377,6 +377,52 @@ pub(crate) fn test_signing_key() -> SigningKey {
 }
 
 #[cfg(test)]
+mod seed_tests {
+    //! The fuzz seeds have to parse, or the fuzzer spends its budget
+    //! discovering that random bytes are not JSON — which tests serde and
+    //! nothing of ours.
+    //!
+    //! Checked here rather than in `fuzz/`, which is a separate package on a
+    //! separate toolchain and is not built by `just ci`. A seed that stopped
+    //! parsing because a field was renamed would otherwise go unnoticed until
+    //! somebody read a nightly log.
+
+    use super::*;
+
+    #[test]
+    fn every_fuzz_seed_deserialises_as_a_message() {
+        let seeds =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/seeds/message_json");
+
+        let entries: Vec<_> = std::fs::read_dir(&seeds)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", seeds.display()))
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|e| e == "json"))
+            .collect();
+
+        assert!(
+            entries.len() >= 9,
+            "expected the generated seeds; run `python3 fuzz/seed.py`"
+        );
+
+        for entry in entries {
+            let text = std::fs::read_to_string(entry.path()).expect("read the seed");
+            let message: Message = serde_json::from_str(&text).unwrap_or_else(|e| {
+                panic!(
+                    "{} does not parse as a Message: {e}\n{text}",
+                    entry.path().display()
+                )
+            });
+
+            // And it must reach the code the target is aimed at.
+            message
+                .canonical_bytes()
+                .expect("a parsed message must be encodable");
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

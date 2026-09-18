@@ -969,6 +969,16 @@ impl MailService {
 
     /// Fetch one blob from the peer that sent it, resuming if we can.
     async fn download_from(&self, from: NodeId, digest: &Sha256Digest) -> Result<(), ServiceError> {
+        // SPEC §13.1. The blob's digest stands in for a message id here: an
+        // attachment is fetched by content, and the same bytes can belong to
+        // several messages.
+        let span = tracing::info_span!(
+            "fetch_blob",
+            peer = %from.short(),
+            blob = %digest.to_hex()
+        );
+        let _entered = span.enter();
+
         let certificate = self
             .certificate_of(from)
             .ok_or_else(|| ServiceError::NoSuchPeer {
