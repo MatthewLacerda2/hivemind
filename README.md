@@ -10,9 +10,21 @@ It is deliberately a *mail service*, not an orchestrator: store-and-forward,
 inbox and outbox, attachments, threads. The intelligence stays in each Claude.
 hivemind only carries the mail.
 
-> **Status: pre-release.** The scaffolding and CI are in place (M0). Nothing
-> is functional yet. See [SPEC.md](SPEC.md) §14 for the milestone plan and
-> [CHANGELOG.md](CHANGELOG.md) for what has actually shipped.
+> **Status: pre-release.** Local mail works (M0, M1): one daemon, a real
+> inbox, threads, search, and a CLI. There are no peers yet — `join`, `pair`
+> and delivery to another machine arrive in M3 — so the quick start below
+> describes where this is going, not what `brew install` gives you today. See
+> [SPEC.md](SPEC.md) §14 for the plan and [CHANGELOG.md](CHANGELOG.md) for what
+> has actually shipped.
+>
+> What works now:
+>
+> ```
+> hivemind daemon                       # in one terminal
+> hivemind send everyone -s "hello" -- "a note to myself"
+> hivemind inbox
+> hivemind read <id>
+> ```
 
 ---
 

@@ -22,7 +22,17 @@ and the entries below are generated from conventional commits by
 - Project documentation: README, CONTRIBUTING, SECURITY with the threat model,
   CODE_OF_CONDUCT, dual Apache-2.0/MIT licensing.
 
-Nothing is functional yet — M0's deliverable is green CI on an empty workspace
-(SPEC §14).
+- **M1, local mail.** The message model and its canonical signed encoding, with
+  golden vectors derived from an independent reference encoder. The maildir
+  store, where files are the source of truth and every write is an atomic
+  rename. The SQLite index with full-text search, rebuilt from `mail/` whenever
+  it is missing or stale. Node identity: one Ed25519 key that both signs
+  messages and backs the self-signed certificate peers will pin. The local HTTP
+  API with OpenAPI, Swagger UI, RFC 9457 errors and an SSE event stream. A CLI
+  with `daemon`, `status`, `send`, `inbox`, `read`, `reply` and `reindex`.
+- Decision records 0006 (node id display), 0007 (`received_at` is not signed)
+  and 0008 (the service layer is synchronous).
+
+There are no peers yet: `join`, `pair` and delivery to another machine are M3.
 
 [Unreleased]: https://github.com/MatthewLacerda2/hivemind/commits/main

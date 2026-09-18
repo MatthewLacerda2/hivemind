@@ -1,0 +1,665 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "hivemind local API",
+    "description": "The loopback API on 127.0.0.1:8401. No authentication: reachability is the authorization, and the listener refuses to bind anywhere else.\n\n## Problem types\n\nErrors are RFC 9457 `application/problem+json`. The `type` member is stable:\n\n- `/problems/message-not-found` — No such message (404)\n- `/problems/invalid-message` — Message is not acceptable (422)\n- `/problems/no-recipients` — Message has no recipients (422)\n- `/problems/internal` — Internal error (500)",
+    "contact": {
+      "name": "The hivemind contributors"
+    },
+    "license": {
+      "name": "Apache-2.0 OR MIT"
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/v1/events": {
+      "get": {
+        "tags": [
+          "local"
+        ],
+        "summary": "The SSE stream (SPEC §7.1).",
+        "operationId": "events",
+        "responses": {
+          "200": {
+            "description": "text/event-stream of message.* events"
+          }
+        }
+      }
+    },
+    "/api/v1/me": {
+      "get": {
+        "tags": [
+          "local"
+        ],
+        "operationId": "me",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Me"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/messages": {
+      "get": {
+        "tags": [
+          "local"
+        ],
+        "operationId": "list_messages",
+        "parameters": [
+          {
+            "name": "box",
+            "in": "path",
+            "description": "Restrict to one mailbox: `new`, `cur`, `out` or `sent`.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "thread",
+            "in": "path",
+            "description": "Restrict to one thread.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "from",
+            "in": "path",
+            "description": "Restrict to one sender, by node id.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "unread",
+            "in": "path",
+            "description": "Only unread messages.",
+            "required": true,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "q",
+            "in": "path",
+            "description": "Full-text search over subject and body.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "path",
+            "description": "How many to return.",
+            "required": true,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MessageSummary"
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "local"
+        ],
+        "operationId": "send_message",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Accepted"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/messages/{id}": {
+      "get": {
+        "tags": [
+          "local"
+        ],
+        "operationId": "get_message",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Message id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/messages/{id}/read": {
+      "post": {
+        "tags": [
+          "local"
+        ],
+        "operationId": "mark_read",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Message id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Marked read"
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/messages/{id}/reply": {
+      "post": {
+        "tags": [
+          "local"
+        ],
+        "operationId": "reply_to_message",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Message being replied to",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Accepted"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/threads/{thread_id}": {
+      "get": {
+        "tags": [
+          "local"
+        ],
+        "operationId": "get_thread",
+        "parameters": [
+          {
+            "name": "thread_id",
+            "in": "path",
+            "description": "Thread id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MessageSummary"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "tags": [
+          "local"
+        ],
+        "summary": "Liveness. Deliberately says nothing about the network.",
+        "operationId": "healthz",
+        "responses": {
+          "200": {
+            "description": "The daemon is up"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Accepted": {
+        "type": "object",
+        "description": "What a send returns (SPEC §8: accepted, not delivered).",
+        "required": [
+          "id",
+          "thread_id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The new message's id."
+          },
+          "thread_id": {
+            "type": "string",
+            "description": "The thread it belongs to."
+          }
+        }
+      },
+      "Me": {
+        "type": "object",
+        "description": "Who this node is (SPEC §7.1).",
+        "required": [
+          "id",
+          "short_id",
+          "version",
+          "unread"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "This node's fingerprint, in its display form.",
+            "example": "hm1:w2mq-xor2-seiv-lghq-ybqb-36iv-i24o-n5vk-dpww-736k-eici-imu3-bnwq"
+          },
+          "short_id": {
+            "type": "string",
+            "description": "The short form people compare by eye.",
+            "example": "w2mqxor2"
+          },
+          "unread": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many unread messages there are.",
+            "minimum": 0
+          },
+          "version": {
+            "type": "string",
+            "description": "The running version."
+          }
+        }
+      },
+      "MessageBody": {
+        "type": "object",
+        "description": "A whole message.",
+        "required": [
+          "id",
+          "thread_id",
+          "from",
+          "subject",
+          "body",
+          "kind",
+          "sender_kind",
+          "sent_at",
+          "mailbox"
+        ],
+        "properties": {
+          "body": {
+            "type": "string",
+            "description": "Its body, as markdown."
+          },
+          "from": {
+            "type": "string",
+            "description": "Who sent it."
+          },
+          "id": {
+            "type": "string",
+            "description": "The message id."
+          },
+          "in_reply_to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What it replies to, if anything."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`message`, `task` or `notification`."
+          },
+          "mailbox": {
+            "type": "string",
+            "description": "Which mailbox it is in."
+          },
+          "received_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When this node received it, if it did."
+          },
+          "sender_kind": {
+            "type": "string",
+            "description": "`human` if a person typed it, `agent` if a Claude sent it."
+          },
+          "sent_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it was sent."
+          },
+          "subject": {
+            "type": "string",
+            "description": "Its subject."
+          },
+          "thread_id": {
+            "type": "string",
+            "description": "The thread it belongs to."
+          }
+        }
+      },
+      "MessageSummary": {
+        "type": "object",
+        "description": "One row of a listing (SPEC §9.1).",
+        "required": [
+          "id",
+          "thread_id",
+          "from",
+          "subject",
+          "kind",
+          "sender_kind",
+          "sent_at",
+          "mailbox",
+          "unread",
+          "attachment_names"
+        ],
+        "properties": {
+          "attachment_names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The names of its attachments."
+          },
+          "from": {
+            "type": "string",
+            "description": "Who sent it."
+          },
+          "id": {
+            "type": "string",
+            "description": "The message id."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`message`, `task` or `notification`."
+          },
+          "mailbox": {
+            "type": "string",
+            "description": "Which mailbox it is in."
+          },
+          "sender_kind": {
+            "type": "string",
+            "description": "`human` if a person typed it, `agent` if a Claude sent it."
+          },
+          "sent_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it was sent."
+          },
+          "subject": {
+            "type": "string",
+            "description": "Its subject."
+          },
+          "thread_id": {
+            "type": "string",
+            "description": "The thread it belongs to."
+          },
+          "unread": {
+            "type": "boolean",
+            "description": "Whether it is still unread."
+          }
+        }
+      },
+      "Problem": {
+        "type": "object",
+        "description": "An RFC 9457 problem document.",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail"
+        ],
+        "properties": {
+          "detail": {
+            "type": "string",
+            "description": "What went wrong with *this* request."
+          },
+          "status": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The HTTP status code.",
+            "minimum": 0
+          },
+          "title": {
+            "type": "string",
+            "description": "A short summary of the problem type."
+          },
+          "type": {
+            "type": "string",
+            "description": "A relative URI reference identifying the problem type, stable across\nreleases: `/problems/<slug>`.",
+            "example": "/problems/message-not-found"
+          }
+        }
+      },
+      "ReplyRequest": {
+        "type": "object",
+        "description": "What to say in a reply.",
+        "required": [
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "type": "string",
+            "description": "The body, as markdown."
+          }
+        }
+      },
+      "SendRequest": {
+        "type": "object",
+        "description": "What to send.\n\nThere is deliberately no `sender_kind`: it is decided by which entrypoint\nthe request arrived through, and a caller offering one is ignored\n(SPEC §4.1).",
+        "required": [
+          "to",
+          "subject",
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "type": "string",
+            "description": "The body, as markdown."
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`message`, `task` or `notification`. Defaults to `message`."
+          },
+          "subject": {
+            "type": "string",
+            "description": "The subject, at most 200 characters."
+          },
+          "to": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Recipients: a node id, an owner name, or `everyone`.",
+            "example": [
+              "everyone"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "messages",
+      "description": "Reading and sending mail"
+    },
+    {
+      "name": "node",
+      "description": "This node"
+    }
+  ]
+}

@@ -12,7 +12,9 @@ authors.workspace = true
 hivemind-core.workspace = true
 hivemind-net.workspace = true
 
+async-stream.workspace = true
 axum.workspace = true
+futures-core.workspace = true
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -26,7 +28,9 @@ utoipa.workspace = true
 utoipa-swagger-ui.workspace = true
 
 [dev-dependencies]
+http-body-util.workspace = true
 tempfile.workspace = true
+tower.workspace = true
 
 [lints]
 workspace = true

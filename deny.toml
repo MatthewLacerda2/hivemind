@@ -52,6 +52,18 @@ skip = [
     # and nothing in the shipped binary. We cannot fix it from here.
     # Way out: drop this entry when zerocopy releases against syn 3.
     { crate = "syn@2", reason = "zerocopy-derive has not moved to syn 3 yet" },
+
+    # axum reaches base64 0.22 through hyper-util; rcgen reaches 0.23 through
+    # pem. Two upstream trees, neither ours to move.
+    # Way out: drop this when hyper-util moves to base64 0.23.
+    { crate = "base64@0.22", reason = "hyper-util has not moved to base64 0.23 yet" },
+
+    # Three of them: ours (0.3), ring's via rcgen (0.2), and cc/cmake's (0.4),
+    # which is a build dependency of the bundled SQLite and never linked into
+    # the binary at all.
+    # Way out: drop this when ring and cc converge on getrandom 0.3.
+    { crate = "getrandom@0.2", reason = "ring has not moved to getrandom 0.3 yet" },
+    { crate = "getrandom@0.4", reason = "build-only, via cc/cmake for bundled SQLite" },
 ]
 skip-tree = []
 
