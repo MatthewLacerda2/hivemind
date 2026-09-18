@@ -459,3 +459,84 @@ fn wait_until_answering(port: u16, process: &mut Child, errors: &std::path::Path
         std::fs::read_to_string(errors).unwrap_or_default()
     );
 }
+
+#[test]
+fn the_wake_up_hook_needs_no_daemon_and_no_network() {
+    // SPEC §9.3: `hook check` runs on every Claude turn boundary, must exit in
+    // under 100 ms, and "reads `index.db` directly, never the network".
+    //
+    // The structural half is asserted rather than the timing. A raw
+    // millisecond bound on a shared CI runner is a coin toss, and it would not
+    // catch the regression that matters anyway: a `hook check` rewritten to
+    // call the local API fails *here*, with no daemon to call, which is
+    // exactly the change that would make it slow. Measured for the record:
+    // 10 ms in a debug build on the development machine, against a 100 ms
+    // budget.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let home = dir.path().join("hivemind");
+
+    // A home with an identity and an index, and nothing listening anywhere.
+    let init = Command::new(env!("CARGO_BIN_EXE_hivemind"))
+        .args(["init", "--no-launchd", "--no-mcp", "--no-hooks"])
+        .env("HIVEMIND_HOME", &home)
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("the cli runs");
+    assert!(
+        init.status.success(),
+        "init: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+
+    let started = std::time::Instant::now();
+    let output = Command::new(env!("CARGO_BIN_EXE_hivemind"))
+        .args(["hook", "check"])
+        .env("HIVEMIND_HOME", &home)
+        // Somewhere nothing is listening. If this ever starts mattering, the
+        // hook has grown a network call.
+        .env("HIVEMIND_API", "http://127.0.0.1:1")
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("the cli runs");
+    let elapsed = started.elapsed();
+
+    assert!(
+        output.status.success(),
+        "`hook check` must work with no daemon: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "no unread mail means no output at all, so a quiet turn stays quiet: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    // Loose enough not to flake on a loaded runner, tight enough that a
+    // network timeout could not hide inside it.
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "`hook check` took {elapsed:?}; SPEC §9.3 budgets 100 ms"
+    );
+}
+
+#[test]
+fn the_wake_up_hook_says_what_is_waiting() {
+    // The other half of §9.3: one line naming who and what, or nothing.
+    let daemon = Daemon::start();
+    let me = json(&daemon.run(&["status", "--json"]));
+    let id = me["id"].as_str().expect("an id").to_owned();
+
+    daemon.run(&["send", &id, "-s", "dashboard PR", "--", "have a look"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_hivemind"))
+        .args(["hook", "check"])
+        .env("HIVEMIND_HOME", daemon.home())
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("the cli runs");
+
+    let line = String::from_utf8_lossy(&output.stdout);
+    assert!(line.contains("hivemind"), "it should name itself: {line:?}");
+    assert!(line.contains("dashboard PR"), "and the subject: {line:?}");
+    assert_eq!(line.lines().count(), 1, "one line, not a report: {line:?}");
+}
