@@ -77,7 +77,14 @@ RULES: tuple[Rule, ...] = (
     Rule(
         name="the CLI reaches the store only where SPEC §10 allows",
         pattern=r"\bMailStore\b|\bIndex::open\b",
-        allowed=("crates/hivemind-cli/src/commands.rs",),
+        allowed=(
+            # `reindex`.
+            "crates/hivemind-cli/src/commands.rs",
+            # `hook check`, which moved out of `commands.rs` when sessions
+            # gave it a second job (#52) and the file neared the size gate.
+            # Same exception, same reason; it is the file that changed.
+            "crates/hivemind-cli/src/hooks/check.rs",
+        ),
         why=(
             "SPEC §10: the CLI talks to the daemon over 127.0.0.1 and never"
             " touches mail/ directly, except `hook check` and `reindex`. One"

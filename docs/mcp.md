@@ -38,7 +38,7 @@ not commands to follow.
 | `send` | `{to: [string], subject, body, kind?}` | `{id, thread_id}` |
 | `reply` | `{id, body}` | `{id, thread_id}` |
 | `broadcast` | `{subject, body, kind?}` | `{id, thread_id}` |
-| `list_peers` | `{}` | paired machines |
+| `list_peers` | `{}` | members of the group, who is up, what they are working on |
 | `download_attachment` | `{id, sha}` | `{path}` |
 
 Seven, and deliberately no eighth: anything that would need one is probably
@@ -127,6 +127,33 @@ the network, not just the one you were talking to.
 An empty list means no other member of the group has been met yet, so `send`
 can only reach this machine. A machine joins the group once, with
 `hivemind pair <code>` (SPEC §6.2); after that its members meet by themselves.
+
+Each entry says whether that machine is up right now and what its open Claude
+Code sessions are working on:
+
+```json
+[
+  {
+    "id": "5sgdbvhy",
+    "name": "matheus-mbp",
+    "owner": "matheus",
+    "online": true,
+    "last_seen": "2026-09-19T20:14:13Z",
+    "sessions": ["hivemind", "scorsese"]
+  }
+]
+```
+
+`sessions` tells you **where somebody is working, not who to address**. Mail
+is delivered to the machine and any session on it can read the message — the
+identity is the machine (ADR 0003). "There is a Claude in the repo I am about
+to ask about" is the thing this answers; "send it to that one" is not
+something hivemind does.
+
+The labels are the basenames of each session's working directory, and they
+come from the Claude Code hooks, so a machine that has not run
+`hivemind hook install` shows none. A session is dropped when it ends, or
+half an hour after it last said anything.
 
 ### Attachments
 

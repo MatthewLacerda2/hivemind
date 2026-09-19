@@ -673,6 +673,106 @@
         }
       }
     },
+    "/api/v1/sessions": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "operationId": "list_sessions",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SessionSummary"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{id}": {
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Register a session, or renew one already known (SPEC §9.3).",
+        "description": "One call for both, because the hook that renews cannot know whether the\ndaemon has heard of it — a daemon restarted mid-conversation missed the\n`SessionStart`, and the next prompt is the first it learns of a session\nthat is plainly alive.",
+        "operationId": "register_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The session id Claude Code gives its hooks",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterSession"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Registered"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Close a session (SPEC §9.3).",
+        "description": "`204` whether or not there was one. `SessionEnd` is a courtesy and expiry\nis what makes the list true, so \"there was nothing to close\" is the\ncaller's request already satisfied rather than a mistake to report.",
+        "operationId": "end_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The session id Claude Code gives its hooks",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Closed, or there was nothing to close"
+          }
+        }
+      }
+    },
     "/api/v1/threads/{thread_id}": {
       "get": {
         "tags": [
@@ -1202,6 +1302,33 @@
           }
         }
       },
+      "RegisterSession": {
+        "type": "object",
+        "description": "What a registration says about itself.",
+        "required": [
+          "label"
+        ],
+        "properties": {
+          "label": {
+            "type": "string",
+            "description": "What it is working on. The hook sends the basename of its `cwd`."
+          }
+        }
+      },
+      "Registered": {
+        "type": "object",
+        "description": "What a registration answers.",
+        "required": [
+          "open"
+        ],
+        "properties": {
+          "open": {
+            "type": "integer",
+            "description": "How many sessions are open now, this one included.",
+            "minimum": 0
+          }
+        }
+      },
       "ReplyRequest": {
         "type": "object",
         "description": "What to say in a reply.",
@@ -1270,6 +1397,24 @@
             ]
           }
         }
+      },
+      "SessionSummary": {
+        "type": "object",
+        "description": "One session open on this machine.",
+        "required": [
+          "label",
+          "last_seen"
+        ],
+        "properties": {
+          "label": {
+            "type": "string",
+            "description": "What it is working on — the basename of its working directory."
+          },
+          "last_seen": {
+            "type": "string",
+            "description": "When it last showed a sign of life, RFC 3339."
+          }
+        }
       }
     }
   },
@@ -1289,6 +1434,10 @@
     {
       "name": "node",
       "description": "This node"
+    },
+    {
+      "name": "sessions",
+      "description": "Claude Code sessions open on this machine (SPEC §9.3)"
     }
   ]
 }

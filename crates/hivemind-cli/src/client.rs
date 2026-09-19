@@ -37,6 +37,7 @@ struct Response {
 /// Talks to `127.0.0.1:8401`.
 pub(crate) struct Client {
     base: String,
+    timeout: std::time::Duration,
 }
 
 impl Client {
@@ -44,7 +45,19 @@ impl Client {
     pub(crate) fn new(base: &str) -> Self {
         Self {
             base: base.trim_end_matches('/').to_owned(),
+            timeout: TIMEOUT,
         }
+    }
+
+    /// Give up sooner than [`TIMEOUT`].
+    ///
+    /// For the hooks, which run on every turn boundary and have a hundred
+    /// milliseconds to spend (SPEC §9.3). Waiting five minutes on a daemon
+    /// that is not there would stop somebody working, which is the one thing
+    /// a hook must never do.
+    pub(crate) fn impatient(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     /// GET and decode.
@@ -80,6 +93,21 @@ impl Client {
         Err(problem_error(&response))
     }
 
+    /// POST a JSON body with no response body worth reading.
+    pub(crate) async fn post_empty_body(&self, path: &str, body: &serde_json::Value) -> Result<()> {
+        let response = self
+            .send(
+                hyper::Method::POST,
+                path,
+                Some(body.to_string().into_bytes()),
+            )
+            .await?;
+        if response.status.is_success() {
+            return Ok(());
+        }
+        Err(problem_error(&response))
+    }
+
     /// DELETE, discarding the (empty) response body.
     pub(crate) async fn delete(&self, path: &str) -> Result<()> {
         let response = self.send(hyper::Method::DELETE, path, None).await?;
@@ -102,12 +130,13 @@ impl Client {
             .trim_start_matches("https://")
             .trim_end_matches('/');
 
-        match tokio::time::timeout(TIMEOUT, self.exchange(authority, method, path, body)).await {
+        match tokio::time::timeout(self.timeout, self.exchange(authority, method, path, body)).await
+        {
             Ok(result) => result,
             Err(_) => bail!(
-                "the daemon at {} did not answer within {}s",
+                "the daemon at {} did not answer within {:?}",
                 self.base,
-                TIMEOUT.as_secs()
+                self.timeout
             ),
         }
     }

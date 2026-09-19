@@ -24,6 +24,7 @@ use crate::problem::Problem;
 use crate::service::{Draft, MailService};
 
 pub mod group;
+pub mod sessions;
 
 /// Shared state for the loopback router.
 pub type AppState = Arc<MailService>;
@@ -383,6 +384,11 @@ pub fn router(state: AppState) -> Router {
             get(get_attachment),
         )
         .route("/api/v1/threads/{thread_id}", get(get_thread))
+        .route("/api/v1/sessions", get(sessions::list_sessions))
+        .route(
+            "/api/v1/sessions/{id}",
+            post(sessions::register_session).delete(sessions::end_session),
+        )
         .route("/api/v1/events", get(events))
         .route("/healthz", get(healthz))
         .with_state(Arc::clone(&state))
@@ -874,6 +880,92 @@ mod tests {
         assert_eq!(peers[0]["sessions"], serde_json::json!(["hivemind"]));
         assert_eq!(peers[0]["paired"], true);
         assert_eq!(peers[0]["owner"], "ana");
+    }
+
+    #[tokio::test]
+    async fn a_session_registers_renews_and_closes_over_the_loopback_api() {
+        // The three calls the hooks make (SPEC §9.3). One endpoint for
+        // register and renew, because the hook that renews cannot know
+        // whether the daemon has heard of the session.
+        let (_dir, router, _service) = app_with_service();
+
+        let (status, sessions) = call(&router, get("/api/v1/sessions")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(sessions, serde_json::json!([]));
+
+        let (status, registered) = call(
+            &router,
+            post_json(
+                "/api/v1/sessions/01JXT-a",
+                &serde_json::json!({ "label": "hivemind" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(registered["open"], 1);
+
+        // Renewing is the same call and must not make a second session, or a
+        // long conversation would look like forty Claudes in one repo.
+        let (_, registered) = call(
+            &router,
+            post_json(
+                "/api/v1/sessions/01JXT-a",
+                &serde_json::json!({ "label": "hivemind" }),
+            ),
+        )
+        .await;
+        assert_eq!(registered["open"], 1);
+
+        let (_, sessions) = call(&router, get("/api/v1/sessions")).await;
+        assert_eq!(sessions.as_array().expect("array").len(), 1);
+        assert_eq!(sessions[0]["label"], "hivemind");
+        assert!(sessions[0]["last_seen"].is_string());
+
+        let request = Request::builder()
+            .method("DELETE")
+            .uri("/api/v1/sessions/01JXT-a")
+            .body(Body::empty())
+            .expect("request");
+        let response = router.clone().oneshot(request).await.expect("responds");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let (_, sessions) = call(&router, get("/api/v1/sessions")).await;
+        assert_eq!(sessions, serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn closing_a_session_nobody_registered_is_not_an_error() {
+        // `SessionEnd` is a courtesy; expiry is what makes the list true. A
+        // daemon that restarted mid-conversation never saw the start, and a
+        // hook must never fail because of hivemind.
+        let (_dir, router, _service) = app_with_service();
+
+        let request = Request::builder()
+            .method("DELETE")
+            .uri("/api/v1/sessions/01JXT-never-seen")
+            .body(Body::empty())
+            .expect("request");
+        let response = router.oneshot(request).await.expect("responds");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn a_session_without_a_label_is_refused_rather_than_listed_blank() {
+        // The label is the whole of what a session says. A blank one would
+        // show up in somebody else's peer list as "online, 1 session: ".
+        let (_dir, router, _service) = app_with_service();
+
+        let (status, problem) = call(
+            &router,
+            post_json(
+                "/api/v1/sessions/01JXT-a",
+                &serde_json::json!({ "label": "   " }),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(problem["type"], "/problems/invalid-message");
     }
 
     #[tokio::test]

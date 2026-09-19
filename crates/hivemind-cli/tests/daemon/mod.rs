@@ -115,11 +115,67 @@ impl Daemon {
         String::from_utf8(output.stdout).expect("utf-8 output")
     }
 
+    /// Run a hook against this daemon, feeding it what Claude Code would.
+    ///
+    /// Through the real binary and the real stdin, because the thing worth
+    /// testing is that a hook reads its payload at all — every in-process
+    /// version of this passes whether or not the wiring exists.
+    pub(crate) fn hook(&self, payload: &serde_json::Value) -> std::time::Duration {
+        Self::hook_against(&self.api(), payload)
+    }
+
+    /// The same, against an address rather than a running daemon — so a test
+    /// can point one at a port nobody is listening on.
+    pub(crate) fn hook_against(api: &str, payload: &serde_json::Value) -> std::time::Duration {
+        let home = tempfile::tempdir().expect("temp home");
+        let started = Instant::now();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_hivemind"))
+            .args(["hook", "check"])
+            .env("HIVEMIND_HOME", home.path())
+            .env("HIVEMIND_API", api)
+            .env("NO_COLOR", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the cli runs");
+
+        {
+            use std::io::Write as _;
+            let mut stdin = child.stdin.take().expect("stdin");
+            stdin
+                .write_all(payload.to_string().as_bytes())
+                .expect("write the payload");
+        }
+
+        let output = child.wait_with_output().expect("the hook finishes");
+        assert!(
+            output.status.success(),
+            "a hook must never fail: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        started.elapsed()
+    }
+
     /// POST to this daemon's local API, returning the decoded JSON.
     pub(crate) fn post(&self, path: &str, body: &serde_json::Value) -> (u16, serde_json::Value) {
         let response = reqwest::blocking::Client::new()
             .post(format!("{}{path}", self.api()))
             .json(body)
+            .send()
+            .expect("the daemon answers");
+        let status = response.status().as_u16();
+        let text = response.text().unwrap_or_default();
+        (
+            status,
+            serde_json::from_str(&text).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    /// GET from this daemon's local API, returning the decoded JSON.
+    pub(crate) fn get_json(&self, path: &str) -> (u16, serde_json::Value) {
+        let response = reqwest::blocking::Client::new()
+            .get(format!("{}{path}", self.api()))
             .send()
             .expect("the daemon answers");
         let status = response.status().as_u16();

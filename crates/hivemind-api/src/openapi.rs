@@ -37,6 +37,9 @@ use crate::problem::{Problem, ProblemType};
         local::get_attachment,
         local::get_thread,
         local::events,
+        local::sessions::list_sessions,
+        local::sessions::register_session,
+        local::sessions::end_session,
     ),
     components(schemas(
         local::Me,
@@ -53,13 +56,17 @@ use crate::problem::{Problem, ProblemType};
         local::SendRequest,
         local::ReplyRequest,
         local::Accepted,
+        local::sessions::SessionSummary,
+        local::sessions::RegisterSession,
+        local::sessions::Registered,
         Problem,
     )),
     tags(
         (name = "messages", description = "Reading and sending mail"),
         (name = "peers", description = "Members, nodes seen, and where they are"),
         (name = "group", description = "The group this node is in (SPEC §6.2)"),
-        (name = "node", description = "This node")
+        (name = "node", description = "This node"),
+        (name = "sessions", description = "Claude Code sessions open on this machine (SPEC §9.3)")
     )
 )]
 pub struct ApiDoc;

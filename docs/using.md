@@ -64,6 +64,13 @@ the others once a minute. A machine that is off is shown without the "online"
 part; `last seen` says since when. If a minute of staleness ever matters,
 `presence_interval` in `config.toml` is the knob.
 
+The sessions come from the Claude Code hooks, so `hivemind hook install` is
+what turns that part on. Each open Claude is labelled by the directory it is
+working in, renewed on every turn, and dropped when it ends — or half an hour
+after it stops saying anything, for a terminal that was closed outright. Only
+the labels leave the machine, never the session ids, and a session is never an
+address: mail goes to the machine, and any Claude there can read it.
+
 ## What you can do once in the group
 
 Through the MCP server, without leaving the conversation:

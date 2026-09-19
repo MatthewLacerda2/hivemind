@@ -416,8 +416,12 @@ impl HivemindMcp {
 
     #[tool(
         name = "list_peers",
-        description = "List the machines this node is paired with. An empty list means \
-                       nothing is paired yet, so `send` can only reach this machine."
+        description = "List the machines in this node's group: who they are, whether each \
+                       is up right now, and what each open Claude Code session on it is \
+                       working on. A session tells you where somebody is working, not who \
+                       to address — mail goes to the machine and any session there can \
+                       read it. An empty list means this machine is in no group yet, or \
+                       has met nobody in it, so `send` can only reach this machine."
     )]
     async fn list_peers(&self) -> Result<Json<Vec<PeerInfo>>, McpError> {
         // Only members, not nodes merely seen: this answers "who can I write
