@@ -200,10 +200,14 @@ enum PeerCommand {
 
 #[derive(Debug, Subcommand)]
 enum HookCommand {
-    /// Print a one-line summary if there is unread mail, nothing otherwise.
+    /// Print a one-line summary if there is unread mail, nothing otherwise,
+    /// and register this session with the daemon.
     ///
-    /// Runs on every Claude turn boundary, so it reads the index directly and
-    /// never touches the network (SPEC §9.3).
+    /// Runs on every Claude turn boundary, so it reads the index directly
+    /// rather than asking the daemon for the mail, and speaks to the daemon
+    /// only over loopback and only briefly (SPEC §9.3). It never reaches a
+    /// peer, and it never fails: a hook that errors interrupts somebody's
+    /// work to report something they did not ask about.
     Check,
     /// Add the hooks to ~/.claude/settings.json, merging rather than clobbering.
     Install,
@@ -300,7 +304,7 @@ async fn main() -> Result<()> {
             Some(PeerCommand::Remove { id }) => peers::remove(&cli.api, &id).await,
         },
         Command::Hook(HookCommand::Check) => {
-            commands::hook_check(cli.home.as_deref());
+            hooks::check::hook_check(cli.home.as_deref(), &cli.api).await;
             Ok(())
         }
         Command::Hook(HookCommand::Install) => hooks::install(),

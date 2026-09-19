@@ -198,10 +198,12 @@ pub enum ServiceError {
 mod group;
 mod peering;
 mod presence;
+mod sessions;
 
 pub use group::{GroupStatus, MAX_SEEN, SeenNode};
 pub use peering::Met;
 pub use presence::Presence;
+pub use sessions::{SESSION_TTL, Session};
 
 /// Everything the local API and the MCP adapter can do.
 #[derive(Debug)]
@@ -222,6 +224,11 @@ pub struct MailService {
     woken: Mutex<std::collections::HashSet<NodeId>>,
     /// Addresses worth a hello next round, from gossip and from hints.
     candidates: Mutex<std::collections::BTreeSet<String>>,
+    /// The Claude Code sessions open on this machine (SPEC §9.3). In memory
+    /// only: a daemon that restarts hears about each again at its next turn,
+    /// which is more honest than a file claiming something about a process
+    /// that may be gone.
+    sessions: Mutex<sessions::Sessions>,
     /// Nodes to pass on as "X is up", and when we heard from each. They age
     /// out after one interval rather than being consumed, so that every peer
     /// greeted in the next round hears the news once.
@@ -307,6 +314,7 @@ impl MailService {
             presence: Mutex::new(std::collections::HashMap::new()),
             woken: Mutex::new(std::collections::HashSet::new()),
             candidates: Mutex::new(std::collections::BTreeSet::new()),
+            sessions: Mutex::new(sessions::Sessions::new()),
             hints: Mutex::new(std::collections::BTreeMap::new()),
             presence_interval: std::time::Duration::from_secs(node.presence_interval),
             home: root.to_path_buf(),

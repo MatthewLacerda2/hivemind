@@ -44,7 +44,7 @@ impl MailService {
             callback_port: self.peer_port,
             proof: self.prove_to(receiver_cert)?,
             peers: self.peer_notes()?,
-            sessions: Self::open_sessions(),
+            sessions: self.session_notes(),
             up: self.hints_for(NodeId::from_certificate_der(receiver_cert)),
         })
     }
@@ -478,14 +478,6 @@ impl MailService {
             // that partition is permanent.
             self.mark_was_a_member(id);
         }
-    }
-
-    /// The sessions open on this machine (SPEC §9.3).
-    ///
-    /// Empty until #52 puts a registry behind it. The field travels now so
-    /// that filling it later is not a protocol change.
-    fn open_sessions() -> Vec<SessionNote> {
-        Vec::new()
     }
 }
 

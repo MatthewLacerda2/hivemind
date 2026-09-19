@@ -92,6 +92,49 @@ impl HivemindMcp {
         }
         Ok(out)
     }
+
+    /// The peer list as `hivemind://peers` serves it.
+    ///
+    /// Who is up and what they are working on, because that is what a model
+    /// reading this is deciding with: "Ana's machine is on" is worth less
+    /// than "there is a Claude in the repo I am about to ask about"
+    /// (SPEC §5.5, §9.3).
+    fn peers_text(&self) -> Result<String, McpError> {
+        let peers = self
+            .service
+            .paired_peers()
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        if peers.is_empty() {
+            return Ok(
+                "No machines in this group yet. `hivemind group create` makes one; every \
+                 other machine pastes the code it prints."
+                    .to_owned(),
+            );
+        }
+
+        let mut out = format!("{} in this group:\n", peers.len());
+        for peer in peers {
+            let presence = self.service.presence_of(peer.id);
+            // Spelled out rather than abbreviated: this goes straight into a
+            // model's context, where a symbol would be noise.
+            let state = match presence {
+                None => "offline".to_owned(),
+                Some(presence) if presence.sessions.is_empty() => "online".to_owned(),
+                Some(presence) => {
+                    let labels: Vec<String> = presence
+                        .sessions
+                        .into_iter()
+                        .map(|session| session.label)
+                        .collect();
+                    format!("online, working in {}", labels.join(", "))
+                }
+            };
+            let owner = peer.owner.as_deref().unwrap_or("owner not given");
+            let _ = writeln!(out, "- {} ({owner}) — {state}", peer.name);
+        }
+        Ok(out)
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -140,9 +183,7 @@ impl ServerHandler for HivemindMcp {
     ) -> Result<ReadResourceResponse, McpError> {
         let text = match request.uri.as_str() {
             INBOX_URI => self.inbox_text()?,
-            // Pairing arrives in M3 (SPEC §14). Saying so is more useful to a
-            // model than an empty list it has to interpret.
-            PEERS_URI => "No paired machines yet.".to_owned(),
+            PEERS_URI => self.peers_text()?,
             other => {
                 return Err(McpError::resource_not_found(
                     format!("unknown resource {other}"),
@@ -185,4 +226,109 @@ pub fn http_service(
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hivemind_api::NodeDescription;
+    use hivemind_core::crypto::SigningKey;
+    use hivemind_core::peer::NodeId;
+
+    fn server() -> (tempfile::TempDir, HivemindMcp) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let node = NodeDescription {
+            id: NodeId::from_certificate_der(b"this node"),
+            certificate: b"this node".to_vec(),
+            private_key: Vec::new(),
+            name: "test".to_owned(),
+            owner: None,
+            callback_host: "127.0.0.1".to_owned(),
+            peer_port: 8400,
+            max_attachment_bytes: hivemind_core::config::DEFAULT_MAX_ATTACHMENT_BYTES,
+            inline_max_bytes: hivemind_core::config::DEFAULT_INLINE_MAX_BYTES,
+            prefetch: false,
+            presence_interval: hivemind_core::config::DEFAULT_PRESENCE_INTERVAL,
+        };
+        let service = Arc::new(
+            MailService::open(dir.path(), node, SigningKey::from_bytes(&[11u8; 32]))
+                .expect("service"),
+        );
+        (dir, HivemindMcp::new(service))
+    }
+
+    /// Put a member in the address book, and return its id.
+    fn admit(server: &HivemindMcp, seed: u8) -> NodeId {
+        let friend = hivemind_core::identity::Identity::from_seed([seed; 32]).expect("identity");
+        let id = friend.node_id();
+        server
+            .service
+            .admit(
+                id,
+                "ana-mbp",
+                Some("ana"),
+                friend.certificate_der().to_vec(),
+                hivemind_core::peerbook::PeerAddr::manual("10.0.0.9", 8400),
+            )
+            .expect("admit");
+        id
+    }
+
+    #[test]
+    fn an_empty_group_says_what_to_do_rather_than_nothing() {
+        // This text goes straight into a model's context. "No machines" with
+        // no next step is a dead end for whoever reads it.
+        let (_dir, server) = server();
+        let text = server.peers_text().expect("text");
+
+        assert!(text.contains("group create"), "{text}");
+        assert!(text.contains("pastes the code"), "{text}");
+    }
+
+    #[test]
+    fn a_peer_is_reported_offline_until_it_says_hello() {
+        let (_dir, server) = server();
+        admit(&server, 71);
+
+        let text = server.peers_text().expect("text");
+        assert!(text.contains("ana-mbp"), "{text}");
+        assert!(text.contains("(ana)"), "the owner is who a human asks for");
+        assert!(text.contains("offline"), "{text}");
+    }
+
+    #[test]
+    fn a_peer_with_sessions_says_where_somebody_is_working() {
+        // The whole point of #52: "that machine is on" is worth less to a
+        // model choosing who to write to than "there is a Claude in the repo
+        // I am about to ask about".
+        let (_dir, server) = server();
+        let id = admit(&server, 72);
+        server.service.mark_online(
+            id,
+            vec![
+                hivemind_api::peer::SessionNote {
+                    label: "hivemind".to_owned(),
+                },
+                hivemind_api::peer::SessionNote {
+                    label: "scorsese".to_owned(),
+                },
+            ],
+        );
+
+        let text = server.peers_text().expect("text");
+        assert!(text.contains("online, working in"), "{text}");
+        assert!(text.contains("hivemind"), "{text}");
+        assert!(text.contains("scorsese"), "{text}");
+    }
+
+    #[test]
+    fn a_peer_that_is_up_with_no_session_is_just_online() {
+        let (_dir, server) = server();
+        let id = admit(&server, 73);
+        server.service.mark_online(id, Vec::new());
+
+        let text = server.peers_text().expect("text");
+        assert!(text.contains("online"), "{text}");
+        assert!(!text.contains("working in"), "{text}");
+    }
 }

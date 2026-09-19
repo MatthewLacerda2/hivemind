@@ -4,14 +4,26 @@
 //! boundaries instead: `SessionStart` and `UserPromptSubmit` run
 //! `hivemind hook check`, which prints one line if there is unread mail and
 //! nothing otherwise.
+//!
+//! The same three hooks are how the daemon knows which sessions are open
+//! (SPEC §9.3). `hook check` tells it which session this turn belongs to and
+//! what it is working on; `SessionEnd` closes it.
 
 use std::path::{Path, PathBuf};
+
+pub(crate) mod check;
 
 use anyhow::{Context as _, Result};
 use serde_json::{Value, json};
 
 /// The events hivemind hooks into (SPEC §9.3).
-const HOOK_EVENTS: [&str; 2] = ["SessionStart", "UserPromptSubmit"];
+///
+/// The first two surface unread mail at a turn boundary *and* register the
+/// session; `SessionEnd` only closes it. Expiry is what makes the session
+/// list true, so this last one is a courtesy that closes a session sooner
+/// than the half hour — a terminal killed outright never sends it, and
+/// nothing depends on it arriving.
+const HOOK_EVENTS: [&str; 3] = ["SessionStart", "UserPromptSubmit", "SessionEnd"];
 /// How hivemind's hook entries are recognised on the way back out.
 const HOOK_COMMAND: &str = "hivemind hook check";
 
@@ -205,7 +217,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn installing_into_an_empty_settings_file_adds_both_events() {
+    fn installing_into_an_empty_settings_file_adds_every_event() {
         let mut settings = json!({});
         merge_hooks(&mut settings);
 
@@ -213,6 +225,27 @@ mod tests {
             let matchers = settings["hooks"][event].as_array().expect("array");
             assert_eq!(matchers.len(), 1, "{event}");
             assert_eq!(matchers[0]["hooks"][0]["command"], HOOK_COMMAND);
+        }
+    }
+
+    #[test]
+    fn an_older_installation_gains_the_event_it_did_not_have() {
+        // `SessionEnd` arrived with sessions (#52). Somebody who ran
+        // `hook install` before that has the first two and not the third, and
+        // running it again has to add the one that is missing without
+        // doubling the two that are there.
+        let mut settings = json!({});
+        merge_hooks(&mut settings);
+        settings["hooks"]
+            .as_object_mut()
+            .expect("object")
+            .remove("SessionEnd");
+
+        merge_hooks(&mut settings);
+
+        for event in HOOK_EVENTS {
+            let matchers = settings["hooks"][event].as_array().expect("array");
+            assert_eq!(matchers.len(), 1, "{event}");
         }
     }
 

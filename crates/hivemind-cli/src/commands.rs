@@ -392,7 +392,7 @@ fn outbox_phrase(outbox: usize) -> String {
     }
 }
 
-fn unread_phrase(unread: u64) -> String {
+pub(crate) fn unread_phrase(unread: u64) -> String {
     match unread {
         0 => "no unread messages".to_owned(),
         1 => "1 unread message".to_owned(),
@@ -634,7 +634,7 @@ fn short_id(id: &str) -> String {
     id.chars().skip(id.len().saturating_sub(6)).collect()
 }
 
-fn short_node(id: &str) -> String {
+pub(crate) fn short_node(id: &str) -> String {
     id.strip_prefix("hm1:")
         .and_then(|rest| rest.split('-').next())
         .unwrap_or(id)
@@ -646,46 +646,6 @@ fn short_node(id: &str) -> String {
 /// This runs on every `SessionStart` and `UserPromptSubmit`, so it has a 100 ms
 /// budget. It reads the index directly rather than going through the daemon:
 /// no HTTP, no network, and it still works when the daemon is down.
-pub(crate) fn hook_check(home: Option<&Path>) {
-    let Ok(home) = paths::home(home) else {
-        // A hook that fails is a hook that interrupts someone's work. Anything
-        // unexpected here means "say nothing", never "print an error".
-        return;
-    };
-
-    let Ok(index) = Index::open(&home.join("index.db")) else {
-        return;
-    };
-    let Ok(summaries) = index.search(&hivemind_core::index::Query {
-        mailbox: Some(hivemind_core::store::Mailbox::New),
-        unread_only: true,
-        limit: Some(3),
-        ..Default::default()
-    }) else {
-        return;
-    };
-
-    if summaries.is_empty() {
-        return;
-    }
-
-    // The preview shows at most three; the count is the real total, and falls
-    // back to what we can see if the count query fails.
-    let visible = summaries.len() as u64;
-    let total = index.unread_count().unwrap_or(visible);
-    let preview: Vec<String> = summaries
-        .iter()
-        .map(|s| format!("{}: {:?}", short_node(&s.from.to_string()), s.subject))
-        .collect();
-
-    // One line, no colour: this goes into a transcript, not a terminal.
-    println!(
-        "hivemind: {} — {}",
-        unread_phrase(total),
-        preview.join(", ")
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
