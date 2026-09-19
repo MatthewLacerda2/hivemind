@@ -3,13 +3,13 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::colour::Paint as _;
 use anyhow::{Context as _, Result};
 use hivemind_api::{ApiDoc, MailService, NodeDescription};
 use hivemind_core::config::Config;
 use hivemind_core::identity::Identity;
 use hivemind_core::index::Index;
 use hivemind_core::store::MailStore;
-use owo_colors::OwoColorize as _;
 use serde::Deserialize;
 
 use crate::client::{Client, body_from_arg_or_stdin};
@@ -497,8 +497,8 @@ pub(crate) async fn inbox(api: &str, unread_only: bool, limit: usize, json: bool
         // The badge is the point of sender_kind: you should be able to see at a
         // glance whether a person wrote this or a Claude did (SPEC §11).
         let badge = match summary.sender_kind.as_str() {
-            "agent" => "[agent]".magenta().to_string(),
-            _ => "[human]".cyan().to_string(),
+            "agent" => "[agent]".magenta(),
+            _ => "[human]".cyan(),
         };
         let attachments = if summary.attachment_names.is_empty() {
             String::new()
@@ -583,9 +583,9 @@ pub(crate) async fn read(api: &str, id: &str, json: bool) -> Result<()> {
             // "on disk" vs "fetch on read" is the difference between opening
             // it now and waiting for the sender's laptop to be awake.
             let state = if attachment.cached {
-                "on disk".green().to_string()
+                "on disk".green()
             } else {
-                "fetch on read".yellow().to_string()
+                "fetch on read".yellow()
             };
             println!(
                 "  {}  {}  {}  {}",

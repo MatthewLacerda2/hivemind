@@ -6,8 +6,8 @@
 //! group key — rather than a prompt per machine, so none of these asks a
 //! question; the code a person pastes is the whole of the decision.
 
+use crate::colour::Paint as _;
 use anyhow::Result;
-use owo_colors::OwoColorize as _;
 use serde::Deserialize;
 
 use crate::client::Client;
@@ -139,9 +139,9 @@ pub(crate) async fn list(api: &str, json: bool) -> Result<()> {
 
     for peer in &peers {
         let state = if peer.paired {
-            "in the group".green().to_string()
+            "in the group".green()
         } else {
-            "seen, not in the group".yellow().to_string()
+            "seen, not in the group".yellow()
         };
         println!(
             "{}  {}  {}  {}",

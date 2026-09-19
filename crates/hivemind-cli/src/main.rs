@@ -7,6 +7,7 @@
 //! 100 ms, and `reindex`, which takes the store lock (SPEC §10).
 
 mod client;
+mod colour;
 mod commands;
 mod doctor;
 mod hooks;
@@ -245,6 +246,11 @@ enum McpCommand {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Before anything prints. SPEC §10 promises `NO_COLOR` is respected, and
+    // output that is being read by a script or another Claude must not carry
+    // escape codes it will try to parse (#55).
+    colour::init();
 
     match cli.command {
         // `openapi` is pure code generation: it must work with no daemon, no
