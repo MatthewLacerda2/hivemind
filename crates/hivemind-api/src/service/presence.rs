@@ -70,7 +70,7 @@ impl MailService {
         addr: PeerAddr,
     ) -> Result<Hello, ServiceError> {
         if let Err(refusal) = self.check_proof(certificate, theirs.proof.as_ref()) {
-            self.retire(id, theirs, addr);
+            self.retire(id, Some(theirs.name.clone()), theirs.owner.clone(), addr);
             return Err(refusal);
         }
 
@@ -172,6 +172,23 @@ impl MailService {
                     if let Err(error) = self.record_reached(peer.id, &authority, Utc::now()) {
                         tracing::debug!(%error, %authority, "could not record a working address");
                     }
+                    return;
+                }
+                // It answered, and it said no. A hello offers *our* current
+                // proof, so a refusal means the two keys differ — whichever
+                // of us rotated. From here that is the same fact as a member
+                // whose hello we refuse, and it has to be acted on from both
+                // sides or the drop is a race: the node that says hello first
+                // retires the other, stops greeting it, and so never gives it
+                // the evidence to retire back.
+                Err(hivemind_net::client::ClientError::Status { status: 403, .. }) => {
+                    let addr = hivemind_core::peerbook::PeerAddr {
+                        host: addr.host.clone(),
+                        port: addr.port,
+                        source: addr.source,
+                        last_ok: addr.last_ok,
+                    };
+                    self.retire(peer.id, Some(peer.name.clone()), peer.owner.clone(), addr);
                     return;
                 }
                 Err(error) => {
@@ -425,7 +442,7 @@ impl MailService {
     }
 
     /// Drop a node that can no longer prove the key (SPEC §6.2.4).
-    fn retire(&self, id: NodeId, theirs: &Hello, addr: PeerAddr) {
+    fn retire(&self, id: NodeId, name: Option<String>, owner: Option<String>, addr: PeerAddr) {
         let was_a_peer = self
             .peers()
             .ok()
@@ -437,7 +454,7 @@ impl MailService {
             );
         }
         self.mark_offline(id);
-        self.record_seen(id, Some(theirs.name.clone()), theirs.owner.clone(), addr);
+        self.record_seen(id, name, owner, addr);
     }
 
     /// The sessions open on this machine (SPEC §9.3).
