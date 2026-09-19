@@ -93,11 +93,15 @@ as a confusing build error rather than as "no disk".
 ## Waiting for CI is the expensive step, and it is manual here
 
 `just ci` locally, then ready, then wait for the run on the rebased head, then
-`just mergeable PR=N`. The waiting is minutes per branch and there is no recipe
-that does the sequence unattended — **issue #25 is exactly that gap**
-(`mergeable.py` needs a `--wait`). Until it lands, a batch pays the wait once
-per merge, which is the whole argument for having a second branch being written
-while the first waits.
+**`just mergeable N`** — the number positionally. `PR=N` is what the rest of the
+documentation says and it does not work: `PR` is a recipe parameter rather than
+a variable, so `PR=N` reaches the script as a literal string and fails with a
+usage error. That is #48, and until it is decided, type the number.
+
+The waiting is minutes per branch and no recipe does the sequence unattended —
+**#25 is exactly that gap** (`mergeable.py` needs a `--wait`). Until it lands, a
+batch pays the wait once per merge, which is the whole argument for having a
+second branch being written while the first waits.
 
 **Never hand-roll a wait loop to fill the gap.** The `ci-merge` skill has the
 one that read an empty check list as green, and why absent and passing are
