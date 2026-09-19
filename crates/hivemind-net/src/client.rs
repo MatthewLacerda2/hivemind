@@ -210,10 +210,7 @@ impl PeerClient {
         B: Serialize + Sync,
         R: DeserializeOwned,
     {
-        let json = serde_json::to_vec(body).map_err(|e| ClientError::Http {
-            addr: authority.to_owned(),
-            reason: format!("could not encode the request: {e}"),
-        })?;
+        let json = encode(authority, body)?;
 
         let boundary = multipart_boundary();
         let mut request = Vec::new();
@@ -238,18 +235,12 @@ impl PeerClient {
         request.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
 
         let content_type = format!("multipart/form-data; boundary={boundary}");
-        match tokio::time::timeout(
-            self.timeout,
-            self.exchange(authority, path, request, &content_type),
+        self.timed(
+            authority,
+            self.exchange(authority, path, |_| Ok(request), &content_type),
         )
         .await
-        {
-            Ok(result) => result,
-            Err(_) => Err(ClientError::Timeout {
-                addr: authority.to_owned(),
-                timeout: self.timeout,
-            }),
-        }
+        .and_then(PeerResponse::transpose)
     }
 
     /// POST `body` as JSON to `path` at `authority` (`host:port`).
@@ -267,23 +258,64 @@ impl PeerClient {
         B: Serialize + Sync,
         R: DeserializeOwned,
     {
-        let request = serde_json::to_vec(body).map_err(|e| ClientError::Http {
-            addr: authority.to_owned(),
-            reason: format!("could not encode the request: {e}"),
-        })?;
-
-        match tokio::time::timeout(
-            self.timeout,
-            self.exchange(authority, path, request, "application/json"),
+        let request = encode(authority, body)?;
+        self.timed(
+            authority,
+            self.exchange(authority, path, |_| Ok(request), "application/json"),
         )
         .await
-        {
-            Ok(result) => result,
-            Err(_) => Err(ClientError::Timeout {
-                addr: authority.to_owned(),
-                timeout: self.timeout,
-            }),
-        }
+        .and_then(PeerResponse::transpose)
+    }
+
+    /// POST JSON built from the certificate the peer presented.
+    ///
+    /// For the handshake: its group proof covers the receiver's certificate
+    /// (SPEC §6.2), which does not exist until TLS has finished, so the body
+    /// cannot be written first.
+    ///
+    /// The outer `Result` is whether the peer could be reached at all. The
+    /// inner one is what it answered — and a refusal still comes back with the
+    /// certificate, because a node that says no has still said who it is.
+    ///
+    /// # Errors
+    /// [`ClientError::Connect`], [`ClientError::Handshake`] or
+    /// [`ClientError::Timeout`] if nobody answered as a TLS peer.
+    pub async fn post_bound<B, R>(
+        &self,
+        authority: &str,
+        path: &str,
+        body: impl FnOnce(&[u8]) -> B + Send,
+    ) -> Result<PeerResponse<Result<R, ClientError>>, ClientError>
+    where
+        B: Serialize,
+        R: DeserializeOwned,
+    {
+        self.timed(
+            authority,
+            self.exchange(
+                authority,
+                path,
+                |certificate| encode(authority, &body(certificate)),
+                "application/json",
+            ),
+        )
+        .await
+    }
+
+    /// Bound `request` by this client's timeout.
+    async fn timed<T>(
+        &self,
+        authority: &str,
+        request: impl std::future::Future<Output = Result<T, ClientError>>,
+    ) -> Result<T, ClientError> {
+        tokio::time::timeout(self.timeout, request)
+            .await
+            .unwrap_or_else(|_| {
+                Err(ClientError::Timeout {
+                    addr: authority.to_owned(),
+                    timeout: self.timeout,
+                })
+            })
     }
 
     /// GET `path`, resuming from byte `from`, handing each chunk to `sink`.
@@ -481,16 +513,21 @@ impl PeerClient {
     }
 
     /// One request, from TCP connect to decoded body.
+    ///
+    /// `request` builds the body once the peer's certificate is known. The
+    /// outer error is "could not reach a TLS peer"; everything after the
+    /// handshake is inside the response, beside the certificate.
     async fn exchange<R: DeserializeOwned>(
         &self,
         authority: &str,
         path: &str,
-        request: Vec<u8>,
+        request: impl FnOnce(&[u8]) -> Result<Vec<u8>, ClientError>,
         content_type: &str,
-    ) -> Result<PeerResponse<R>, ClientError> {
+    ) -> Result<PeerResponse<Result<R, ClientError>>, ClientError> {
         let (mut sender, certificate, pump) = self.connect(authority).await?;
 
         let response = async {
+            let request = request(&certificate)?;
             let http = hyper::Request::builder()
                 .method(hyper::Method::POST)
                 .uri(path)
@@ -543,10 +580,31 @@ impl PeerClient {
         pump.abort();
 
         Ok(PeerResponse {
-            body: response?,
+            body: response,
             certificate,
         })
     }
+}
+
+impl<R> PeerResponse<Result<R, ClientError>> {
+    /// Fail the whole call if the peer's answer was a failure.
+    ///
+    /// # Errors
+    /// The answer's error, when it was one.
+    pub fn transpose(self) -> Result<PeerResponse<R>, ClientError> {
+        Ok(PeerResponse {
+            body: self.body?,
+            certificate: self.certificate,
+        })
+    }
+}
+
+/// Serialise a request body, naming the peer it was for if that fails.
+fn encode<B: Serialize + ?Sized>(authority: &str, body: &B) -> Result<Vec<u8>, ClientError> {
+    serde_json::to_vec(body).map_err(|e| ClientError::Http {
+        addr: authority.to_owned(),
+        reason: format!("could not encode the request: {e}"),
+    })
 }
 
 /// Pull `detail` out of an RFC 9457 problem document, falling back to the body.
@@ -738,6 +796,71 @@ mod tests {
             NodeId::from_certificate_der(&answer.certificate),
             host.node_id(),
             "the certificate returned must be the host's own"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bound_body_is_built_knowing_who_answered() {
+        // The group proof covers the receiver's certificate (SPEC §6.2), which
+        // does not exist until TLS has finished. So the body has to be written
+        // after the handshake, with the certificate in hand.
+        let host = identity(8);
+        let caller = identity(9);
+
+        let peer = peer_serving(
+            crate::tls::peer_listener_config(&local(&host)).expect("listener config"),
+            echo_router(),
+        )
+        .await;
+
+        let client = PeerClient::joining(&local(&caller)).expect("client");
+        let answer: PeerResponse<Result<Echo, ClientError>> = client
+            .post_bound(&peer.addr, "/peer/v1/echo", |certificate| Echo {
+                said: NodeId::from_certificate_der(certificate).to_string(),
+            })
+            .await
+            .expect("the connection should succeed");
+
+        assert_eq!(
+            answer.body.expect("the host answers").said,
+            host.node_id().to_string(),
+            "the body must have been built from the host's own certificate"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refusal_still_says_who_refused() {
+        // A node that is not in our group answers 403. That is still news that
+        // it exists, and who it is, which `hivemind peers` shows as "seen".
+        let host = identity(10);
+        let caller = identity(11);
+
+        let refusing = axum::Router::new().route(
+            "/peer/v1/echo",
+            axum::routing::post(|| async { axum::http::StatusCode::FORBIDDEN }),
+        );
+        let peer = peer_serving(
+            crate::tls::peer_listener_config(&local(&host)).expect("listener config"),
+            refusing,
+        )
+        .await;
+
+        let client = PeerClient::joining(&local(&caller)).expect("client");
+        let answer: PeerResponse<Result<Echo, ClientError>> = client
+            .post_bound(&peer.addr, "/peer/v1/echo", |_| Echo {
+                said: "let me in".to_owned(),
+            })
+            .await
+            .expect("the connection itself should succeed");
+
+        assert!(
+            matches!(answer.body, Err(ClientError::Status { status: 403, .. })),
+            "the refusal is the answer: {:?}",
+            answer.body
+        );
+        assert_eq!(
+            NodeId::from_certificate_der(&answer.certificate),
+            host.node_id()
         );
     }
 
