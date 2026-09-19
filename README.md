@@ -106,6 +106,7 @@ startup with messages that say what to fix.
 | `prefetch` | `false` | Fetch large attachments on arrival rather than on first read |
 | `max_attachment_bytes` | `2 GiB` | The largest attachment this node accepts |
 | `inline_max_bytes` | `8 MiB` | At or below this, a file travels with its message |
+| `presence_interval` | `60` | Seconds between saying hello to every peer. `0` turns presence off |
 
 A test in `hivemind-core` reads this table and fails if a `Config` field is
 missing from it — the alternative is a second place to be wrong.
