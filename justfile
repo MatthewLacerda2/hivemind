@@ -87,15 +87,15 @@ openapi-check:
 # checks ran" are not the same claim, and a loop that waits for checks to
 # finish reads *absent* as settled — see the script's own docstring.
 
-# Did CI really run on this pull request's head? `just mergeable 12`
-mergeable PR="":
+# Did CI really run on this pull request's head? `just mergeable 12 [--wait]`
+mergeable PR="" *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
     if [[ -z "{{PR}}" ]]; then
-        echo "usage: just mergeable 12" >&2
+        echo "usage: just mergeable 12 [--wait] [--timeout=SECONDS]" >&2
         exit 2
     fi
-    python3 .github/scripts/mergeable.py "{{PR}}"
+    python3 .github/scripts/mergeable.py "{{PR}}" {{ARGS}}
 
 # [gate] The scripts under .github/scripts. stdlib unittest, nothing to install.
 scripts:

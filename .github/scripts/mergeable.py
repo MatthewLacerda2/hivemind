@@ -40,6 +40,17 @@ YAML. The tell: an actually-invalid workflow *does* produce a run, a
 Run it against a live pull request:
 
     just mergeable 12
+    just mergeable 12 --wait
+
+**`--wait` polls until the answer settles**, which is not the same as polling
+until it is green. A verdict and a forecast are different things, and every
+hand-rolled loop this flag replaces collapsed them: an `until` over a single
+non-zero code waits out a red pull request forever. [`unsettled`] is the
+forecast, [`judge`] is the verdict, and they are separate functions on purpose.
+
+Exit codes say which is which — `0` mergeable, `1` no, `3` not yet, `2` a
+usage mistake — so a caller can tell "still building" from "it failed" without
+reading the prose.
 
 [`judge`] is the whole decision. It is pure and takes plain dictionaries, so
 the tests beside this file need no network.
@@ -50,10 +61,31 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import time
 
 # The workflow that gates a merge. `Release` runs on tags and is not the one
 # being asked about; counting it would be the same mistake in a new costume.
 WORKFLOW = "CI"
+
+# What `--wait` does when nothing has settled. Twenty seconds because the
+# thing being waited on takes minutes and the API has a rate limit; a poll a
+# second would spend it for no sooner an answer.
+POLL = 20
+
+# How long `--wait` waits before giving up, in seconds. CI here takes a few
+# minutes; half an hour is long enough that hitting it means something is
+# wrong rather than slow, and short enough that a forgotten terminal does not
+# poll all night.
+TIMEOUT = 30 * 60
+
+# Exit codes. `1` and `3` are both "not mergeable", and they are separate
+# because a caller that cannot tell them apart is the bug this script was
+# written for: a naive `until` loop over a single code spins forever on a red
+# pull request, and gives up on a slow one.
+OK = 0
+NO = 1
+USAGE = 2
+PENDING = 3
 
 # What GitHub calls a branch it cannot merge, in the two fields that say so.
 # Both are read, because either alone can lag the other by a poll.
@@ -64,6 +96,45 @@ CONFLICTED = ("CONFLICTING", "DIRTY")
 # folded into either — asserting "not conflicted" from a field that means "ask
 # again" is the confident wrong answer this script exists to refuse.
 UNKNOWN = "UNKNOWN"
+
+
+def conflicted(pull: dict) -> bool:
+    """Does GitHub say this branch cannot be merged into `main`?
+
+    Its own function because two questions need it and they must not drift:
+    what to *say* when there is no run, and whether waiting for one could
+    ever help. It cannot — GitHub never evaluates the workflow's triggers for
+    a conflicted branch, so no amount of patience produces a run.
+    """
+    return (
+        pull.get("mergeable") in CONFLICTED
+        or pull.get("mergeStateStatus") in CONFLICTED
+    )
+
+
+def unsettled(pull: dict, runs: list[dict]) -> bool:
+    """Could asking again give a different answer?
+
+    The question `judge` deliberately does not answer, because a verdict and
+    a forecast are different things — and collapsing them is what makes a
+    naive `until` loop spin forever on a red pull request.
+
+    Pure, and the whole of the waiting decision:
+
+    - A **draft** is settled. CI does not run on drafts, so waiting is
+      waiting for something nobody has asked for.
+    - A **conflicted** branch is settled. There will never be a run.
+    - **No runs yet**, on a branch that is neither, is unsettled: a run can
+      appear moments after a push, and that gap is most of why anybody waits.
+    - **A run still going** is unsettled, which is the ordinary case.
+    - Everything else — failed, all-skipped, green — is settled. A red run
+      does not go green by being asked twice.
+    """
+    if pull.get("isDraft") or conflicted(pull):
+        return False
+    if not runs:
+        return True
+    return bool(unfinished(runs))
 
 
 def failed_runs(runs: list[dict]) -> list[dict]:
@@ -103,7 +174,7 @@ def no_run(pull: dict, short: str) -> list[str]:
     state, status = pull.get("mergeable"), pull.get("mergeStateStatus")
     head = f"no {WORKFLOW} run exists for the head commit {short}."
 
-    if state in CONFLICTED or status in CONFLICTED:
+    if conflicted(pull):
         return [
             f"{head} The branch conflicts with `main`.",
             "That is the cause, not a coincidence: GitHub cannot compute a"
@@ -185,33 +256,8 @@ def judge(
     return True, [f"CI ran on {short} and passed."]
 
 
-def gh(*args: str) -> object:
-    """`gh` with `--json`-shaped output, parsed. Fatal if `gh` itself fails."""
-    done = subprocess.run(["gh", *args], capture_output=True, text=True, check=False)
-    if done.returncode != 0:
-        sys.exit(f"mergeable: gh {' '.join(args)}: {done.stderr.strip()}")
-    return json.loads(done.stdout)
-
-
-def main(argv: list[str]) -> int:
-    # `just mergeable PR=12` was documented in five places from the first
-    # commit and never ran: `PR` is a recipe parameter, so `just` hands the
-    # whole string over as its value rather than binding a variable. The
-    # generic usage line below leaves a reader looking for a broken script
-    # instead of a wrong argument, which is the expensive half (#48).
-    if len(argv) == 2 and argv[1].startswith("PR="):
-        number = argv[1][len("PR=") :] or "12"
-        print(
-            f"mergeable: the number goes positionally — `just mergeable {number}`.",
-            file=sys.stderr,
-        )
-        return 2
-
-    if len(argv) != 2 or not argv[1].isdigit():
-        print("usage: mergeable.py <pull-request-number>", file=sys.stderr)
-        return 2
-
-    number = argv[1]
+def look(number: str) -> tuple[dict, list[dict], dict[int, list[dict]]]:
+    """Everything `judge` needs about pull request `number`, from GitHub."""
     pull = gh(
         "pr",
         "view",
@@ -235,13 +281,98 @@ def main(argv: list[str]) -> int:
         jobs[run["id"]] = gh(
             "api", f"repos/{repo}/actions/runs/{run['id']}/jobs", "--jq", ".jobs"
         )
+    return pull, runs, jobs
 
-    ok, why = judge(pull, runs, jobs)
+
+def report(ok: bool, why: list[str]) -> None:
+    """Print the verdict the way a human reads it."""
     lead = "mergeable" if ok else "NOT mergeable"
     print(f"{lead}: {why[0]}")
     for line in why[1:]:
         print(f"  {line}")
-    return 0 if ok else 1
+
+
+def gh(*args: str) -> object:
+    """`gh` with `--json`-shaped output, parsed. Fatal if `gh` itself fails."""
+    done = subprocess.run(["gh", *args], capture_output=True, text=True, check=False)
+    if done.returncode != 0:
+        sys.exit(f"mergeable: gh {' '.join(args)}: {done.stderr.strip()}")
+    return json.loads(done.stdout)
+
+
+def main(argv: list[str]) -> int:
+    # `just mergeable PR=12` was documented in five places from the first
+    # commit and never ran: `PR` is a recipe parameter, so `just` hands the
+    # whole string over as its value rather than binding a variable. The
+    # generic usage line below leaves a reader looking for a broken script
+    # instead of a wrong argument, which is the expensive half (#48).
+    if len(argv) == 2 and argv[1].startswith("PR="):
+        number = argv[1][len("PR=") :] or "12"
+        print(
+            f"mergeable: the number goes positionally — `just mergeable {number}`.",
+            file=sys.stderr,
+        )
+        return 2
+
+    rest = [arg for arg in argv[1:] if not arg.startswith("--")]
+    flags = [arg for arg in argv[1:] if arg.startswith("--")]
+
+    wait = "--wait" in flags
+    timeout = TIMEOUT
+    for flag in flags:
+        if flag.startswith("--timeout="):
+            value = flag[len("--timeout=") :]
+            if not value.isdigit():
+                print("mergeable: --timeout takes seconds", file=sys.stderr)
+                return USAGE
+            timeout = int(value)
+        elif flag != "--wait":
+            print(f"mergeable: unknown option {flag}", file=sys.stderr)
+            return USAGE
+
+    if len(rest) != 1 or not rest[0].isdigit():
+        print(
+            "usage: mergeable.py <pull-request-number> [--wait] [--timeout=SECONDS]",
+            file=sys.stderr,
+        )
+        return USAGE
+
+    number = rest[0]
+    deadline = time.monotonic() + timeout
+    said_waiting = False
+
+    while True:
+        pull, runs, jobs = look(number)
+        ok, why = judge(pull, runs, jobs)
+
+        if ok:
+            report(True, why)
+            return OK
+
+        if not unsettled(pull, runs):
+            # Settled and negative. Asking again would print the same thing,
+            # so `--wait` stops here rather than sitting on a red run until
+            # the timeout — which is the failure mode of every hand-rolled
+            # loop this flag replaces.
+            report(False, why)
+            return NO
+
+        if not wait:
+            report(False, why)
+            return PENDING
+
+        if time.monotonic() >= deadline:
+            report(False, why)
+            print(f"  gave up waiting after {timeout}s.")
+            return PENDING
+
+        if not said_waiting:
+            # Once, not per poll: this goes into a terminal somebody is
+            # watching, and a line every twenty seconds is noise.
+            print(f"waiting for CI on #{number}: {why[0]}", file=sys.stderr)
+            said_waiting = True
+
+        time.sleep(min(POLL, max(0, deadline - time.monotonic())))
 
 
 if __name__ == "__main__":
