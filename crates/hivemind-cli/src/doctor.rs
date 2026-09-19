@@ -11,8 +11,8 @@
 use std::fmt;
 use std::path::Path;
 
+use crate::colour::Paint as _;
 use hivemind_core::config::{Config, Tailscale};
-use owo_colors::OwoColorize as _;
 
 /// How a check came out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

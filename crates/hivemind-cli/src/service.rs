@@ -7,8 +7,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::colour::Paint as _;
 use anyhow::{Context as _, Result};
-use owo_colors::OwoColorize as _;
 
 /// The launchd label, and the plist's basename.
 pub(crate) const LABEL: &str = "dev.hivemind.daemon";

@@ -225,3 +225,50 @@ fn the_daemon_starts_from_what_init_wrote() {
     assert_eq!(json["name"], "workshop");
     assert_eq!(json["owner"], "matheus");
 }
+
+/// Run `hivemind` with a named environment, capturing raw bytes.
+///
+/// `Command::output` gives a pipe rather than a terminal, which is the case
+/// that matters: it is what a script, a `just` recipe and another Claude all
+/// get (#55).
+fn piped(home: &std::path::Path, args: &[&str], env: &[(&str, &str)]) -> String {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hivemind"));
+    command.args(args).env("HIVEMIND_HOME", home);
+    // Deliberately not setting NO_COLOR unless a case asks for it: the point
+    // is what happens when nobody says anything.
+    command.env_remove("NO_COLOR");
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let output = command.output().expect("the cli runs");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+fn nothing_the_cli_prints_into_a_pipe_carries_escape_codes() {
+    // SPEC §10 promises `NO_COLOR` is respected, and until #55 nothing did:
+    // `.green()` and `.bold()` emitted unconditionally. It bites when the
+    // reader is a machine — `hivemind group create` printed its code bold,
+    // and a test reading that code off stdout got `\x1b[1mhm-…\x1b[0m`,
+    // which does not parse (#50).
+    let home = tempfile::tempdir().expect("temp home");
+    init(home.path(), &[]);
+
+    for (case, env) in [
+        ("a pipe, with nothing said", &[][..]),
+        ("NO_COLOR=1", &[("NO_COLOR", "1")][..]),
+    ] {
+        for args in [
+            vec!["status", "--api", "http://127.0.0.1:1"],
+            vec!["group", "create"],
+            vec!["doctor", "--api", "http://127.0.0.1:1"],
+        ] {
+            let printed = piped(home.path(), &args, env);
+            assert!(
+                !printed.contains('\u{1b}'),
+                "`hivemind {}` printed an escape code with {case}: {printed:?}",
+                args.join(" ")
+            );
+        }
+    }
+}
