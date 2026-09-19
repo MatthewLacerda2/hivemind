@@ -320,8 +320,14 @@ pub struct Accepted {
 }
 
 /// Listing filters (SPEC §7.1).
+///
+/// `deny_unknown_fields` is the point of #28. `?mailbox=sent` instead of
+/// `?box=sent` used to be accepted and ignored, so two different questions
+/// gave the same answer and the Claude that typed it concluded the `out`
+/// mailbox was broken. It was not; what was broken was the API not saying the
+/// question made no sense.
 #[derive(Debug, Default, Deserialize, IntoParams)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ListParams {
     /// Restrict to one mailbox: `new`, `cur`, `out` or `sent`.
     pub r#box: Option<String>,
@@ -342,6 +348,32 @@ pub struct ListParams {
     /// while somebody pages through their inbox cannot make a row appear
     /// twice or not at all.
     pub cursor: Option<String>,
+}
+
+/// Parse a filter that was given, or leave it unset.
+///
+/// The difference that mattered in #28: absent means "do not filter", but
+/// **present and unparseable means the caller asked something that makes no
+/// sense**, and answering it with an unfiltered list is a wrong answer that
+/// looks like a right one.
+fn parse_filter<T>(
+    raw: Option<&str>,
+    name: &str,
+    parse: impl Fn(&str) -> Option<T>,
+) -> Result<Option<T>, Problem> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    match parse(raw) {
+        Some(value) => Ok(Some(value)),
+        None => Err(Problem::new(
+            crate::problem::ProblemType::InvalidQuery,
+            match name {
+                "box" => format!("`{raw}` is not a mailbox; try new, cur, out or sent"),
+                other => format!("`{raw}` is not a valid `{other}`"),
+            },
+        )),
+    }
 }
 
 /// Turn the paths a local caller supplied into real ones.
@@ -578,20 +610,37 @@ pub(crate) async fn remove_peer(
 )]
 pub(crate) async fn list_messages(
     State(service): State<AppState>,
-    AxumQuery(params): AxumQuery<ListParams>,
+    params: Result<AxumQuery<ListParams>, axum::extract::rejection::QueryRejection>,
 ) -> Result<Json<Vec<MessageSummary>>, Problem> {
+    // The rejection carries serde's own message, which names the offending
+    // parameter. Turned into problem+json here because axum's default is
+    // plain text, and SPEC §7.3 says every error on this surface is
+    // problem+json.
+    let AxumQuery(params) = params.map_err(|rejection| {
+        Problem::new(
+            crate::problem::ProblemType::InvalidQuery,
+            format!(
+                "{}. Accepted: box, thread, from, unread, q, limit, cursor.",
+                rejection.body_text()
+            ),
+        )
+    })?;
+
     let query = Query {
-        // An unknown mailbox name filters to nothing rather than erroring: it
-        // is a typo in a query string, not a broken client.
-        mailbox: params.r#box.as_deref().and_then(Mailbox::from_str_opt),
-        thread: params.thread.as_deref().and_then(|t| t.parse().ok()),
-        from: params.from.as_deref().and_then(|f| f.parse().ok()),
+        // A mailbox name that is not one is refused rather than ignored. It
+        // used to filter to nothing in the comment and to *everything* in the
+        // code — `?box=banana` returned the whole list with a 200 (#28).
+        mailbox: parse_filter(params.r#box.as_deref(), "box", |value| {
+            Mailbox::from_str_opt(value)
+        })?,
+        thread: parse_filter(params.thread.as_deref(), "thread", |t| t.parse().ok())?,
+        from: parse_filter(params.from.as_deref(), "from", |f| f.parse().ok())?,
         unread_only: params.unread.unwrap_or(false),
         text: params.q,
         limit: params.limit,
-        // A cursor this version did not issue filters to nothing rather than
-        // erroring, the same reading as an unknown mailbox above: it is a
-        // stale query string, not a broken client.
+        // A cursor this version did not issue still filters to nothing rather
+        // than erroring, and that one is deliberate: a stale cursor comes
+        // from a page somebody left open, not from a caller who got it wrong.
         cursor: params.cursor.as_deref().and_then(|c| c.parse().ok()),
     };
 
@@ -801,7 +850,7 @@ mod tests {
     /// The same, keeping the service so a test can arrange state the HTTP
     /// surface has no way to reach — presence, for one: it is set by a hello
     /// arriving on the *peer* listener, which is not this router.
-    fn app_with_service() -> (tempfile::TempDir, Router, Arc<MailService>) {
+    pub(super) fn app_with_service() -> (tempfile::TempDir, Router, Arc<MailService>) {
         let dir = tempfile::tempdir().expect("temp dir");
         let identity = NodeId::from_certificate_der(b"this node");
         let node = crate::service::NodeDescription {
@@ -876,89 +925,68 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_session_registers_renews_and_closes_over_the_loopback_api() {
-        // The three calls the hooks make (SPEC §9.3). One endpoint for
-        // register and renew, because the hook that renews cannot know
-        // whether the daemon has heard of the session.
+    async fn a_mailbox_that_is_not_one_is_refused_rather_than_ignored() {
+        // #28. `?box=banana` used to return the whole list with a 200: the
+        // comment said it filtered to nothing, and `mailbox: None` means
+        // "every mailbox". A wrong answer that looks like a right one.
         let (_dir, router, _service) = app_with_service();
 
-        let (status, sessions) = call(&router, get("/api/v1/sessions")).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(sessions, serde_json::json!([]));
+        let (status, problem) = call(&router, get("/api/v1/messages?box=banana")).await;
 
-        let (status, registered) = call(
-            &router,
-            post_json(
-                "/api/v1/sessions/01JXT-a",
-                &serde_json::json!({ "label": "hivemind" }),
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(registered["open"], 1);
-
-        // Renewing is the same call and must not make a second session, or a
-        // long conversation would look like forty Claudes in one repo.
-        let (_, registered) = call(
-            &router,
-            post_json(
-                "/api/v1/sessions/01JXT-a",
-                &serde_json::json!({ "label": "hivemind" }),
-            ),
-        )
-        .await;
-        assert_eq!(registered["open"], 1);
-
-        let (_, sessions) = call(&router, get("/api/v1/sessions")).await;
-        assert_eq!(sessions.as_array().expect("array").len(), 1);
-        assert_eq!(sessions[0]["label"], "hivemind");
-        assert!(sessions[0]["last_seen"].is_string());
-
-        let request = Request::builder()
-            .method("DELETE")
-            .uri("/api/v1/sessions/01JXT-a")
-            .body(Body::empty())
-            .expect("request");
-        let response = router.clone().oneshot(request).await.expect("responds");
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-
-        let (_, sessions) = call(&router, get("/api/v1/sessions")).await;
-        assert_eq!(sessions, serde_json::json!([]));
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(problem["type"], "/problems/invalid-query");
+        assert!(
+            problem["detail"]
+                .as_str()
+                .expect("a detail")
+                .contains("sent"),
+            "it should say what a mailbox is: {problem}"
+        );
     }
 
     #[tokio::test]
-    async fn closing_a_session_nobody_registered_is_not_an_error() {
-        // `SessionEnd` is a courtesy; expiry is what makes the list true. A
-        // daemon that restarted mid-conversation never saw the start, and a
-        // hook must never fail because of hivemind.
+    async fn a_parameter_nobody_defined_is_refused_rather_than_ignored() {
+        // How this was found: the Claude on the Arch machine wrote
+        // `mailbox=` instead of `box=`, watched two different questions give
+        // the same answer, and concluded the `out` mailbox was broken. It was
+        // not. What was broken was the API not saying the question made no
+        // sense (#28).
         let (_dir, router, _service) = app_with_service();
 
-        let request = Request::builder()
-            .method("DELETE")
-            .uri("/api/v1/sessions/01JXT-never-seen")
-            .body(Body::empty())
-            .expect("request");
-        let response = router.oneshot(request).await.expect("responds");
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let (status, problem) = call(&router, get("/api/v1/messages?mailbox=sent")).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(problem["type"], "/problems/invalid-query");
+        let detail = problem["detail"].as_str().expect("a detail");
+        assert!(detail.contains("mailbox"), "name what was wrong: {detail}");
+        assert!(detail.contains("box"), "and what was meant: {detail}");
     }
 
     #[tokio::test]
-    async fn a_session_without_a_label_is_refused_rather_than_listed_blank() {
-        // The label is the whole of what a session says. A blank one would
-        // show up in somebody else's peer list as "online, 1 session: ".
+    async fn the_filters_that_do_exist_still_work() {
+        // So the two tests above cannot pass by every query being refused.
         let (_dir, router, _service) = app_with_service();
 
-        let (status, problem) = call(
-            &router,
-            post_json(
-                "/api/v1/sessions/01JXT-a",
-                &serde_json::json!({ "label": "   " }),
-            ),
-        )
-        .await;
+        for query in [
+            "/api/v1/messages",
+            "/api/v1/messages?box=sent",
+            "/api/v1/messages?unread=true&limit=5",
+            "/api/v1/messages?q=anything",
+        ] {
+            let (status, _) = call(&router, get(query)).await;
+            assert_eq!(status, StatusCode::OK, "{query}");
+        }
+    }
 
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(problem["type"], "/problems/invalid-message");
+    #[tokio::test]
+    async fn a_stale_cursor_is_still_forgiven() {
+        // Deliberately unlike the others: a cursor this version did not issue
+        // comes from a page somebody left open, not from a caller who got it
+        // wrong. It filters to nothing rather than erroring.
+        let (_dir, router, _service) = app_with_service();
+
+        let (status, _) = call(&router, get("/api/v1/messages?cursor=nonsense")).await;
+        assert_eq!(status, StatusCode::OK);
     }
 
     #[tokio::test]
@@ -988,7 +1016,10 @@ mod tests {
         assert!(rows.iter().any(|row| row["id"] == member.to_string()));
     }
 
-    async fn call(router: &Router, request: Request<Body>) -> (StatusCode, serde_json::Value) {
+    pub(super) async fn call(
+        router: &Router,
+        request: Request<Body>,
+    ) -> (StatusCode, serde_json::Value) {
         let response = router
             .clone()
             .oneshot(request)
@@ -1005,14 +1036,14 @@ mod tests {
         (status, json)
     }
 
-    fn get(path: &str) -> Request<Body> {
+    pub(super) fn get(path: &str) -> Request<Body> {
         Request::builder()
             .uri(path)
             .body(Body::empty())
             .expect("request")
     }
 
-    fn post_json(path: &str, body: &serde_json::Value) -> Request<Body> {
+    pub(super) fn post_json(path: &str, body: &serde_json::Value) -> Request<Body> {
         Request::builder()
             .method("POST")
             .uri(path)
@@ -1259,11 +1290,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unknown_mailbox_filter_returns_nothing_rather_than_failing() {
-        let (_dir, router, _) = app();
-        let (status, body) = call(&router, get("/api/v1/messages?box=nonsense")).await;
+    async fn an_unknown_mailbox_filter_is_refused_with_a_mailbox_in_the_store() {
+        // This test used to assert the opposite — "returns nothing rather
+        // than failing" — and it passed for the wrong reason: `app()` has no
+        // messages, so an empty list is what comes back whether the filter
+        // works or not. The code in fact returned *everything*, because
+        // `mailbox: None` means "every mailbox", and nobody found out until
+        // somebody ran it against a real inbox (#28).
+        //
+        // So this one sends a message first. With nothing in the store there
+        // is nothing this endpoint can get wrong.
+        let (_dir, router, identity) = app();
+        call(
+            &router,
+            post_json(
+                "/api/v1/messages",
+                &serde_json::json!({
+                    "to": [identity.to_string()],
+                    "subject": "something to find",
+                    "body": "x",
+                }),
+            ),
+        )
+        .await;
+
+        let (status, problem) = call(&router, get("/api/v1/messages?box=nonsense")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(problem["type"], "/problems/invalid-query");
+
+        // And the real filters still answer, so the refusal above is about
+        // the value rather than about the parameter existing.
+        let (status, body) = call(&router, get("/api/v1/messages?box=sent")).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body.as_array().expect("array").len(), 0);
+        assert_eq!(body.as_array().expect("array").len(), 1);
     }
 
     #[tokio::test]
