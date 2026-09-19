@@ -1087,6 +1087,7 @@ dependencies = [
  "hostname",
  "proptest",
  "rcgen",
+ "ring",
  "rusqlite",
  "rustls-pki-types",
  "serde",

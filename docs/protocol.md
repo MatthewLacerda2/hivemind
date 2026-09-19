@@ -200,6 +200,68 @@ the fix is almost never to update the vector.
 
 ---
 
+## Group proof
+
+Membership in the group is possession of its key (SPEC §6.2, ADR 0013). The key
+is never sent; a node proves it has it.
+
+### The code
+
+The key is 16 random bytes. People see it as a **code**: `hm-`, then the bytes
+in lowercase unpadded RFC 4648 base32 — the alphabet the node id uses — in
+groups of four hyphen-separated characters. 128 bits is 26 characters, so the
+last group has two:
+
+```
+hm-aaaq-eaye-auda-ocaj-bifq-ydio-b4
+```
+
+A parser ignores case, the `hm-` prefix, hyphens and whitespace, and refuses
+anything that is not exactly 128 bits with the unused low bits of the last
+character zero, so each key has exactly one spelling.
+
+### The proof
+
+```
+message = "hivemind group proof v1" 0x00
+        ‖ u32be(len(sender_cert))   ‖ sender_cert
+        ‖ u32be(len(receiver_cert)) ‖ receiver_cert
+        ‖ i64be(sent_at)
+proof   = HMAC-SHA256(key, message)
+```
+
+`sender_cert` and `receiver_cert` are the DER certificates the two nodes
+present in TLS; `sent_at` is milliseconds since the Unix epoch. On the wire the
+proof travels as
+
+```json
+{ "sent_at": 1750000000000, "mac": "<64 lowercase hex characters>" }
+```
+
+The receiver checks it against the certificate the connection actually
+presented, never one the body names, so a proof is worth nothing between any
+other two nodes. It accepts a `sent_at` up to an hour either side of its own
+clock — the binding to both certificates already stops replay; the window only
+bounds how long a proof that leaked into a log stays meaningful, and a laptop
+whose clock drifted while it slept should still get in.
+
+### Golden vector
+
+Frozen in `crates/hivemind-core/src/group.rs`, and independently reproducible
+with `docs/reference/group_proof_reference.py` (standard library only), which is
+written from this section.
+
+```
+key            00 01 02 … 0f
+code           hm-aaaq-eaye-auda-ocaj-bifq-ydio-b4
+sender_cert    "sender certificate"   (ASCII)
+receiver_cert  "receiver certificate" (ASCII)
+sent_at        1750000000000
+proof          96317562f141081774fd826ac79b205f4f6afbdc112ab3b4106a51cf907a781f
+```
+
+---
+
 ## Errors
 
 RFC 9457 `application/problem+json`, with stable `type` slugs enumerated in one
