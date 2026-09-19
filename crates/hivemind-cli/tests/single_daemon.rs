@@ -623,3 +623,110 @@ fn a_network_operation_logs_the_peer_and_the_message() {
             .unwrap_or_else(|e| panic!("a log line is not JSON: {line:?}: {e}"));
     }
 }
+
+/// Take the escape codes off, so a test about text is about text.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        // A CSI sequence is ESC `[`, parameters, then a final byte in
+        // `@`..`~`. The `[` has to be consumed first: it is itself inside
+        // that range, so scanning for the terminator without skipping it
+        // ends the sequence immediately and leaves `2m` in the output.
+        if chars.next() != Some('[') {
+            continue;
+        }
+        for c in chars.by_ref() {
+            if ('@'..='~').contains(&c) {
+                break;
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn the_short_id_the_inbox_prints_is_one_read_accepts() {
+    // #27, and the whole journey rather than either half: each half was
+    // already tested alone. `inbox` printed `03VYRM`, `read 03VYRM` answered
+    // "`03VYRM` is not a message id", and the only id that worked was the
+    // 26-character one the CLI never showed anywhere.
+    //
+    // Copying what is on the screen is the obvious gesture, and it was the
+    // one that did not work — found from both ends at once, by a human and
+    // by the Claude on the other machine, neither of whom could read a
+    // message without talking to the API by hand.
+    let daemon = Daemon::start();
+    daemon.run(&[
+        "send",
+        "--subject",
+        "the short one",
+        "everyone",
+        "--",
+        "body",
+    ]);
+
+    // What a person actually sees, not what the JSON carries — with the
+    // escape codes taken off. `NO_COLOR` is set and, on `main` at the time
+    // this was written, ignored (#55); stripping here means this test is
+    // about ids rather than about whichever branch lands first.
+    let full = json(&daemon.run(&["inbox", "--json"]))[0]["id"]
+        .as_str()
+        .expect("a full id")
+        .to_owned();
+
+    let listed = strip_ansi(&daemon.run(&["inbox"]));
+    let short = listed
+        .split_whitespace()
+        .find(|word| word.len() == 6 && word.chars().all(|c| c.is_ascii_alphanumeric()))
+        .unwrap_or_else(|| panic!("the inbox prints a short id: {listed}"))
+        .to_owned();
+
+    let read = daemon.run(&["read", &short]);
+    assert!(
+        read.contains("the short one"),
+        "`hivemind read {short}` should have found it: {read}"
+    );
+
+    assert!(
+        full.ends_with(&short),
+        "the short id should be the tail of the full one: {short} of {full}"
+    );
+
+    // And the full form keeps working, because that is what every script and
+    // every already-stored id uses. Read after the short one, because
+    // reading moves a message out of the inbox.
+    assert!(daemon.run(&["read", &full]).contains("the short one"));
+}
+
+#[test]
+fn a_tail_that_names_nothing_says_so_rather_than_guessing() {
+    let daemon = Daemon::start();
+    daemon.run(&[
+        "send",
+        "--subject",
+        "the only one",
+        "everyone",
+        "--",
+        "body",
+    ]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_hivemind"))
+        .args(["read", "ZZZZZZ"])
+        .env("HIVEMIND_HOME", daemon.home())
+        .env("HIVEMIND_API", daemon.api())
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("the cli runs");
+
+    assert!(!output.status.success(), "it must not find something");
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        said.contains("ZZZZZZ"),
+        "it should echo what was typed: {said}"
+    );
+}

@@ -25,6 +25,13 @@ fn mcp_error(error: &ServiceError) -> McpError {
         ServiceError::NoSuchMessage { id } => {
             McpError::invalid_params(format!("no message with id {id}"), None)
         }
+        // Both of these are the caller's to fix, and both say how: one that
+        // nothing matched, one that several did and which. Falling through to
+        // `internal_error` would tell an agent the node was broken, which is
+        // the one thing it cannot recover from (#27).
+        ServiceError::NoSuchMessageTail { .. } | ServiceError::AmbiguousMessage { .. } => {
+            McpError::invalid_params(error.to_string(), None)
+        }
         ServiceError::NoRecipients => McpError::invalid_params(
             "a message needs at least one recipient: a node id, an owner name, or `everyone`",
             None,
@@ -34,9 +41,15 @@ fn mcp_error(error: &ServiceError) -> McpError {
     }
 }
 
-fn parse_id(raw: &str) -> Result<Ulid, McpError> {
-    raw.parse()
-        .map_err(|_| McpError::invalid_params(format!("`{raw}` is not a message id"), None))
+impl HivemindMcp {
+    /// Turn what an agent passed into a message id.
+    ///
+    /// Through the service, so `read` accepts exactly what `inbox` printed —
+    /// the same resolution the loopback API does, because there is one
+    /// implementation of every operation (SPEC §3).
+    fn resolve(&self, raw: &str) -> Result<Ulid, McpError> {
+        self.service.resolve_message(raw).map_err(|e| mcp_error(&e))
+    }
 }
 
 // ------------------------------------------------------------ parameters ---
@@ -269,7 +282,7 @@ impl HivemindMcp {
         &self,
         Parameters(params): Parameters<MessageIdParams>,
     ) -> Result<Json<FullMessage>, McpError> {
-        let id = parse_id(&params.id)?;
+        let id = self.resolve(&params.id)?;
         let (_, message) = self.service.get(id).map_err(|e| mcp_error(&e))?;
         // Reading is what marks it read, so a Claude that looked at its mail
         // does not see it again on the next turn.
@@ -362,7 +375,7 @@ impl HivemindMcp {
         &self,
         Parameters(params): Parameters<ReplyParams>,
     ) -> Result<Json<Sent>, McpError> {
-        let id = parse_id(&params.id)?;
+        let id = self.resolve(&params.id)?;
         let message = self
             .service
             .reply(
@@ -456,7 +469,7 @@ impl HivemindMcp {
         &self,
         Parameters(params): Parameters<DownloadParams>,
     ) -> Result<Json<Downloaded>, McpError> {
-        let id = parse_id(&params.id)?;
+        let id = self.resolve(&params.id)?;
         let (_, message) = self.service.get(id).map_err(|e| mcp_error(&e))?;
 
         let found = message
@@ -494,8 +507,26 @@ mod tests {
     fn a_bad_message_id_is_the_callers_fault_not_an_internal_error() {
         // Claude can recover from "you passed a bad id"; it cannot recover from
         // "this node is broken". The distinction has to survive the mapping.
-        let error = parse_id("not-a-ulid").expect_err("should reject");
+        //
+        // Through the mapping rather than through a parse, because resolving
+        // an id now needs an index: what is being checked is that a caller's
+        // mistake stays the caller's (#27).
+        let error = mcp_error(&ServiceError::NoSuchMessageTail {
+            typed: "not-a-ulid".to_owned(),
+        });
         assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn an_ambiguous_id_is_the_callers_fault_and_names_what_it_matched() {
+        // An agent handed "matches several" can pick one. An agent handed
+        // "internal error" can only give up.
+        let error = mcp_error(&ServiceError::AmbiguousMessage {
+            typed: "AB".to_owned(),
+            candidates: vec![Ulid::nil(), Ulid::from_parts(1, 2)],
+        });
+        assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert!(error.message.contains("AB"), "{}", error.message);
     }
 
     #[test]
