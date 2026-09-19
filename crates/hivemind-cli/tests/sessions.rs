@@ -96,8 +96,14 @@ fn a_hook_finishes_inside_its_budget_even_with_no_daemon_to_talk_to() {
 
     let elapsed = Daemon::hook_against(&api, &payload("01JXT-a", "/tmp/work", "SessionStart"));
 
+    // Generous, and deliberately so. What this catches is the client's own
+    // five-minute default being used for a hook; what it must not catch is a
+    // shared CI runner taking its time to fork and exec a debug binary. Two
+    // seconds looked tight and honest and was neither — it failed on `main`
+    // at 2.12s, measuring process startup rather than anything hivemind
+    // decides. The budget itself is asserted where it is set.
     assert!(
-        elapsed < Duration::from_secs(2),
+        elapsed < Duration::from_secs(30),
         "a hook with no daemon took {elapsed:?}; it must give up, not wait"
     );
 }

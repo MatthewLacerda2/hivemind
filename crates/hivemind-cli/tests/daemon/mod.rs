@@ -29,7 +29,27 @@ impl Daemon {
     }
 
     /// Start with extra environment, for the settings a test needs to bend.
+    ///
+    /// Retries on a port collision. [`free_port`] cannot reserve anything —
+    /// it asks the OS for a free port and closes it again — so two daemons
+    /// starting at once can be handed the same number, and the loser exits
+    /// during startup. Retrying with fresh numbers turns that from a flake
+    /// in whichever test drew second into two seconds of nothing.
     pub(crate) fn start_with(name: &str, extra: &[(&str, &str)]) -> Self {
+        // Three, because a collision is already unlikely and three in a row
+        // is not a race any more — it is something else, and it should say so
+        // rather than spin.
+        for attempt in 1..=3 {
+            match Self::try_start(name, extra) {
+                Ok(daemon) => return daemon,
+                Err(why) => eprintln!("daemon start attempt {attempt} failed: {why}"),
+            }
+        }
+        panic!("three daemons in a row failed to start; this is not a port collision");
+    }
+
+    /// One attempt, which fails rather than panics so the caller can retry.
+    fn try_start(name: &str, extra: &[(&str, &str)]) -> Result<Self, String> {
         let port = free_port();
         let peer_port = free_port();
         let home = tempfile::tempdir().expect("temp home");
@@ -54,43 +74,73 @@ impl Daemon {
         let stdout = process.stdout.take().expect("stdout");
         let mut reader = BufReader::new(stdout);
         let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .expect("the daemon says it is up");
-        assert!(line.contains("listening"), "unexpected first line: {line}");
+        let read = reader.read_line(&mut line).unwrap_or(0);
+        if read == 0 || !line.contains("listening") {
+            // It died before saying anything, which is what binding a taken
+            // port looks like from here.
+            let _ = process.kill();
+            let _ = process.wait();
+            return Err(format!("it never said it was listening (said {line:?})"));
+        }
 
-        let daemon = Self {
+        let mut daemon = Self {
             process,
             port,
             peer_port,
             home,
             stdout: reader,
         };
-        daemon.wait_until_ready();
-        daemon
+        daemon.wait_until_ready()?;
+        Ok(daemon)
     }
 
-    /// The peer port is bound after the line we read above, so a join sent
-    /// immediately can race it.
+    /// Wait until **this** daemon answers, or say why it never will.
     ///
-    /// A minute rather than ten seconds. This returns the moment the port
-    /// opens, so a generous deadline costs nothing in the normal case — and
-    /// ten seconds was not enough on a machine running a mutation sweep
-    /// beside it. CI runs on a shared runner, so the same squeeze is waiting
-    /// there; it would have read as a mysterious flake in an unrelated test.
-    pub(crate) fn wait_until_ready(&self) {
+    /// Both ports, because they prove different things and the peer port
+    /// alone proved the wrong one. A TCP connect there says *somebody* is
+    /// listening — and when two tests are handed the same port number, the
+    /// somebody can be the other daemon. Ours then failed to bind and
+    /// exited, this check passed anyway, and the failure surfaced later as
+    /// "no hivemind daemon at 127.0.0.1:43695" from an unrelated CLI call.
+    /// That is how it read on `main` after #52.
+    ///
+    /// So: the loopback API has to answer an actual request, which only our
+    /// process can do, and a child that has exited ends the wait at once
+    /// rather than at the deadline.
+    ///
+    /// A minute rather than ten seconds. This returns the moment both are
+    /// up, so a generous deadline costs nothing in the normal case — and ten
+    /// seconds was not enough on a machine running a mutation sweep beside
+    /// it. CI runs on a shared runner, so the same squeeze is waiting there.
+    fn wait_until_ready(&mut self) -> Result<(), String> {
         let deadline = Instant::now() + Duration::from_mins(1);
         while Instant::now() < deadline {
-            if std::net::TcpStream::connect(("127.0.0.1", self.peer_port)).is_ok() {
-                return;
+            if let Ok(Some(status)) = self.process.try_wait() {
+                return Err(format!("it exited during startup with {status}"));
+            }
+            if self.answers_locally() && self.peer_port_open() {
+                return Ok(());
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        panic!(
-            "the peer port {} never opened — the daemon is slow to start or \
-             died; its stdout is held open by this struct",
-            self.peer_port
-        );
+        Err(format!(
+            "ports {} and {} were not both up within the deadline",
+            self.port, self.peer_port
+        ))
+    }
+
+    /// Does our own loopback API answer? Only our process can.
+    fn answers_locally(&self) -> bool {
+        reqwest::blocking::Client::new()
+            .get(format!("{}/healthz", self.api()))
+            .timeout(Duration::from_secs(2))
+            .send()
+            .is_ok_and(|response| response.status().is_success())
+    }
+
+    /// Is anything listening on the peer port? By now that is us.
+    fn peer_port_open(&self) -> bool {
+        std::net::TcpStream::connect(("127.0.0.1", self.peer_port)).is_ok()
     }
 
     pub(crate) fn api(&self) -> String {
@@ -285,7 +335,12 @@ impl Daemon {
 
         self.process = process;
         self.stdout = reader;
-        self.wait_until_ready();
+        // A restart reuses the same ports deliberately — the sender learned
+        // where this node was when they paired — so there is nothing to
+        // retry with. If it will not come back, the test should say so here
+        // rather than in whatever it does next.
+        self.wait_until_ready()
+            .expect("the daemon comes back on the same ports");
     }
 }
 
