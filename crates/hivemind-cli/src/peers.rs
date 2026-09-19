@@ -22,6 +22,10 @@ struct PeerRow {
     addrs: Vec<String>,
     paired: bool,
     last_seen: Option<String>,
+    #[serde(default)]
+    online: bool,
+    #[serde(default)]
+    sessions: Vec<String>,
 }
 
 /// Which group this node is in, as the local API reports it.
@@ -139,7 +143,13 @@ pub(crate) async fn list(api: &str, json: bool) -> Result<()> {
         } else {
             "seen, not in the group".yellow().to_string()
         };
-        println!("{}  {}  {}", peer.short_id.bold(), state, peer.name);
+        println!(
+            "{}  {}  {}  {}",
+            peer.short_id.bold(),
+            state,
+            peer.name,
+            presence_phrase(peer).green()
+        );
         if let Some(owner) = &peer.owner {
             println!("    owner     {owner}");
         }
@@ -173,10 +183,28 @@ fn peers_json(peers: &[PeerRow]) -> serde_json::Value {
                     "addrs": p.addrs,
                     "paired": p.paired,
                     "last_seen": p.last_seen,
+                    "online": p.online,
+                    "sessions": p.sessions,
                 })
             })
             .collect(),
     )
+}
+
+/// How a peer's presence reads on one line (SPEC §5.5).
+///
+/// Offline is said with nothing rather than with the word: most of a group is
+/// off most of the time, and a column of "offline" is noise around the one
+/// line somebody is looking for. `last_seen` already answers "since when".
+fn presence_phrase(peer: &PeerRow) -> String {
+    if !peer.online {
+        return String::new();
+    }
+    match peer.sessions.len() {
+        0 => "(online)".to_owned(),
+        1 => format!("(online, 1 session: {})", peer.sessions[0]),
+        n => format!("(online, {n} sessions: {})", peer.sessions.join(", ")),
+    }
 }
 
 fn member_phrase(members: usize) -> String {
@@ -205,4 +233,56 @@ pub(crate) async fn refresh(api: &str) -> Result<()> {
         n => println!("{n} nodes answered — `hivemind peers` to see them"),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(online: bool, sessions: &[&str]) -> PeerRow {
+        PeerRow {
+            id: "hm1:whatever".to_owned(),
+            short_id: "abcd1234".to_owned(),
+            name: "laptop".to_owned(),
+            owner: None,
+            addrs: vec!["10.0.0.1:8400".to_owned()],
+            paired: true,
+            last_seen: None,
+            online,
+            sessions: sessions.iter().map(|s| (*s).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn a_peer_that_is_off_is_said_with_nothing() {
+        // Most of a group is off most of the time, and a column of "offline"
+        // is noise around the one line somebody is looking for. `last_seen`
+        // already answers "since when".
+        assert_eq!(presence_phrase(&row(false, &[])), "");
+        assert_eq!(
+            presence_phrase(&row(false, &["hivemind"])),
+            "",
+            "a session reported before it went away is not a session now"
+        );
+    }
+
+    #[test]
+    fn a_peer_with_no_sessions_is_just_online() {
+        assert_eq!(presence_phrase(&row(true, &[])), "(online)");
+    }
+
+    #[test]
+    fn the_sessions_are_named_because_that_is_the_useful_half() {
+        // "the machine is up" is worth less than "there is a Claude in the
+        // repo I am asking about", which is the question a Claude deciding
+        // who to write to actually has.
+        assert_eq!(
+            presence_phrase(&row(true, &["hivemind"])),
+            "(online, 1 session: hivemind)"
+        );
+        assert_eq!(
+            presence_phrase(&row(true, &["hivemind", "scorsese"])),
+            "(online, 2 sessions: hivemind, scorsese)"
+        );
+    }
 }

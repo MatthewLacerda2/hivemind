@@ -180,6 +180,12 @@ pub struct Pass {
     /// Zero means every outstanding recipient is still inside its backoff, so
     /// nothing changed and there is nothing to write.
     pub attempted: usize,
+    /// Recipients tried and not reached at any known address.
+    ///
+    /// Presence needs this (SPEC §5.5): a failed delivery is better evidence
+    /// that a peer has gone than any hello is that it is still there, and it
+    /// is why there is no ping.
+    pub failed: Vec<NodeId>,
 }
 
 impl Pass {
@@ -222,6 +228,7 @@ where
         let known = addresses(node);
         if known.is_empty() {
             outbound.mark_attempted(node, now, "no known address for this peer");
+            pass.failed.push(node);
             continue;
         }
 
@@ -247,6 +254,7 @@ where
             let why = last_error
                 .map_or_else(|| "no address could be tried".to_owned(), |e| e.to_string());
             outbound.mark_attempted(node, now, &why);
+            pass.failed.push(node);
         }
     }
 
@@ -298,6 +306,18 @@ pub trait Outbox: Send + Sync {
     ///
     /// The address book records it so the next message tries it first.
     fn reached(&self, node: NodeId, addr: &str, at: DateTime<Utc>);
+
+    /// One recipient could not be reached at any address it is known at.
+    ///
+    /// Presence (SPEC §5.5) marks it offline at once: this is stronger and
+    /// more recent evidence than the last hello, and it is what stands in for
+    /// the ping there deliberately is not.
+    ///
+    /// Defaulted, because an outbox held in memory for a backoff test has no
+    /// opinion about who is online.
+    fn unreachable(&self, node: NodeId) {
+        let _ = node;
+    }
 }
 
 /// How often the loop looks for work.
@@ -332,6 +352,9 @@ where
 
             for (node, addr) in &pass.delivered {
                 outbox.reached(*node, addr, now);
+            }
+            for node in &pass.failed {
+                outbox.unreachable(*node);
             }
             // Nothing tried means nothing changed: every outstanding
             // recipient is still inside its backoff.
@@ -611,6 +634,64 @@ mod pass_tests {
             "it should be in sent/"
         );
     }
+    #[tokio::test]
+    async fn a_recipient_no_address_worked_for_is_reported_as_failed() {
+        // Presence marks it offline on this (SPEC §5.5), so "tried and did not
+        // answer" has to be distinguishable from "not tried".
+        let (reachable, gone) = (node(1), node(2));
+        let mut outbound = outbound_to(&[reachable, gone]);
+        let transport = Scripted::accepting(&["10.0.0.1:8400"]);
+
+        let pass = attempt_all(
+            &mut outbound,
+            book(&[(reachable, &["10.0.0.1:8400"]), (gone, &["10.0.0.2:8400"])]),
+            &transport,
+            at(100),
+        )
+        .await;
+
+        assert_eq!(pass.failed, vec![gone]);
+        assert!(
+            !pass.failed.contains(&reachable),
+            "the one that took it is not a failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_recipient_with_no_address_at_all_counts_as_failed_too() {
+        // It is the same fact from the peer's point of view — nothing got
+        // there — and the alternative is a peer that stays "online" forever
+        // because we never had anywhere to try.
+        let nowhere = node(3);
+        let mut outbound = outbound_to(&[nowhere]);
+        let transport = Scripted::accepting(&[]);
+
+        let pass = attempt_all(&mut outbound, book(&[]), &transport, at(100)).await;
+
+        assert_eq!(pass.failed, vec![nowhere]);
+    }
+
+    #[tokio::test]
+    async fn a_recipient_still_inside_its_backoff_is_not_reported_as_failed() {
+        // It was not tried, so it is no evidence about anything. Reporting it
+        // would mark a peer offline every second of a five-minute backoff.
+        let backed_off = node(1);
+        let mut outbound = outbound_to(&[backed_off]);
+        outbound.recipients[0].attempts = 4;
+        outbound.recipients[0].last_attempt = Some(at(1_000));
+
+        let transport = Scripted::accepting(&[]);
+        let pass = attempt_all(
+            &mut outbound,
+            book(&[(backed_off, &["10.0.0.1:8400"])]),
+            &transport,
+            at(1_001),
+        )
+        .await;
+
+        assert_eq!(pass.attempted, 0);
+        assert!(pass.failed.is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -695,6 +776,7 @@ mod worker_tests {
         entries: Mutex<Vec<Outbound>>,
         finished: Mutex<Vec<ulid::Ulid>>,
         reached: Mutex<Vec<(NodeId, String)>>,
+        unreachable: Mutex<Vec<NodeId>>,
     }
 
     impl Outbox for Fake {
@@ -724,6 +806,10 @@ mod worker_tests {
                 .lock()
                 .expect("lock")
                 .push((node, addr.to_owned()));
+        }
+
+        fn unreachable(&self, node: NodeId) {
+            self.unreachable.lock().expect("lock").push(node);
         }
     }
 

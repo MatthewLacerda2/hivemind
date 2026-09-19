@@ -212,7 +212,8 @@ rather than taken from the message, so a peer cannot nominate its own key.
 
 ### 5.5 Presence
 - `POST /peer/v1/hello` to every known peer on start, on wake, on a change of network, and every `presence_interval` (default 60 s). One request each, no connection held open. A hello carries: proof of the group key (§6.2), the sender's addresses, its peer list (§5.4), and its open sessions (§9.3).
-- Receiving a hello marks the sender online, records `last_seen`, wakes the delivery worker for that peer so its queued mail goes now rather than at the next backoff, and forwards "X is up" to the other online peers as a hint. A hint is never believed: the receiver sends its own hello to X and marks it online on the answer.
+- Receiving a hello marks the sender online, records `last_seen`, wakes the delivery worker for that peer so its queued mail goes now rather than at the next backoff, and forwards "X is up" to the other online peers as a hint on the next hello each of them is sent. A hint is never believed: the receiver sends its own hello to X and marks it online on the answer.
+- A hello whose proof does not verify is `403 not_paired` **and the sender is removed from `peers.toml`**, becoming a node merely seen. This is what gives a key rotation (§6.2.4) an effect on a node that is already pinned, and it is acted on from both sides: a peer that answers our own hello with `403` is dropped too. Otherwise whichever node said hello first would retire the other, stop greeting it, and so never give it the evidence to retire back.
 - A peer is online while its last hello is younger than two intervals; a delivery failure marks it offline at once. There is no ping. If a minute of staleness ever matters, the interval is a config value, not a design.
 - `hivemind peers` and `list_peers` show online, `last_seen` and sessions.
 

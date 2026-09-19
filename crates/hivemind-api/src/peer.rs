@@ -20,6 +20,10 @@ use serde::{Deserialize, Serialize};
 use crate::problem::{Problem, ProblemType};
 use crate::service::MailService;
 
+pub mod hello;
+
+pub use hello::{Hello, PeerNote, SessionNote};
+
 /// What each side sends in a handshake (SPEC §7.2).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Handshake {
@@ -43,10 +47,13 @@ pub struct Handshake {
     /// wrong one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proof: Option<Proof>,
-    /// Reserved for the peer list (SPEC §5.4), which rides on the hello
-    /// (#51). Always `None` today, and ignored on receipt.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gossip: Option<serde_json::Value>,
+    /// The sender's peer list (SPEC §5.4).
+    ///
+    /// Carried here as well as on the hello so that a node admitted this
+    /// second has the group now rather than at the next presence round. The
+    /// hello is what keeps it current; this is what makes joining immediate.
+    #[serde(default)]
+    pub gossip: Vec<hello::PeerNote>,
 }
 
 /// Proof of the group key, bound to both certificates (`docs/protocol.md`).
@@ -70,6 +77,9 @@ pub fn router(state: Arc<MailService>) -> Router {
     let limit = state.max_delivery_bytes();
     Router::new()
         .route("/peer/v1/handshake", post(handshake))
+        // SPEC §5.5. Members only, and the proof is checked afresh every
+        // time: that is what makes a rotated key retire whoever kept the old.
+        .route("/peer/v1/hello", post(hello::hello))
         .route(
             "/peer/v1/messages",
             post(receive_message)
@@ -108,7 +118,7 @@ async fn handshake(
         ));
     }
 
-    let addr = callback_address(&caller, &request);
+    let addr = callback_address(&caller, &request.callback_host, request.callback_port);
 
     Ok(Json(service.answer_handshake(
         caller.node_id,
@@ -224,22 +234,22 @@ async fn read_delivery(
 /// A peer genuinely on this machine keeps its loopback address, because there
 /// it is true — and that is the case every integration test exercises, which
 /// is why the bug survived to be found on two real machines.
-fn callback_address(caller: &CallerIdentity, request: &Handshake) -> PeerAddr {
+fn callback_address(caller: &CallerIdentity, claimed_host: &str, claimed_port: u16) -> PeerAddr {
     let observed = caller.remote.ip();
 
     // A claimed *address* is always replaced by the observed one: the socket
     // knows and the claim only guesses. A claimed *name* is kept, because a
     // hostname outlives the address behind it — a MagicDNS name still resolves
     // after the peer moves — and because this node cannot check it anyway.
-    let host = if request.callback_host.parse::<std::net::IpAddr>().is_ok() {
+    let host = if claimed_host.parse::<std::net::IpAddr>().is_ok() {
         observed.to_string()
     } else {
-        request.callback_host.clone()
+        claimed_host.to_owned()
     };
 
     PeerAddr {
         host,
-        port: request.callback_port,
+        port: claimed_port,
         source: AddrSource::Manual,
         last_ok: None,
     }
@@ -376,6 +386,8 @@ fn paired_digest(
 mod blob_tests;
 #[cfg(test)]
 mod handshake_tests;
+#[cfg(test)]
+mod hello_tests;
 
 #[cfg(test)]
 mod tests {
@@ -408,6 +420,7 @@ mod tests {
             max_attachment_bytes: hivemind_core::config::DEFAULT_MAX_ATTACHMENT_BYTES,
             inline_max_bytes: hivemind_core::config::DEFAULT_INLINE_MAX_BYTES,
             prefetch: false,
+            presence_interval: hivemind_core::config::DEFAULT_PRESENCE_INTERVAL,
         };
         let service =
             MailService::open(dir.path(), node, id.signing_key().clone()).expect("service opens");
@@ -575,7 +588,7 @@ mod tests {
             callback_host: host.to_owned(),
             callback_port: port,
             proof: key.map(|key| proof(from, to, key)),
-            gossip: None,
+            gossip: Vec::new(),
         })
         .expect("serialise")
     }

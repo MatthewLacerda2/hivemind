@@ -78,6 +78,16 @@ pub enum Event {
         /// Which node.
         id: NodeId,
     },
+    /// A peer said hello after being absent (SPEC §5.5).
+    PeerOnline {
+        /// Which node.
+        id: NodeId,
+    },
+    /// A peer stopped answering, or could not be delivered to (SPEC §5.5).
+    PeerOffline {
+        /// Which node.
+        id: NodeId,
+    },
 }
 
 impl Event {
@@ -89,18 +99,37 @@ impl Event {
             Self::MessageDelivered { .. } => "message.delivered",
             Self::MessageRead { .. } => "message.read",
             Self::PeerSeen { .. } => "peer.seen",
+            Self::PeerOnline { .. } => "peer.online",
+            Self::PeerOffline { .. } => "peer.offline",
         }
     }
 
-    /// The id the event is about.
+    /// The message this event is about, if it is about one.
     #[must_use]
-    pub fn id(&self) -> Ulid {
+    pub fn message(&self) -> Option<Ulid> {
         match self {
             Self::MessageReceived { id }
             | Self::MessageDelivered { id }
-            | Self::MessageRead { id } => *id,
-            // A peer event is not about a message.
-            Self::PeerSeen { .. } => Ulid::nil(),
+            | Self::MessageRead { id } => Some(*id),
+            Self::PeerSeen { .. } | Self::PeerOnline { .. } | Self::PeerOffline { .. } => None,
+        }
+    }
+
+    /// What the SSE stream carries as this event's data (SPEC §7.1).
+    ///
+    /// The thing the event is about, whatever kind of thing that is: a message
+    /// id, or a node id. A peer event used to send a nil ULID, which told a
+    /// client that *somebody* had come online and left it to re-read the whole
+    /// peer list to find out who.
+    #[must_use]
+    pub fn data(&self) -> String {
+        match self {
+            Self::MessageReceived { id }
+            | Self::MessageDelivered { id }
+            | Self::MessageRead { id } => id.to_string(),
+            Self::PeerSeen { id } | Self::PeerOnline { id } | Self::PeerOffline { id } => {
+                id.to_string()
+            }
         }
     }
 }
@@ -168,9 +197,11 @@ pub enum ServiceError {
 
 mod group;
 mod peering;
+mod presence;
 
 pub use group::{GroupStatus, MAX_SEEN, SeenNode};
 pub use peering::Met;
+pub use presence::Presence;
 
 /// Everything the local API and the MCP adapter can do.
 #[derive(Debug)]
@@ -183,6 +214,21 @@ pub struct MailService {
     group: Mutex<Option<hivemind_core::group::Group>>,
     /// Nodes outside the group, for `hivemind peers`. In memory only.
     seen: Mutex<std::collections::BTreeMap<NodeId, SeenNode>>,
+    /// Who has said hello lately (SPEC §5.5). In memory only: online is not a
+    /// fact about a peer, it is a statement about this minute.
+    presence: Mutex<std::collections::HashMap<NodeId, Presence>>,
+    /// Peers the delivery worker should try now rather than at the end of
+    /// their backoff, because one of them has just been heard from.
+    woken: Mutex<std::collections::HashSet<NodeId>>,
+    /// Addresses worth a hello next round, from gossip and from hints.
+    candidates: Mutex<std::collections::BTreeSet<String>>,
+    /// Nodes to pass on as "X is up", and when we heard from each. They age
+    /// out after one interval rather than being consumed, so that every peer
+    /// greeted in the next round hears the news once.
+    hints: Mutex<std::collections::BTreeMap<NodeId, DateTime<Utc>>>,
+    /// How often presence runs, which is also how long a hello counts for —
+    /// a peer is online while its last one is younger than two of these.
+    presence_interval: std::time::Duration,
     /// Where `group.toml` lives.
     home: std::path::PathBuf,
     identity: NodeId,
@@ -224,6 +270,9 @@ pub struct NodeDescription {
     /// Fetch lazy attachments as soon as a message arrives, rather than on
     /// first access (SPEC §8).
     pub prefetch: bool,
+    /// Seconds between presence rounds (SPEC §5.5), and half the window a
+    /// hello keeps a peer looking online for.
+    pub presence_interval: u64,
 }
 
 impl MailService {
@@ -255,6 +304,11 @@ impl MailService {
             peers: Mutex::new(peers),
             group: Mutex::new(group),
             seen: Mutex::new(std::collections::BTreeMap::new()),
+            presence: Mutex::new(std::collections::HashMap::new()),
+            woken: Mutex::new(std::collections::HashSet::new()),
+            candidates: Mutex::new(std::collections::BTreeSet::new()),
+            hints: Mutex::new(std::collections::BTreeMap::new()),
+            presence_interval: std::time::Duration::from_secs(node.presence_interval),
             home: root.to_path_buf(),
             identity: node.id,
             tls: hivemind_net::tls::LocalIdentity::new(node.certificate.clone(), node.private_key),
@@ -1125,6 +1179,7 @@ mod tests {
             max_attachment_bytes: hivemind_core::config::DEFAULT_MAX_ATTACHMENT_BYTES,
             inline_max_bytes: hivemind_core::config::DEFAULT_INLINE_MAX_BYTES,
             prefetch: false,
+            presence_interval: hivemind_core::config::DEFAULT_PRESENCE_INTERVAL,
         }
     }
 
@@ -1351,6 +1406,31 @@ mod tests {
         assert_eq!(first, Event::MessageReceived { id: sent.id });
         assert_eq!(second, Event::MessageDelivered { id: sent.id });
         assert_eq!(first.name(), "message.received");
+        assert_eq!(first.data(), sent.id.to_string());
+    }
+
+    #[test]
+    fn a_peer_event_carries_the_node_it_is_about() {
+        // It used to carry a nil ULID, which told a client that *somebody*
+        // had come online and left it to re-read the whole peer list to find
+        // out who. SPEC §7.1 names these events; a name with no subject is
+        // half an event.
+        let id = NodeId::from_certificate_der(b"somebody");
+
+        for event in [
+            Event::PeerSeen { id },
+            Event::PeerOnline { id },
+            Event::PeerOffline { id },
+        ] {
+            assert_eq!(event.data(), id.to_string(), "{}", event.name());
+            assert!(
+                event.message().is_none(),
+                "a peer event is not about a message"
+            );
+        }
+
+        assert_eq!(Event::PeerOnline { id }.name(), "peer.online");
+        assert_eq!(Event::PeerOffline { id }.name(), "peer.offline");
     }
 
     /// A service whose limits are small enough to test the boundaries of.
@@ -1392,16 +1472,8 @@ mod tests {
         service
             .admit(
                 friend.node_id(),
-                &crate::peer::Handshake {
-                    id: friend.node_id().to_string(),
-                    name: "their-laptop".to_owned(),
-                    owner: Some("ana".to_owned()),
-                    version: "0.1.0".to_owned(),
-                    callback_host: "10.0.0.2".to_owned(),
-                    callback_port: 8400,
-                    proof: None,
-                    gossip: None,
-                },
+                "their-laptop",
+                Some("ana"),
                 friend.certificate_der().to_vec(),
                 PeerAddr::manual("10.0.0.2", 8400),
             )
@@ -1465,16 +1537,8 @@ mod tests {
         service
             .admit(
                 friend.node_id(),
-                &crate::peer::Handshake {
-                    id: friend.node_id().to_string(),
-                    name: "odd".to_owned(),
-                    owner: Some(short.clone()),
-                    version: "0.1.0".to_owned(),
-                    callback_host: "10.0.0.3".to_owned(),
-                    callback_port: 8400,
-                    proof: None,
-                    gossip: None,
-                },
+                "odd",
+                Some(&short),
                 friend.certificate_der().to_vec(),
                 PeerAddr::manual("10.0.0.3", 8400),
             )

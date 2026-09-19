@@ -43,6 +43,15 @@ pub struct SeenNode {
     pub addr: PeerAddr,
     /// When.
     pub last_seen: DateTime<Utc>,
+    /// Whether this node was a member and was dropped for failing the proof
+    /// (SPEC §5.5, §6.2.4).
+    ///
+    /// The difference between "never in this group" and "in it until a
+    /// minute ago" is worth keeping, because presence retries the second and
+    /// leaves the first alone. A rotation drops every member that has not
+    /// yet pasted the new code — including the ones about to — and without
+    /// this nothing ever greets them again.
+    pub was_a_member: bool,
 }
 
 impl MailService {
@@ -217,6 +226,7 @@ impl MailService {
             owner: None,
             addr: addr.clone(),
             last_seen: Utc::now(),
+            was_a_member: false,
         });
         // A refusal says nothing but the certificate. Keep what mDNS said
         // earlier rather than forgetting the node's name because of it.
@@ -249,6 +259,19 @@ impl MailService {
             .collect();
         nodes.sort_by_key(|n| std::cmp::Reverse(n.last_seen));
         Ok(nodes)
+    }
+
+    /// Note that a node on the seen list used to be a member.
+    ///
+    /// Separate from [`Self::record_seen`] because every other caller is
+    /// describing a node that was never in the group, and a boolean argument
+    /// at five call sites reads as noise at four of them.
+    pub(crate) fn mark_was_a_member(&self, id: NodeId) {
+        if let Ok(mut seen) = self.seen.lock()
+            && let Some(node) = seen.get_mut(&id)
+        {
+            node.was_a_member = true;
+        }
     }
 
     /// Forget a node seen outside the group. Returns whether it was there.
@@ -412,16 +435,8 @@ mod tests {
         service
             .admit(
                 friend.node_id(),
-                &crate::peer::Handshake {
-                    id: friend.node_id().to_string(),
-                    name: "friend".to_owned(),
-                    owner: None,
-                    version: "0.1.0".to_owned(),
-                    callback_host: "10.0.0.1".to_owned(),
-                    callback_port: 8400,
-                    proof: None,
-                    gossip: None,
-                },
+                "friend",
+                None,
                 friend.certificate_der().to_vec(),
                 addr("10.0.0.1"),
             )

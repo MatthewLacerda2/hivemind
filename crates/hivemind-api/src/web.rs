@@ -94,6 +94,10 @@ struct PeerRow {
     owner: Option<String>,
     addr: String,
     last_seen: Option<String>,
+    /// Whether it said hello within the last two intervals (SPEC §5.5).
+    online: bool,
+    /// What each Claude Code session on that machine is working on.
+    sessions: Vec<String>,
 }
 
 #[derive(Template)]
@@ -524,6 +528,9 @@ fn peers_page(service: &Arc<MailService>, problem: Option<String>) -> Response {
                 name: s.name.unwrap_or_else(|| s.addr.host.clone()),
                 owner: s.owner,
                 addr: s.addr.authority(),
+                // A node outside the group never says hello.
+                online: false,
+                sessions: Vec::new(),
                 last_seen: Some(relative(s.last_seen)),
             })
             .collect(),
@@ -535,16 +542,23 @@ fn peer_rows(service: &Arc<MailService>) -> Vec<PeerRow> {
         .paired_peers()
         .unwrap_or_default()
         .into_iter()
-        .map(|peer| PeerRow {
-            id: peer.id.to_string(),
-            short_id: peer.id.short(),
-            addr: peer
-                .addrs_by_preference()
-                .first()
-                .map_or_else(|| "no known address".to_owned(), |a| a.authority()),
-            last_seen: peer.last_seen.map(relative),
-            name: peer.name,
-            owner: peer.owner,
+        .map(|peer| {
+            let presence = service.presence_of(peer.id);
+            PeerRow {
+                id: peer.id.to_string(),
+                short_id: peer.id.short(),
+                addr: peer
+                    .addrs_by_preference()
+                    .first()
+                    .map_or_else(|| "no known address".to_owned(), |a| a.authority()),
+                last_seen: peer.last_seen.map(relative),
+                online: presence.is_some(),
+                sessions: presence
+                    .map(|p| p.sessions.into_iter().map(|s| s.label).collect())
+                    .unwrap_or_default(),
+                name: peer.name,
+                owner: peer.owner,
+            }
         })
         .collect()
 }
@@ -773,6 +787,7 @@ mod tests {
             max_attachment_bytes: hivemind_core::config::DEFAULT_MAX_ATTACHMENT_BYTES,
             inline_max_bytes: hivemind_core::config::DEFAULT_INLINE_MAX_BYTES,
             prefetch: false,
+            presence_interval: hivemind_core::config::DEFAULT_PRESENCE_INTERVAL,
         };
         let service = Arc::new(
             MailService::open(dir.path(), node, SigningKey::from_bytes(&[11u8; 32]))

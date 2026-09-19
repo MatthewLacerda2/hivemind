@@ -145,6 +145,23 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0
   font-size: 0.85rem;
 }
 
+/* Presence (SPEC §5.5). Said only when true: most of a group is off most of
+   the time, and marking every absent machine would leave the one that is
+   there no easier to find. */
+.online {
+  color: var(--accent);
+  font-size: 0.7rem;
+  text-transform: lowercase;
+  letter-spacing: 0.04em;
+  vertical-align: middle;
+}
+
+.sessions {
+  margin: 0.2rem 0 0;
+  color: var(--dim);
+  font-size: 0.85rem;
+}
+
 .badge {
   padding: 0.05rem 0.4rem;
   border-radius: 999px;

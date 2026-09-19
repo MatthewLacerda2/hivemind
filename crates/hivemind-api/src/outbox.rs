@@ -30,12 +30,33 @@ impl ServiceOutbox {
 
 impl Outbox for ServiceOutbox {
     fn pending(&self) -> Vec<Outbound> {
-        self.service.pending_outbound().unwrap_or_else(|error| {
+        let mut entries = self.service.pending_outbound().unwrap_or_else(|error| {
             // The disk is unreadable. There is nothing the worker can do about
             // it, and stopping would strand every message rather than this one.
             tracing::warn!(%error, "could not read the outbox");
             Vec::new()
-        })
+        });
+
+        // SPEC §5.5 and §8: a peer that has just said hello is demonstrably
+        // up, so the wait it accumulated while it was off is about a machine
+        // that no longer exists. Clearing the backoff here rather than
+        // threading a "try these now" set through `attempt_all` keeps the
+        // decision in one place — and because `pending` returns copies read
+        // from disk, the stored attempt count is untouched. That matters: a
+        // peer that says hello and then refuses the delivery must resume its
+        // backoff where it was, not restart the sequence at two seconds.
+        let woken = self.service.take_woken();
+        if !woken.is_empty() {
+            for entry in &mut entries {
+                for recipient in &mut entry.recipients {
+                    if woken.contains(&recipient.node) {
+                        recipient.attempts = 0;
+                        recipient.last_attempt = None;
+                    }
+                }
+            }
+        }
+        entries
     }
 
     fn addresses(&self, node: NodeId) -> Vec<String> {
@@ -52,6 +73,10 @@ impl Outbox for ServiceOutbox {
         if let Err(error) = self.service.record_reached(node, addr, at) {
             tracing::warn!(%error, %node, %addr, "could not record a working address");
         }
+    }
+
+    fn unreachable(&self, node: NodeId) {
+        self.service.mark_offline(node);
     }
 }
 
@@ -292,6 +317,7 @@ mod tests {
             max_attachment_bytes: hivemind_core::config::DEFAULT_MAX_ATTACHMENT_BYTES,
             inline_max_bytes: hivemind_core::config::DEFAULT_INLINE_MAX_BYTES,
             prefetch: false,
+            presence_interval: hivemind_core::config::DEFAULT_PRESENCE_INTERVAL,
         };
         let service = MailService::open(dir.path(), node, SigningKey::from_bytes(&[11u8; 32]))
             .expect("service");
@@ -379,16 +405,8 @@ mod tests {
         service
             .admit(
                 id,
-                &crate::peer::Handshake {
-                    id: id.to_string(),
-                    name: "friend".to_owned(),
-                    owner: None,
-                    version: "0.1.0".to_owned(),
-                    callback_host: "10.0.0.1".to_owned(),
-                    callback_port: 8400,
-                    proof: None,
-                    gossip: None,
-                },
+                "friend",
+                None,
                 friend.certificate_der().to_vec(),
                 hivemind_core::peerbook::PeerAddr::manual("10.0.0.1", 8400),
             )
@@ -496,5 +514,113 @@ mod tests {
         // An unknown node has no address to try, which is not the same as
         // having one that does not answer.
         assert!(outbox.addresses(node(3)).is_empty());
+    }
+
+    /// A service, and a friend queued mail that has already failed four times.
+    fn backed_off_entry() -> (tempfile::TempDir, Arc<MailService>, NodeId) {
+        let (dir, service) = service();
+        let friend = hivemind_core::identity::Identity::from_seed([44u8; 32]).expect("identity");
+        let id = friend.node_id();
+        service
+            .admit(
+                id,
+                "friend",
+                None,
+                friend.certificate_der().to_vec(),
+                hivemind_core::peerbook::PeerAddr::manual("10.0.0.4", 8400),
+            )
+            .expect("admit");
+        service
+            .send(
+                crate::service::Draft {
+                    to: vec![hivemind_core::message::Recipient::Node(id)],
+                    subject: "waiting".to_owned(),
+                    body: "x".to_owned(),
+                    kind: hivemind_core::message::Kind::Message,
+                    in_reply_to: None,
+                    attachments: Vec::new(),
+                },
+                hivemind_core::message::SenderKind::Human,
+            )
+            .expect("send");
+
+        let mut entry = ServiceOutbox::new(Arc::clone(&service))
+            .pending()
+            .pop()
+            .expect("one queued message");
+        for _ in 0..4 {
+            entry.mark_attempted(id, Utc::now(), "connection refused");
+        }
+        service.save_outbound(&entry).expect("save");
+        (dir, service, id)
+    }
+
+    #[test]
+    fn a_woken_peer_has_its_backoff_cleared_for_this_pass() {
+        // SPEC §8's Monday morning: the peer has just said hello, so the wait
+        // it accumulated while it was off is about a machine that is now
+        // demonstrably up.
+        let (_dir, service, id) = backed_off_entry();
+        let outbox = ServiceOutbox::new(Arc::clone(&service));
+
+        let waiting = outbox.pending().pop().expect("still queued");
+        assert_eq!(
+            waiting.recipients[0].attempts, 4,
+            "it is inside a backoff before anybody says hello"
+        );
+
+        service.wake_delivery(id);
+        let woken = outbox.pending().pop().expect("still queued");
+        assert_eq!(
+            woken.recipients[0].attempts, 0,
+            "a woken recipient is due now"
+        );
+        assert!(woken.recipients[0].last_attempt.is_none());
+    }
+
+    #[test]
+    fn waking_a_peer_does_not_forget_that_it_failed() {
+        // The cleared backoff is for this pass only. Writing it back would
+        // lose the attempt count, and the next failure would start the
+        // sequence again from two seconds.
+        let (_dir, service, id) = backed_off_entry();
+        let outbox = ServiceOutbox::new(Arc::clone(&service));
+
+        service.wake_delivery(id);
+        let _ = outbox.pending();
+
+        let on_disk = outbox.pending().pop().expect("still queued");
+        assert_eq!(
+            on_disk.recipients[0].attempts, 4,
+            "the stored entry keeps its history"
+        );
+    }
+
+    #[test]
+    fn a_wake_is_spent_on_the_next_pass_and_not_the_one_after() {
+        let (_dir, service, id) = backed_off_entry();
+        let outbox = ServiceOutbox::new(Arc::clone(&service));
+
+        service.wake_delivery(id);
+        assert_eq!(outbox.pending()[0].recipients[0].attempts, 0);
+        assert_eq!(
+            outbox.pending()[0].recipients[0].attempts,
+            4,
+            "a wake is one instruction, not a standing exemption from backoff"
+        );
+    }
+
+    #[test]
+    fn a_peer_that_could_not_be_reached_stops_being_online() {
+        // SPEC §5.5: a failed delivery is better evidence than the last
+        // hello, and it is what stands in for the ping there is not.
+        let (_dir, service, id) = backed_off_entry();
+        let outbox = ServiceOutbox::new(Arc::clone(&service));
+        service.mark_online(id, Vec::new());
+        assert!(service.is_online(id));
+
+        outbox.unreachable(id);
+
+        assert!(!service.is_online(id));
     }
 }

@@ -16,6 +16,19 @@ pub const DEFAULT_INLINE_MAX_BYTES: u64 = 8 * 1024 * 1024;
 pub const DEFAULT_PEER_PORT: u16 = 8400;
 /// Default port for the loopback listener (SPEC §3).
 pub const DEFAULT_LOCAL_PORT: u16 = 8401;
+/// Default seconds between presence rounds (SPEC §5.5).
+///
+/// A minute is the staleness a peer's `online` may carry, and sixty seconds of
+/// it costs one request per peer. Shorter buys a fresher answer to a question
+/// nobody asks that often; longer makes "I opened my laptop" take visibly long
+/// to show up elsewhere.
+pub const DEFAULT_PRESENCE_INTERVAL: u64 = 60;
+/// The shortest presence interval that is not an accident.
+///
+/// A round is one request to every peer at once, so the cost is the tailnet's
+/// size divided by this. Five seconds is already fast enough that nobody would
+/// choose it on purpose; below that the value is almost certainly a typo.
+pub const MIN_PRESENCE_INTERVAL: u64 = 5;
 
 /// Everything `config.toml` can say.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +59,12 @@ pub struct Config {
     pub max_attachment_bytes: u64,
     /// Attachments at or below this size ship with the message.
     pub inline_max_bytes: u64,
+    /// Seconds between presence rounds (SPEC §5.5).
+    ///
+    /// A peer counts as online while its last hello is younger than two of
+    /// these, so this is also how long a node that went away keeps looking
+    /// present. Zero turns presence off entirely.
+    pub presence_interval: u64,
 }
 
 impl Default for Config {
@@ -60,6 +79,7 @@ impl Default for Config {
             prefetch: false,
             max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
             inline_max_bytes: DEFAULT_INLINE_MAX_BYTES,
+            presence_interval: DEFAULT_PRESENCE_INTERVAL,
         }
     }
 }
@@ -185,6 +205,11 @@ impl Config {
         {
             self.discovery = flag;
         }
+        if let Ok(seconds) = std::env::var("HIVEMIND_PRESENCE_INTERVAL")
+            && let Ok(seconds) = seconds.parse()
+        {
+            self.presence_interval = seconds;
+        }
         if let Ok(bytes) = std::env::var("HIVEMIND_MAX_ATTACHMENT_BYTES")
             && let Ok(bytes) = bytes.parse()
         {
@@ -227,6 +252,14 @@ impl Config {
                 value: self.local_port.to_string(),
                 expectation: "it must differ from peer_port; one listener is \
                               unauthenticated and the other is not",
+            });
+        }
+        if self.presence_interval > 0 && self.presence_interval < MIN_PRESENCE_INTERVAL {
+            return Err(ConfigError::Invalid {
+                key: "presence_interval",
+                value: self.presence_interval.to_string(),
+                expectation: "it must be 0, which is off, or at least \
+                              5 seconds; a round is one request to every peer",
             });
         }
         if self.inline_max_bytes > self.max_attachment_bytes {
@@ -294,6 +327,32 @@ mod tests {
         assert_eq!(strip("laptop.local"), "laptop");
         assert_eq!(strip("arch.lan"), "arch");
         assert_eq!(strip("plain"), "plain");
+    }
+
+    #[test]
+    fn presence_is_either_off_or_slow_enough_to_be_polite() {
+        // One request per peer per interval, to every peer at once. A second
+        // is a typo away from a minute on the keyboard, and a tailnet of
+        // twenty machines would then carry twelve hundred handshakes a minute
+        // for an answer nobody reads that often.
+        let mut config = Config {
+            presence_interval: 1,
+            ..Config::default()
+        };
+
+        let error = config.validate().expect_err("one second is not polite");
+        assert!(
+            error.to_string().contains("presence_interval"),
+            "it has to say which key: {error}"
+        );
+
+        config.presence_interval = 0;
+        config
+            .validate()
+            .expect("zero is not a fast interval; it is off");
+
+        config.presence_interval = MIN_PRESENCE_INTERVAL;
+        config.validate().expect("the floor itself is allowed");
     }
 
     #[test]
