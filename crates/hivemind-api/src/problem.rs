@@ -28,6 +28,9 @@ pub enum ProblemType {
     /// What was typed names more than one message, and guessing which is
     /// worse than asking again (SPEC §10).
     AmbiguousId,
+    /// The query string asked something that makes no sense — an unknown
+    /// parameter, or a value that is not one of the allowed ones (SPEC §7.1).
+    InvalidQuery,
     /// The message broke a limit in SPEC §4.1.
     InvalidMessage,
     /// The message was not addressed to anybody.
@@ -62,6 +65,7 @@ impl ProblemType {
         match self {
             Self::MessageNotFound => "message-not-found",
             Self::AmbiguousId => "ambiguous-id",
+            Self::InvalidQuery => "invalid-query",
             Self::InvalidMessage => "invalid-message",
             Self::NoRecipients => "no-recipients",
             Self::NotPaired => "not-paired",
@@ -83,6 +87,7 @@ impl ProblemType {
         match self {
             Self::MessageNotFound => "No such message",
             Self::AmbiguousId => "Id matches more than one message",
+            Self::InvalidQuery => "Query is not one this endpoint understands",
             Self::InvalidMessage => "Message is not acceptable",
             Self::NoRecipients => "Message has no recipients",
             Self::NotPaired => "Not paired",
@@ -117,7 +122,11 @@ impl ProblemType {
             Self::AlreadyInGroup => StatusCode::CONFLICT,
             // SPEC §6.2 names this status explicitly.
             Self::NotPaired => StatusCode::FORBIDDEN,
-            Self::IdentityMismatch | Self::BadSignature => StatusCode::BAD_REQUEST,
+            // 400 rather than 422: the request itself is malformed, which is
+            // what a caller who typed `mailbox=` instead of `box=` needs told.
+            Self::IdentityMismatch | Self::BadSignature | Self::InvalidQuery => {
+                StatusCode::BAD_REQUEST
+            }
             // Not this node's fault and not the caller's: the machine it
             // asked us to talk to did not answer.
             Self::PeerUnreachable => StatusCode::BAD_GATEWAY,
@@ -126,9 +135,10 @@ impl ProblemType {
     }
 
     /// Every slug, for the generated documentation.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::MessageNotFound,
         Self::AmbiguousId,
+        Self::InvalidQuery,
         Self::InvalidMessage,
         Self::NoRecipients,
         Self::NotPaired,

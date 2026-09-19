@@ -354,6 +354,7 @@ Rust enum so the documentation cannot drift from the code.
 |---|---|---|
 | `/problems/message-not-found` | No such message | 404 |
 | `/problems/ambiguous-id` | Id matches more than one message | 422 |
+| `/problems/invalid-query` | Query is not one this endpoint understands | 400 |
 | `/problems/invalid-message` | Message is not acceptable | 422 |
 | `/problems/no-recipients` | Message has no recipients | 422 |
 | `/problems/not-paired` | Not paired | 403 |
