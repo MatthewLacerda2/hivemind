@@ -25,9 +25,10 @@ use crate::problem::{Problem, ProblemType};
         local::list_peers,
         local::join_peer,
         local::refresh_peers,
-        local::trust_network,
-        local::confirm_pair,
         local::remove_peer,
+        local::group::status,
+        local::group::create,
+        local::group::join,
         local::list_messages,
         local::send_message,
         local::get_message,
@@ -42,6 +43,10 @@ use crate::problem::{Problem, ProblemType};
         local::PeerSummary,
         local::JoinRequest,
         local::Refreshed,
+        local::group::GroupSummary,
+        local::group::CreatedGroup,
+        local::group::CreateGroup,
+        local::group::JoinGroup,
         local::MessageSummary,
         local::MessageBody,
         local::Attachment,
@@ -52,7 +57,8 @@ use crate::problem::{Problem, ProblemType};
     )),
     tags(
         (name = "messages", description = "Reading and sending mail"),
-        (name = "peers", description = "Pairing and the address book"),
+        (name = "peers", description = "Members, nodes seen, and where they are"),
+        (name = "group", description = "The group this node is in (SPEC §6.2)"),
         (name = "node", description = "This node")
     )
 )]

@@ -2,8 +2,9 @@
 //!
 //! Authorisation lives here rather than in the TLS layer (ADR 0010).
 //! `/peer/v1/handshake` is open, because a node we have never met has to be
-//! able to introduce itself. Everything else requires a peer in `peers.toml`
-//! and answers `403 not_paired` otherwise, exactly as SPEC §6.2 specifies.
+//! able to prove it is in our group. Everything else requires a peer in
+//! `peers.toml` — one that has proved it — and answers `403 not_paired`
+//! otherwise (SPEC §6.2).
 
 use std::sync::Arc;
 
@@ -37,10 +38,24 @@ pub struct Handshake {
     pub callback_host: String,
     /// The port the sender's peer listener is on.
     pub callback_port: u16,
-    /// Reserved for gossiping peer lists in v2 (SPEC §12). Always `None` today,
-    /// and ignored on receipt.
+    /// Proof that the sender holds the group key (SPEC §6.2). Absent when it
+    /// is in no group, which the receiver refuses exactly as it refuses a
+    /// wrong one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof: Option<Proof>,
+    /// Reserved for the peer list (SPEC §5.4), which rides on the hello
+    /// (#51). Always `None` today, and ignored on receipt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gossip: Option<serde_json::Value>,
+}
+
+/// Proof of the group key, bound to both certificates (`docs/protocol.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Proof {
+    /// When it was made, in milliseconds since the Unix epoch.
+    pub sent_at: i64,
+    /// HMAC-SHA256, in lowercase hex.
+    pub mac: String,
 }
 
 /// What a delivery returns, so the sender can mark that recipient done.
@@ -70,11 +85,11 @@ pub fn router(state: Arc<MailService>) -> Router {
         .with_state(state)
 }
 
-/// Introduce ourselves, and record who introduced themselves to us.
+/// Admit a node that proves the group key, and prove it back.
 ///
-/// Open to anyone who can complete a TLS handshake (ADR 0010). It records a
-/// pending pair and returns our own details; it never reads or reveals anything
-/// about the mailbox.
+/// Open to anyone who can complete a TLS handshake (ADR 0010). A node that
+/// proves the key is pinned; one that does not is remembered as seen and
+/// refused. It never reads or reveals anything about the mailbox.
 async fn handshake(
     State(service): State<Arc<MailService>>,
     Extension(caller): Extension<CallerIdentity>,
@@ -95,8 +110,12 @@ async fn handshake(
 
     let addr = callback_address(&caller, &request);
 
-    service.record_pairing_offer(caller.node_id, &request, caller.certificate.clone(), addr)?;
-    Ok(Json(service.own_handshake()))
+    Ok(Json(service.answer_handshake(
+        caller.node_id,
+        &request,
+        &caller.certificate,
+        addr,
+    )?))
 }
 
 /// Accept one signed message from a paired peer.
@@ -117,11 +136,11 @@ async fn receive_message(
         message = %message.id
     );
     let _entered = span.enter();
-    // SPEC §6.2 step 3: until both sides confirm, mail is refused.
+    // SPEC §6.2: only a node that has proved the group key may send mail.
     if !service.is_paired(caller.node_id)? {
         return Err(Problem::new(
             ProblemType::NotPaired,
-            "this node has not paired with you; run `hivemind pair` on both sides",
+            "this node has not admitted you; are both machines in the same group?",
         ));
     }
 
@@ -342,7 +361,7 @@ fn paired_digest(
     if !service.is_paired(caller)? {
         return Err(Problem::new(
             ProblemType::NotPaired,
-            "this node has not paired with you; run `hivemind pair` on both sides",
+            "this node has not admitted you; are both machines in the same group?",
         ));
     }
     sha.parse().map_err(|_| {
@@ -354,8 +373,9 @@ fn paired_digest(
 }
 
 #[cfg(test)]
-#[path = "peer_blob_tests.rs"]
 mod blob_tests;
+#[cfg(test)]
+mod handshake_tests;
 
 #[cfg(test)]
 mod tests {
@@ -408,7 +428,7 @@ mod tests {
     }
 
     /// Send one request through the peer router as `who`.
-    async fn call(
+    pub(super) async fn call(
         service: &Arc<MailService>,
         who: &Identity,
         path: &str,
@@ -510,26 +530,68 @@ mod tests {
         serde_json::to_value(message).expect("serialise")
     }
 
-    /// Handshake as `friend` and confirm from this side.
-    pub(super) async fn pair_with(service: &Arc<MailService>, friend: &Identity) {
+    /// The group every test host and friend is in, unless a test says not.
+    pub(super) fn group_key() -> hivemind_core::group::GroupKey {
+        hivemind_core::group::GroupKey::from_bytes([42u8; 16])
+    }
+
+    /// Put `service` in the test group.
+    pub(super) fn join_group(service: &Arc<MailService>) {
+        service
+            .join_group(&group_key().code(), false)
+            .expect("join the test group");
+    }
+
+    /// `from`'s proof of `key`, made for `to`, as the wire carries it.
+    pub(super) fn proof(
+        from: &Identity,
+        to: &Identity,
+        key: &hivemind_core::group::GroupKey,
+    ) -> Proof {
+        let now = chrono::Utc::now().timestamp_millis();
+        Proof {
+            sent_at: now,
+            mac: data_encoding::HEXLOWER.encode(&key.prove(
+                from.certificate_der(),
+                to.certificate_der(),
+                now,
+            )),
+        }
+    }
+
+    /// A handshake from `from` to `to`, claiming `host:port`, proving `key`.
+    pub(super) fn offer(
+        from: &Identity,
+        to: &Identity,
+        host: &str,
+        port: u16,
+        key: Option<&hivemind_core::group::GroupKey>,
+    ) -> serde_json::Value {
+        serde_json::to_value(Handshake {
+            id: from.node_id().to_string(),
+            name: "theirs".to_owned(),
+            owner: Some("someone".to_owned()),
+            version: "0.1.0".to_owned(),
+            callback_host: host.to_owned(),
+            callback_port: port,
+            proof: key.map(|key| proof(from, to, key)),
+            gossip: None,
+        })
+        .expect("serialise")
+    }
+
+    /// Put `service` (which is `host`) in the test group, and have `friend`
+    /// prove the key to it. Nobody confirms anything: that is ADR 0013.
+    pub(super) async fn pair_with(service: &Arc<MailService>, host: &Identity, friend: &Identity) {
+        join_group(service);
         let (status, _) = call(
             service,
             friend,
             "/peer/v1/handshake",
-            &serde_json::to_value(Handshake {
-                id: friend.node_id().to_string(),
-                name: "friend".to_owned(),
-                owner: Some("friend".to_owned()),
-                version: "0.1.0".to_owned(),
-                callback_host: "127.0.0.1".to_owned(),
-                callback_port: 8400,
-                gossip: None,
-            })
-            .expect("serialise"),
+            &offer(friend, host, "127.0.0.1", 8400, Some(&group_key())),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        service.confirm_pair(friend.node_id()).expect("confirm");
     }
 
     /// A signed message from `from` carrying `files`, plus the parts to send.
@@ -584,7 +646,7 @@ mod tests {
         let host = identity(27);
         let friend = identity(28);
         let (_dir, service) = service(&host);
-        pair_with(&service, &friend).await;
+        pair_with(&service, &host, &friend).await;
 
         let (message, parts) =
             message_with_files(&friend, host.node_id(), &[("notes.md", b"the contents")]);
@@ -611,7 +673,7 @@ mod tests {
         let host = identity(29);
         let friend = identity(30);
         let (_dir, service) = service(&host);
-        pair_with(&service, &friend).await;
+        pair_with(&service, &host, &friend).await;
 
         let message = message_from(&friend, host.node_id(), "nothing attached");
         let smuggled = hivemind_core::crypto::Sha256Digest::of(b"not declared");
@@ -640,7 +702,7 @@ mod tests {
         let host = identity(31);
         let friend = identity(32);
         let (_dir, service) = service(&host);
-        pair_with(&service, &friend).await;
+        pair_with(&service, &host, &friend).await;
 
         let (message, parts) =
             message_with_files(&friend, host.node_id(), &[("notes.md", b"the real thing")]);
@@ -662,7 +724,7 @@ mod tests {
         let host = identity(33);
         let friend = identity(34);
         let (_dir, service) = service(&host);
-        pair_with(&service, &friend).await;
+        pair_with(&service, &host, &friend).await;
 
         let big = vec![
             b'x';
@@ -682,7 +744,7 @@ mod tests {
         let host = identity(35);
         let friend = identity(36);
         let (_dir, service) = service(&host);
-        pair_with(&service, &friend).await;
+        pair_with(&service, &host, &friend).await;
 
         let router = router(Arc::clone(&service)).layer(Extension(caller(&friend)));
         let request = Request::builder()
@@ -703,7 +765,7 @@ mod tests {
         let host = identity(13);
         let friend = identity(14);
         let (_dir, service) = service(&host);
-        pair_with(&service, &friend).await;
+        pair_with(&service, &host, &friend).await;
 
         let message = message_from(&friend, host.node_id(), "say it twice");
         let id: ulid::Ulid = message["id"]
@@ -759,26 +821,7 @@ mod tests {
         let host = identity(3);
         let friend = identity(4);
         let (_dir, service) = service(&host);
-
-        // Pair, exactly as a handshake followed by a confirmation would.
-        let (status, _) = call(
-            &service,
-            &friend,
-            "/peer/v1/handshake",
-            &serde_json::to_value(Handshake {
-                id: friend.node_id().to_string(),
-                name: "friend".to_owned(),
-                owner: Some("friend".to_owned()),
-                version: "0.1.0".to_owned(),
-                callback_host: "127.0.0.1".to_owned(),
-                callback_port: 8400,
-                gossip: None,
-            })
-            .expect("serialise"),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        service.confirm_pair(friend.node_id()).expect("confirm");
+        pair_with(&service, &host, &friend).await;
 
         let message = message_from(&friend, host.node_id(), "hello");
         let (status, body) = deliver(&service, &friend, &message, &[]).await;
@@ -795,24 +838,7 @@ mod tests {
         let friend = identity(6);
         let third_party = identity(7);
         let (_dir, service) = service(&host);
-
-        call(
-            &service,
-            &friend,
-            "/peer/v1/handshake",
-            &serde_json::to_value(Handshake {
-                id: friend.node_id().to_string(),
-                name: "friend".to_owned(),
-                owner: None,
-                version: "0.1.0".to_owned(),
-                callback_host: "127.0.0.1".to_owned(),
-                callback_port: 8400,
-                gossip: None,
-            })
-            .expect("serialise"),
-        )
-        .await;
-        service.confirm_pair(friend.node_id()).expect("confirm");
+        pair_with(&service, &host, &friend).await;
 
         let forged = message_from(&third_party, host.node_id(), "not mine");
         let (status, problem) = deliver(&service, &friend, &forged, &[]).await;
@@ -820,179 +846,5 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(problem["type"], "/problems/identity-mismatch");
         assert_eq!(service.unread_count().expect("count"), 0);
-    }
-
-    #[tokio::test]
-    async fn a_handshake_whose_body_disagrees_with_its_certificate_is_refused() {
-        let host = identity(8);
-        let caller_id = identity(9);
-        let someone_else = identity(10);
-        let (_dir, service) = service(&host);
-
-        let (status, problem) = call(
-            &service,
-            &caller_id,
-            "/peer/v1/handshake",
-            &serde_json::to_value(Handshake {
-                // Claims to be someone else.
-                id: someone_else.node_id().to_string(),
-                name: "liar".to_owned(),
-                owner: None,
-                version: "0.1.0".to_owned(),
-                callback_host: "127.0.0.1".to_owned(),
-                callback_port: 8400,
-                gossip: None,
-            })
-            .expect("serialise"),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(problem["type"], "/problems/identity-mismatch");
-        assert!(
-            service.pending_pairs().expect("pending").is_empty(),
-            "a node that misdescribes itself should not be recorded at all"
-        );
-    }
-
-    /// A handshake claiming `host:port`, arriving from `remote`.
-    fn offer(id: &Identity, host: &str, port: u16) -> serde_json::Value {
-        serde_json::to_value(Handshake {
-            id: id.node_id().to_string(),
-            name: "theirs".to_owned(),
-            owner: None,
-            version: "0.1.0".to_owned(),
-            callback_host: host.to_owned(),
-            callback_port: port,
-            gossip: None,
-        })
-        .expect("serialise")
-    }
-
-    #[tokio::test]
-    async fn a_peer_that_claims_loopback_from_elsewhere_is_not_believed() {
-        // #23. Every daemon claimed `127.0.0.1`, so every peer learned its own
-        // loopback as the way to reach the other one and then delivered to
-        // itself. The socket knows where the connection came from; the claim
-        // is only an opinion.
-        let host = identity(40);
-        let stranger = identity(41);
-        let (_dir, service) = service(&host);
-
-        let router = router(Arc::clone(&service))
-            .layer(Extension(caller_from(&stranger, "100.64.0.7:51234")));
-        let request = Request::builder()
-            .method("POST")
-            .uri("/peer/v1/handshake")
-            .header("content-type", "application/json")
-            .body(Body::from(offer(&stranger, "127.0.0.1", 8400).to_string()))
-            .expect("request");
-        let response = router.oneshot(request).await.expect("response");
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let pending = service.pending_pairs().expect("pending");
-        assert_eq!(
-            pending[0].addr.authority(),
-            "100.64.0.7:8400",
-            "the address seen, with the port claimed — a source port is ephemeral"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_peer_genuinely_on_this_machine_keeps_its_loopback() {
-        // Where `127.0.0.1` is true it stays true. This is the case every
-        // integration test exercises, which is why #23 survived until two real
-        // machines met.
-        let host = identity(42);
-        let neighbour = identity(43);
-        let (_dir, service) = service(&host);
-
-        let router = router(Arc::clone(&service))
-            .layer(Extension(caller_from(&neighbour, "127.0.0.1:51234")));
-        let request = Request::builder()
-            .method("POST")
-            .uri("/peer/v1/handshake")
-            .header("content-type", "application/json")
-            .body(Body::from(offer(&neighbour, "127.0.0.1", 9000).to_string()))
-            .expect("request");
-        router.oneshot(request).await.expect("response");
-
-        assert_eq!(
-            service.pending_pairs().expect("pending")[0]
-                .addr
-                .authority(),
-            "127.0.0.1:9000"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_hostname_is_kept_because_it_may_resolve_where_we_cannot_see() {
-        // A MagicDNS name is more useful than the IP behind it — it survives
-        // the peer moving — so a non-IP claim is kept when the connection did
-        // not come from loopback.
-        let host = identity(44);
-        let friend = identity(45);
-        let (_dir, service) = service(&host);
-
-        let router =
-            router(Arc::clone(&service)).layer(Extension(caller_from(&friend, "100.64.0.9:51234")));
-        let request = Request::builder()
-            .method("POST")
-            .uri("/peer/v1/handshake")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                offer(&friend, "laptop.tail1234.ts.net", 8400).to_string(),
-            ))
-            .expect("request");
-        router.oneshot(request).await.expect("response");
-
-        assert_eq!(
-            service.pending_pairs().expect("pending")[0]
-                .addr
-                .authority(),
-            "laptop.tail1234.ts.net:8400"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_handshake_from_a_stranger_is_recorded_as_pending_not_paired() {
-        let host = identity(11);
-        let stranger = identity(12);
-        let (_dir, service) = service(&host);
-
-        let (status, answer) = call(
-            &service,
-            &stranger,
-            "/peer/v1/handshake",
-            &serde_json::to_value(Handshake {
-                id: stranger.node_id().to_string(),
-                name: "stranger".to_owned(),
-                owner: Some("someone".to_owned()),
-                version: "0.1.0".to_owned(),
-                callback_host: "10.0.0.7".to_owned(),
-                callback_port: 9000,
-                gossip: None,
-            })
-            .expect("serialise"),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(answer["id"], host.node_id().to_string());
-        assert!(
-            !service.is_paired(stranger.node_id()).expect("is_paired"),
-            "a handshake is an introduction, not an agreement"
-        );
-
-        let pending = service.pending_pairs().expect("pending");
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].id, stranger.node_id());
-        assert_eq!(
-            pending[0].addr.authority(),
-            "10.0.0.2:9000",
-            "the address the connection came from, with the port it claimed — \
-             this used to record the claimed host, and every daemon claimed \
-             its own loopback (#23)"
-        );
     }
 }

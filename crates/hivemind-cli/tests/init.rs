@@ -51,7 +51,9 @@ fn init_creates_everything_a_node_needs() {
     assert!(text.contains("reachable at"), "the addresses: {text}");
 
     // And what to do next, since somebody who will not read docs just ran it.
-    assert!(text.contains("hivemind join"), "next steps: {text}");
+    // Since ADR 0013 that is the group: make one, or paste somebody's code.
+    assert!(text.contains("hivemind group create"), "next steps: {text}");
+    assert!(text.contains("hivemind pair <code>"), "next steps: {text}");
 }
 
 #[test]

@@ -124,9 +124,9 @@ the network, not just the one you were talking to.
 {}
 ```
 
-An empty list means nothing is paired yet, so `send` can only reach this
-machine. Pairing is a one-time fingerprint confirmation on both sides
-(SPEC §6.2).
+An empty list means no other member of the group has been met yet, so `send`
+can only reach this machine. A machine joins the group once, with
+`hivemind pair <code>` (SPEC §6.2); after that its members meet by themselves.
 
 ### Attachments
 

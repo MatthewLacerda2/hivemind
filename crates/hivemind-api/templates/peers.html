@@ -7,35 +7,21 @@
   <p class="problem" role="alert">{{ problem }}</p>
 {% endif %}
 
-{% if !pending.is_empty() %}
+{% if !in_group %}
 <section class="pending">
-  <h2>Waiting for you</h2>
+  <h2>Not in a group yet</h2>
   <p class="help">
-    Check the fingerprint against what the other machine shows before confirming.
-    Nothing is trusted until both sides have.
+    This machine can reach nobody until it is in a group. On the first machine,
+    run <code>hivemind group create</code>; on every other one, paste the code it
+    prints into <code>hivemind pair &lt;code&gt;</code>.
   </p>
-  <ul class="peers">
-  {% for peer in pending %}
-    <li>
-      <h3>{{ peer.name }}</h3>
-      <p class="meta">
-        {% if let Some(owner) = peer.owner %}<span class="who">{{ owner }}</span>{% endif %}
-        <span class="addr">{{ peer.addr }}</span>
-      </p>
-      <p class="fingerprint"><code>{{ peer.id }}</code></p>
-      <form method="post" action="/peers/{{ peer.id }}/pair">
-        <button type="submit">Confirm {{ peer.short_id }}</button>
-      </form>
-    </li>
-  {% endfor %}
-  </ul>
 </section>
 {% endif %}
 
 <section>
-  <h2>Paired</h2>
+  <h2>In the group</h2>
   {% if paired.is_empty() %}
-    <p class="empty">Nobody yet. Run <code>hivemind join &lt;host&gt;</code> to meet a machine.</p>
+    <p class="empty">Nobody yet. Machines in the same group find each other on the LAN; for anything further, contact one by address below.</p>
   {% else %}
     <ul class="peers">
     {% for peer in paired %}
@@ -55,6 +41,35 @@
     </ul>
   {% endif %}
 </section>
+
+{% if !seen.is_empty() %}
+<section>
+  <h2>Seen, not in the group</h2>
+  <p class="help">
+    These answered but could not prove this group's key. If one should be in
+    it, give that machine the code.
+  </p>
+  <ul class="peers">
+  {% for peer in seen %}
+    <li>
+      <h3>{{ peer.name }}</h3>
+      <p class="meta">
+        {% if let Some(owner) = peer.owner %}<span class="who">{{ owner }}</span>{% endif %}
+        <span class="addr">{{ peer.addr }}</span>
+        {% if let Some(when) = peer.last_seen %}<time>seen {{ when }}</time>{% endif %}
+      </p>
+      <p class="fingerprint"><code>{{ peer.id }}</code></p>
+    </li>
+  {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+<form method="post" action="/peers/join">
+  <label for="host">Contact a machine by address</label>
+  <input id="host" name="host" placeholder="laptop.local or 100.64.0.2:8400" required>
+  <button type="submit">Contact</button>
+</form>
 
 <form method="post" action="/peers/refresh">
   <button type="submit">Look for peers now</button>

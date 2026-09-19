@@ -23,6 +23,8 @@ use utoipa::{IntoParams, ToSchema};
 use crate::problem::Problem;
 use crate::service::{Draft, MailService};
 
+pub mod group;
+
 /// Shared state for the loopback router.
 pub type AppState = Arc<MailService>;
 
@@ -47,8 +49,11 @@ pub struct Me {
     pub peer_port: u16,
     /// How many peers are paired.
     pub peers: usize,
-    /// How many introductions are waiting for a confirmation (SPEC §6.2).
-    pub pending_pairs: usize,
+    /// Whether this node is in a group at all (SPEC §6.2). Without one it
+    /// can reach nobody.
+    pub in_group: bool,
+    /// How many nodes have been seen that are not in this node's group.
+    pub seen: usize,
     /// How many messages are still on their way out.
     pub outbox: usize,
 }
@@ -66,10 +71,10 @@ pub struct PeerSummary {
     pub owner: Option<String>,
     /// Where it can be reached, best guess first.
     pub addrs: Vec<String>,
-    /// Whether mail will actually flow, or it is still waiting on a
-    /// confirmation from one side or the other (SPEC §6.2).
+    /// Whether it has proved the group key, so mail flows (SPEC §6.2), or was
+    /// only seen.
     pub paired: bool,
-    /// When this side confirmed. `null` while still pending.
+    /// When it proved the key to this node. `null` for a node only seen.
     pub paired_at: Option<String>,
     /// When we last heard from it.
     pub last_seen: Option<String>,
@@ -94,18 +99,28 @@ impl From<hivemind_core::peerbook::Peer> for PeerSummary {
     }
 }
 
-impl From<hivemind_core::peerbook::PendingPair> for PeerSummary {
-    fn from(pending: hivemind_core::peerbook::PendingPair) -> Self {
+impl From<crate::service::SeenNode> for PeerSummary {
+    fn from(seen: crate::service::SeenNode) -> Self {
         Self {
-            id: pending.id.to_string(),
-            short_id: pending.id.short(),
-            addrs: vec![pending.addr.authority()],
+            id: seen.id.to_string(),
+            short_id: seen.id.short(),
+            // A node that refused our handshake said nothing but its
+            // certificate; where it was is the best name there is.
+            name: seen.name.unwrap_or_else(|| seen.addr.host.clone()),
+            addrs: vec![seen.addr.authority()],
             paired: false,
-            // Not paired from this side, whatever the other side has done.
             paired_at: None,
-            last_seen: Some(pending.first_seen.to_rfc3339()),
-            name: pending.name,
-            owner: pending.owner,
+            last_seen: Some(seen.last_seen.to_rfc3339()),
+            owner: seen.owner,
+        }
+    }
+}
+
+impl From<crate::service::Met> for PeerSummary {
+    fn from(met: crate::service::Met) -> Self {
+        match met {
+            crate::service::Met::Member(peer) => peer.into(),
+            crate::service::Met::Stranger(seen) => seen.into(),
         }
     }
 }
@@ -113,11 +128,11 @@ impl From<hivemind_core::peerbook::PendingPair> for PeerSummary {
 /// What a discovery run turned up.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct Refreshed {
-    /// How many nodes answered and were greeted.
+    /// How many nodes answered, members or not.
     pub found: usize,
 }
 
-/// Where to look for a node to introduce ourselves to.
+/// Where to look for a node discovery cannot find.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct JoinRequest {
     /// A hostname or address, with an optional `:port`.
@@ -340,9 +355,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/peers", get(list_peers))
         .route("/api/v1/peers/join", post(join_peer))
         .route("/api/v1/peers/refresh", post(refresh_peers))
-        .route("/api/v1/peers/trust-network", post(trust_network))
         .route("/api/v1/peers/{id}", axum::routing::delete(remove_peer))
-        .route("/api/v1/peers/{id}/pair", post(confirm_pair))
+        .route("/api/v1/group", get(group::status))
+        .route("/api/v1/group/create", post(group::create))
+        .route("/api/v1/group/join", post(group::join))
         .route("/api/v1/messages", get(list_messages).post(send_message))
         .route("/api/v1/messages/{id}", get(get_message))
         .route("/api/v1/messages/{id}/reply", post(reply_to_message))
@@ -381,7 +397,8 @@ pub(crate) async fn me(State(service): State<AppState>) -> Result<Json<Me>, Prob
         owner: service.owner().map(ToOwned::to_owned),
         peer_port: service.peer_port(),
         peers: service.paired_peers()?.len(),
-        pending_pairs: service.pending_pairs()?.len(),
+        in_group: service.in_group()?,
+        seen: service.seen_nodes()?.len(),
         outbox: service.pending_outbound()?.len(),
     }))
 }
@@ -463,14 +480,15 @@ pub(crate) async fn get_attachment(
 pub(crate) async fn list_peers(
     State(service): State<AppState>,
 ) -> Result<Json<Vec<PeerSummary>>, Problem> {
-    // Paired and merely-seen in one list, because "who can I mail?" and "who
-    // is waiting on me?" are the same question asked at different moments.
+    // Members and merely-seen in one list, because "who can I mail?" and "why
+    // can I not mail that machine?" are the same question asked at different
+    // moments.
     let mut peers: Vec<PeerSummary> = service
         .paired_peers()?
         .into_iter()
         .map(PeerSummary::from)
         .collect();
-    peers.extend(service.pending_pairs()?.into_iter().map(PeerSummary::from));
+    peers.extend(service.seen_nodes()?.into_iter().map(PeerSummary::from));
 
     Ok(Json(peers))
 }
@@ -489,8 +507,7 @@ pub(crate) async fn join_peer(
     State(service): State<AppState>,
     Json(request): Json<JoinRequest>,
 ) -> Result<Json<PeerSummary>, Problem> {
-    let pending = service.join(&request.host).await?;
-    Ok(Json(PeerSummary::from(pending)))
+    Ok(Json(PeerSummary::from(service.join(&request.host).await?)))
 }
 
 #[utoipa::path(
@@ -504,37 +521,6 @@ pub(crate) async fn refresh_peers(
     Ok(Json(Refreshed {
         found: service.refresh_peers().await?,
     }))
-}
-
-#[utoipa::path(
-    post, path = "/api/v1/peers/trust-network",
-    responses((status = 200, body = Vec<PeerSummary>), (status = 500, body = Problem)),
-    tag = "peers"
-)]
-pub(crate) async fn trust_network(
-    State(service): State<AppState>,
-) -> Result<Json<Vec<PeerSummary>>, Problem> {
-    Ok(Json(
-        service
-            .confirm_all_discovered()?
-            .into_iter()
-            .map(PeerSummary::from)
-            .collect(),
-    ))
-}
-
-#[utoipa::path(
-    post, path = "/api/v1/peers/{id}/pair",
-    params(("id" = String, Path, description = "The peer's full or short id")),
-    responses((status = 200, body = PeerSummary), (status = 403, body = Problem)),
-    tag = "peers"
-)]
-pub(crate) async fn confirm_pair(
-    State(service): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<PeerSummary>, Problem> {
-    let peer = service.confirm_pair(service.resolve_peer(&id)?)?;
-    Ok(Json(PeerSummary::from(peer)))
 }
 
 #[utoipa::path(

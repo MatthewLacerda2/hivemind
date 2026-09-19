@@ -1024,6 +1024,7 @@ dependencies = [
  "async-stream",
  "axum",
  "chrono",
+ "data-encoding",
  "futures-core",
  "hivemind-core",
  "hivemind-net",

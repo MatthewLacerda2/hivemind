@@ -2,8 +2,8 @@
 //!
 //! Its own file because `peer.rs` grew past the test-size gate, and because
 //! serving bytes with resume is a different concern from introducing two nodes
-//! to each other. Included from `peer.rs` with `#[path]` so the tests still
-//! reach the private handlers they are about.
+//! to each other. A child of `peer`, so the tests still reach the private
+//! handlers they are about.
 
 use hivemind_core::identity::Identity;
 
@@ -59,7 +59,7 @@ async fn a_paired_peer_can_fetch_a_whole_blob() {
     let host = identity(15);
     let friend = identity(16);
     let (_dir, service) = service(&host);
-    pair_with(&service, &friend).await;
+    pair_with(&service, &host, &friend).await;
 
     let digest = service.blobs().put_bytes(b"attachment bytes").expect("put");
 
@@ -78,7 +78,7 @@ async fn an_interrupted_transfer_resumes_from_where_it_stopped() {
     let host = identity(17);
     let friend = identity(18);
     let (_dir, service) = service(&host);
-    pair_with(&service, &friend).await;
+    pair_with(&service, &host, &friend).await;
 
     let content = b"0123456789abcdef";
     let digest = service.blobs().put_bytes(content).expect("put");
@@ -108,7 +108,7 @@ async fn resuming_past_the_end_says_so_rather_than_hanging() {
     let host = identity(19);
     let friend = identity(20);
     let (_dir, service) = service(&host);
-    pair_with(&service, &friend).await;
+    pair_with(&service, &host, &friend).await;
 
     let digest = service.blobs().put_bytes(b"short").expect("put");
 
@@ -133,7 +133,7 @@ async fn asking_whether_a_blob_is_still_there_does_not_send_it() {
     let host = identity(21);
     let friend = identity(22);
     let (_dir, service) = service(&host);
-    pair_with(&service, &friend).await;
+    pair_with(&service, &host, &friend).await;
 
     let digest = service.blobs().put_bytes(b"still here").expect("put");
 
@@ -175,7 +175,7 @@ async fn a_digest_that_is_not_a_digest_cannot_name_a_file() {
     let host = identity(25);
     let friend = identity(26);
     let (_dir, service) = service(&host);
-    pair_with(&service, &friend).await;
+    pair_with(&service, &host, &friend).await;
 
     for attempt in ["..", "not-hex", "%2e%2e%2fpeers.toml"] {
         let (status, _, _) = fetch(&service, &friend, "GET", attempt, None).await;

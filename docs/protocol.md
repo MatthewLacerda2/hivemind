@@ -1,19 +1,19 @@
 # Wire protocol
 
-The canonical message encoding below is **normative and frozen**. Everything
-else on this page is a stub until the router lands later in M1.
+The canonical message encoding and the group proof below are **normative and
+frozen**.
 
 ## Listeners
 
 | Listener | Bind | Auth | Purpose |
 |---|---|---|---|
-| peer | `0.0.0.0:8400` | mutual TLS, peer must be paired | daemon ↔ daemon delivery, blob transfer, handshake |
+| peer | `0.0.0.0:8400` | mutual TLS, peer must have proved the group key | daemon ↔ daemon delivery, blob transfer, handshake |
 | local | `127.0.0.1:8401` | none (loopback only) | humans, CLI, web UI, MCP |
 
 ## Peer endpoints
 
 ```
-POST /peer/v1/handshake        exchange name/owner/version/id; reserved `gossip` field
+POST /peer/v1/handshake        exchange name/owner/version/id + proof of the group key
 POST /peer/v1/messages         deliver one signed message (+ inline blobs as multipart); idempotent on id
 HEAD /peer/v1/blobs/{sha}      does the sender still have it
 GET  /peer/v1/blobs/{sha}      range requests supported (resume)
@@ -34,19 +34,35 @@ rather than resolved in either direction.
   "owner": "matheus",
   "version": "0.1.0",
   "callback_host": "10.0.0.5",
-  "callback_port": 8400
+  "callback_port": 8400,
+  "proof": { "sent_at": 1750000000000, "mac": "9631…781f" }
 }
 ```
 
 `callback_host` and `callback_port` are where the sender can be reached. The
-receiver records them rather than guessing which of its own interfaces the
-connection arrived through. A `gossip` field is reserved for v2 (SPEC §12); it
-is never sent today and is ignored on receipt.
+receiver records the port, and the host only where the connection's own source
+address does not contradict it (#23).
+
+`proof` is the sender's proof of the group key, made for the receiver's
+certificate — see [Group proof](#group-proof). It is absent when the sender is
+in no group. The receiver checks it against the certificate the connection
+presented:
+
+- **It verifies** → the receiver pins the sender's certificate in `peers.toml`
+  and answers `200` with its own handshake, whose `proof` is made for the
+  sender. The sender checks that one the same way and pins the receiver. Both
+  are now peers; nobody was asked anything (ADR 0013).
+- **It is missing or does not verify**, or the receiver is in no group → `403
+  not_paired`, with a `detail` saying which. The receiver remembers the sender
+  as *seen*, in memory, so `hivemind peers` can show it.
+
+A `gossip` field is reserved for the peer list, which rides on the hello (#51);
+it is never sent today and is ignored on receipt.
 
 The endpoint is open to anyone who completes a TLS handshake — see
 `decisions/0010-tls-admits-strangers-the-application-rejects-them.md`. It
-records a pending pair and reveals nothing about the mailbox. Everything else
-requires a paired peer and answers `403 not_paired`.
+reveals nothing about the mailbox. Everything else requires a peer that has
+proved the key, and answers `403 not_paired` otherwise.
 
 ### `POST /peer/v1/messages`
 
@@ -273,6 +289,8 @@ Rust enum so the documentation cannot drift from the code.
 | `/problems/invalid-message` | Message is not acceptable | 422 |
 | `/problems/no-recipients` | Message has no recipients | 422 |
 | `/problems/not-paired` | Not paired | 403 |
+| `/problems/already-in-group` | Already in a group | 409 |
+| `/problems/invalid-group-code` | Not a group code | 422 |
 | `/problems/identity-mismatch` | Identity does not match the certificate | 400 |
 | `/problems/bad-signature` | Signature does not verify | 400 |
 | `/problems/peer-unreachable` | Peer could not be reached | 502 |

@@ -305,14 +305,14 @@ fn mdns_check() -> Check {
                 Err(error) => Check::bad(
                     "mDNS",
                     format!("cannot join the mDNS group: {error}"),
-                    "discovery will not work; pair with `hivemind join <host>` instead",
+                    "discovery will not work; reach members with `hivemind join <host>` instead",
                 ),
             }
         }
         Err(error) => Check::bad(
             "mDNS",
             format!("cannot open a UDP socket: {error}"),
-            "discovery will not work; pair with `hivemind join <host>` instead",
+            "discovery will not work; reach members with `hivemind join <host>` instead",
         ),
     }
 }

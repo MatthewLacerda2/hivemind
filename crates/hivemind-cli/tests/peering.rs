@@ -148,11 +148,6 @@ impl Daemon {
         status["id"].as_str().expect("an id").to_owned()
     }
 
-    fn short_id(&self) -> String {
-        let status = json(&self.run(&["status", "--json"]));
-        status["short_id"].as_str().expect("a short id").to_owned()
-    }
-
     fn inbox(&self) -> serde_json::Value {
         json(&self.run(&["inbox", "--json"]))
     }
@@ -280,24 +275,41 @@ fn json(text: &str) -> serde_json::Value {
     serde_json::from_str(text).unwrap_or_else(|e| panic!("invalid json {text:?}: {e}"))
 }
 
-/// Introduce two daemons and confirm from both sides (SPEC §6.2).
+/// The group every test daemon is in unless a test says otherwise.
+const CODE: &str = "hm-aaaq-eaye-auda-ocaj-bifq-ydio-b4";
+
+/// Put two daemons in the same group and have one contact the other
+/// (SPEC §6.2). Pasting the code twice is harmless, which is what lets a
+/// daemon be paired with several others through this.
 fn pair(a: &Daemon, b: &Daemon) {
+    a.run(&["pair", CODE]);
+    b.run(&["pair", CODE]);
     a.run(&["join", &format!("127.0.0.1:{}", b.peer_port)]);
-    a.run(&["pair", &b.short_id(), "--yes"]);
-    b.run(&["pair", &a.short_id(), "--yes"]);
+}
+
+/// The code `hivemind group create` printed: its first line.
+fn created_code(output: &str) -> String {
+    output.lines().next().expect("a line").trim().to_owned()
 }
 
 #[test]
 fn two_daemons_pair_and_exchange_mail() {
+    // ADR 0013 end to end: one machine makes the group, the other pastes its
+    // code, one contacts the other — and both are peers, with nobody asked to
+    // confirm anything on either side.
     let alice = Daemon::start("alice");
     let bob = Daemon::start("bob");
 
-    pair(&alice, &bob);
+    let code = created_code(&alice.run(&["group", "create"]));
+    bob.run(&["pair", &code]);
+    bob.run(&["join", &format!("127.0.0.1:{}", alice.peer_port)]);
 
-    let peers = json(&alice.run(&["peers", "--json"]));
-    assert_eq!(peers.as_array().expect("array").len(), 1);
-    assert_eq!(peers[0]["paired"], true);
-    assert_eq!(peers[0]["name"], "bob");
+    for (daemon, other) in [(&alice, "bob"), (&bob, "alice")] {
+        let peers = json(&daemon.run(&["peers", "--json"]));
+        assert_eq!(peers.as_array().expect("array").len(), 1);
+        assert_eq!(peers[0]["paired"], true, "{other} should be a peer");
+        assert_eq!(peers[0]["name"], other);
+    }
 
     alice.run(&[
         "send",
@@ -318,67 +330,47 @@ fn two_daemons_pair_and_exchange_mail() {
 }
 
 #[test]
-fn mail_is_refused_until_both_sides_have_paired() {
-    // SPEC §6.2 step 3: one side confirming is not enough.
+fn a_machine_with_another_groups_code_is_seen_and_never_admitted() {
+    // The peer port is reachable by anyone (ADR 0010); being reachable is not
+    // being trusted. Both sides see the other, and neither can mail it.
     let alice = Daemon::start("alice");
-    let bob = Daemon::start("bob");
+    let stranger = Daemon::start("stranger");
+    alice.run(&["pair", CODE]);
+    stranger.run(&["group", "create"]);
 
-    alice.run(&["join", &format!("127.0.0.1:{}", bob.peer_port)]);
-    alice.run(&["pair", &bob.short_id(), "--yes"]);
-    // Bob has *not* paired.
+    let said = stranger.run(&["join", &format!("127.0.0.1:{}", alice.peer_port)]);
+    assert!(said.contains("not in this node's group"), "{said}");
 
-    alice.run(&[
-        "send",
-        &bob.node_id(),
-        "-s",
-        "too early",
-        "--",
-        "should not arrive",
-    ]);
-
-    // It should still be in the outbox, being refused with 403 not_paired,
-    // rather than delivered or dropped.
-    std::thread::sleep(Duration::from_secs(2));
-    let bobs_inbox = bob.inbox();
-    assert!(
-        bobs_inbox.as_array().expect("array").is_empty(),
-        "bob should have refused it: {bobs_inbox}"
-    );
-
-    let outbox = json(&alice.run(&["inbox", "--json"]));
-    assert!(
-        outbox.as_array().expect("array").is_empty(),
-        "alice's own inbox should be empty too"
-    );
-
-    // And once Bob does pair, the message that was already sent arrives —
-    // that is the whole point of the retry queue.
-    bob.run(&["pair", &alice.short_id(), "--yes"]);
-    bob.wait_for("too early");
+    for daemon in [&alice, &stranger] {
+        let peers = json(&daemon.run(&["peers", "--json"]));
+        assert_eq!(peers.as_array().expect("array").len(), 1);
+        assert_eq!(peers[0]["paired"], false, "seen, never admitted");
+    }
 }
 
 #[test]
-fn a_node_that_was_never_joined_cannot_send_us_mail() {
-    // The peer port is reachable by anyone (ADR 0010); being reachable is not
-    // being trusted.
+fn a_machine_in_no_group_is_told_so_and_can_then_join() {
     let alice = Daemon::start("alice");
-    let stranger = Daemon::start("stranger");
+    let bob = Daemon::start("bob");
+    alice.run(&["pair", CODE]);
 
-    stranger.run(&["join", &format!("127.0.0.1:{}", alice.peer_port)]);
-    // The stranger pairs from its side only, which is all it can do alone.
-    stranger.run(&["pair", &alice.short_id(), "--yes"]);
-    stranger.run(&["send", &alice.node_id(), "-s", "let me in", "--", "hello"]);
+    // Bob has no group yet: alice refuses him, and he remembers her as seen.
+    bob.run(&["join", &format!("127.0.0.1:{}", alice.peer_port)]);
+    assert_eq!(json(&bob.run(&["peers", "--json"]))[0]["paired"], false);
+    assert!(bob.run(&["group"]).contains("not in a group"));
 
-    std::thread::sleep(Duration::from_secs(2));
-    assert!(
-        alice.inbox().as_array().expect("array").is_empty(),
-        "alice never agreed to anything"
-    );
-
-    // Alice sees it as a pending offer, not as a peer.
-    let peers = json(&alice.run(&["peers", "--json"]));
-    assert_eq!(peers.as_array().expect("array").len(), 1);
-    assert_eq!(peers[0]["paired"], false);
+    // Pasting the code greets what was seen, so nothing more is needed: no
+    // second `join`, no confirmation on either side.
+    bob.run(&["pair", CODE]);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while json(&bob.run(&["peers", "--json"]))[0]["paired"] != true {
+        assert!(
+            Instant::now() < deadline,
+            "bob never met alice after pairing"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert_eq!(json(&alice.run(&["peers", "--json"]))[0]["paired"], true);
 }
 
 #[test]
@@ -405,7 +397,11 @@ fn everyone_reaches_every_paired_peer_and_nobody_else() {
         .iter()
         .map(|p| p["name"].as_str().expect("a name"))
         .collect();
-    assert_eq!(names, vec!["alice"], "there is no gossip in v1 (SPEC §5.4)");
+    assert_eq!(
+        names,
+        vec!["alice"],
+        "the peer list rides on the hello, which is #51; a handshake carries none"
+    );
 }
 
 #[test]

@@ -86,7 +86,7 @@ struct Attached {
     cached: bool,
 }
 
-/// One peer, paired or pending.
+/// One peer, a member or merely seen.
 struct PeerRow {
     id: String,
     short_id: String,
@@ -146,8 +146,9 @@ struct PeersPage {
     node_id: String,
     short_id: String,
     problem: Option<String>,
+    in_group: bool,
     paired: Vec<PeerRow>,
-    pending: Vec<PeerRow>,
+    seen: Vec<PeerRow>,
 }
 
 /// Build the web UI's routes.
@@ -159,7 +160,7 @@ pub fn router(state: Arc<MailService>) -> Router {
         .route("/thread/{id}/reply", post(reply))
         .route("/compose", get(compose).post(send))
         .route("/peers", get(peers))
-        .route("/peers/{id}/pair", post(confirm))
+        .route("/peers/join", post(join))
         .route("/peers/{id}/remove", post(forget))
         .route("/peers/refresh", post(refresh))
         .route("/assets/{file}", get(asset))
@@ -460,14 +461,28 @@ async fn peers(State(service): State<Arc<MailService>>) -> Response {
     peers_page(&service, None)
 }
 
-async fn confirm(
+/// The join-by-address form.
+#[derive(Debug, Deserialize)]
+struct JoinForm {
+    host: String,
+}
+
+async fn join(
     State(service): State<Arc<MailService>>,
-    Path(id): Path<String>,
-) -> Result<Response, Response> {
-    let node = service.resolve_peer(&id).map_err(render_error)?;
-    match service.confirm_pair(node) {
-        Ok(_) => Ok(Redirect::to("/peers").into_response()),
-        Err(error) => Ok(peers_page(&service, Some(error.to_string()))),
+    axum::Form(form): axum::Form<JoinForm>,
+) -> Response {
+    match service.join(form.host.trim()).await {
+        Ok(crate::service::Met::Member(_)) => Redirect::to("/peers").into_response(),
+        // Reached, but not a member. Saying so beats a redirect to a list
+        // that looks as though nothing happened.
+        Ok(crate::service::Met::Stranger(node)) => peers_page(
+            &service,
+            Some(format!(
+                "{} answered, but it is not in this node's group",
+                node.name.unwrap_or_else(|| form.host.clone())
+            )),
+        ),
+        Err(error) => peers_page(&service, Some(error.to_string())),
     }
 }
 
@@ -497,18 +512,19 @@ fn peers_page(service: &Arc<MailService>, problem: Option<String>) -> Response {
         node_id: chrome.node_id,
         short_id: chrome.short_id,
         problem,
+        in_group: service.in_group().unwrap_or(false),
         paired: peer_rows(service),
-        pending: service
-            .pending_pairs()
+        seen: service
+            .seen_nodes()
             .unwrap_or_default()
             .into_iter()
-            .map(|p| PeerRow {
-                id: p.id.to_string(),
-                short_id: p.id.short(),
-                name: p.name,
-                owner: p.owner,
-                addr: p.addr.authority(),
-                last_seen: None,
+            .map(|s| PeerRow {
+                id: s.id.to_string(),
+                short_id: s.id.short(),
+                name: s.name.unwrap_or_else(|| s.addr.host.clone()),
+                owner: s.owner,
+                addr: s.addr.authority(),
+                last_seen: Some(relative(s.last_seen)),
             })
             .collect(),
     })
@@ -866,6 +882,47 @@ mod tests {
             assert!(html.contains("<main id=\"main\">"), "{path} needs a main");
             assert!(html.contains("lang=\"en\""), "{path} needs a language");
         }
+    }
+
+    #[tokio::test]
+    async fn the_peers_page_says_what_to_do_when_this_node_is_in_no_group() {
+        // Without a group this machine can reach nobody, which is the first
+        // thing somebody opening the page needs to know (ADR 0013).
+        let (_dir, router, service) = app();
+        let (_, html) = get(&router, "/peers").await;
+        assert!(html.contains("Not in a group yet"), "{html}");
+        assert!(html.contains("hivemind group create"));
+
+        service.create_group(false).expect("create");
+        let (_, html) = get(&router, "/peers").await;
+        assert!(!html.contains("Not in a group yet"));
+    }
+
+    #[tokio::test]
+    async fn a_node_seen_outside_the_group_is_listed_apart_from_members() {
+        let (_dir, router, service) = app();
+        service.record_seen(
+            NodeId::from_certificate_der(b"somebody else"),
+            Some("their-laptop".to_owned()),
+            None,
+            hivemind_core::peerbook::PeerAddr::manual("10.0.0.9", 8400),
+        );
+
+        let (_, html) = get(&router, "/peers").await;
+        let seen = html
+            .split("Seen, not in the group")
+            .nth(1)
+            .expect("a section for nodes only seen");
+        assert!(seen.contains("their-laptop"), "{html}");
+    }
+
+    #[tokio::test]
+    async fn contacting_an_address_that_does_not_answer_stays_on_the_page_and_says_so() {
+        // A redirect to the list would look as though it had worked.
+        let (_dir, router, _service) = app();
+        let (status, location) = post_form(&router, "/peers/join", "host=127.0.0.1%3A1").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(location, None, "no redirect when nothing was reached");
     }
 
     #[tokio::test]

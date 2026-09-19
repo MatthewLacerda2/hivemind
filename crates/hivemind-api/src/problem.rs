@@ -29,8 +29,13 @@ pub enum ProblemType {
     InvalidMessage,
     /// The message was not addressed to anybody.
     NoRecipients,
-    /// The caller is not paired with this node (SPEC §6.2).
+    /// The caller has not proved the group key to this node (SPEC §6.2).
     NotPaired,
+    /// This node is already in a group, and the request did not say to leave
+    /// it (SPEC §6.2).
+    AlreadyInGroup,
+    /// What was pasted is not a group code (SPEC §6.2).
+    InvalidGroupCode,
     /// What the caller claimed does not match the certificate it presented.
     IdentityMismatch,
     /// The message's signature did not verify.
@@ -56,6 +61,8 @@ impl ProblemType {
             Self::InvalidMessage => "invalid-message",
             Self::NoRecipients => "no-recipients",
             Self::NotPaired => "not-paired",
+            Self::AlreadyInGroup => "already-in-group",
+            Self::InvalidGroupCode => "invalid-group-code",
             Self::IdentityMismatch => "identity-mismatch",
             Self::BadSignature => "bad-signature",
             Self::PeerUnreachable => "peer-unreachable",
@@ -74,6 +81,8 @@ impl ProblemType {
             Self::InvalidMessage => "Message is not acceptable",
             Self::NoRecipients => "Message has no recipients",
             Self::NotPaired => "Not paired",
+            Self::AlreadyInGroup => "Already in a group",
+            Self::InvalidGroupCode => "Not a group code",
             Self::IdentityMismatch => "Identity does not match the certificate",
             Self::BadSignature => "Signature does not verify",
             Self::PeerUnreachable => "Peer could not be reached",
@@ -92,9 +101,12 @@ impl ProblemType {
             // 413 rather than 422: the request was well formed, it is the
             // thing it carries that is too big.
             Self::BlobTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
-            Self::UnsafeAttachmentName | Self::InvalidMessage | Self::NoRecipients => {
-                StatusCode::UNPROCESSABLE_ENTITY
-            }
+            Self::UnsafeAttachmentName
+            | Self::InvalidMessage
+            | Self::NoRecipients
+            | Self::InvalidGroupCode => StatusCode::UNPROCESSABLE_ENTITY,
+            // The request is fine; it conflicts with the group already held.
+            Self::AlreadyInGroup => StatusCode::CONFLICT,
             // SPEC §6.2 names this status explicitly.
             Self::NotPaired => StatusCode::FORBIDDEN,
             Self::IdentityMismatch | Self::BadSignature => StatusCode::BAD_REQUEST,
@@ -106,11 +118,13 @@ impl ProblemType {
     }
 
     /// Every slug, for the generated documentation.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 13] = [
         Self::MessageNotFound,
         Self::InvalidMessage,
         Self::NoRecipients,
         Self::NotPaired,
+        Self::AlreadyInGroup,
+        Self::InvalidGroupCode,
         Self::IdentityMismatch,
         Self::BadSignature,
         Self::PeerUnreachable,
@@ -170,7 +184,7 @@ impl From<ServiceError> for Problem {
             ServiceError::Invalid(_) => ProblemType::InvalidMessage,
             ServiceError::NoRecipients => ProblemType::NoRecipients,
             ServiceError::BadSignature => ProblemType::BadSignature,
-            ServiceError::NoSuchPeer { .. } => ProblemType::NotPaired,
+            ServiceError::NoSuchPeer { .. } | ServiceError::NotInGroup(_) => ProblemType::NotPaired,
             ServiceError::Peer(_) => ProblemType::PeerUnreachable,
             ServiceError::Blob(BlobError::NotFound { .. }) => ProblemType::BlobNotFound,
             ServiceError::Blob(BlobError::TooLarge { .. }) => ProblemType::BlobTooLarge,
@@ -181,10 +195,15 @@ impl From<ServiceError> for Problem {
                 ProblemType::Internal
             }
             ServiceError::IdentityMismatch(_) => ProblemType::IdentityMismatch,
+            ServiceError::AlreadyInGroup => ProblemType::AlreadyInGroup,
+            ServiceError::Group(hivemind_core::group::GroupError::InvalidCode) => {
+                ProblemType::InvalidGroupCode
+            }
             ServiceError::Store(_)
             | ServiceError::Index(_)
             | ServiceError::Canonical(_)
             | ServiceError::PeerBook(_)
+            | ServiceError::Group(_)
             | ServiceError::Unavailable => ProblemType::Internal,
         };
 

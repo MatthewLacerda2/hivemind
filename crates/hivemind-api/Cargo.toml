@@ -9,6 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+data-encoding.workspace = true
 hivemind-core.workspace = true
 include_dir.workspace = true
 hivemind-net.workspace = true

@@ -42,10 +42,11 @@ hooks, and prints your node name, fingerprint and addresses.
 > form stays wrong; [ADR 0012](docs/decisions/0012-the-name-is-taken.md) has
 > the two ways to get it back.
 
-On a LAN, other hivemind nodes appear by themselves over mDNS. On a tailnet,
-run `hivemind join <their-tailscale-ip>`. Either way you confirm each other's
-fingerprint once — like SSH's first connection — and then everything is
-automatic.
+One machine runs `hivemind group create` and prints a code; every other machine
+runs `hivemind pair <code>`. That is the whole of setup. Machines in the same
+group find each other on a LAN by themselves; on a tailnet, `hivemind join
+<their-tailscale-ip>` once. Nobody confirms anything by hand, and every member
+reaches every other.
 
 ## Why it exists
 
@@ -85,7 +86,7 @@ Claude knows whether it is reading something a person typed or something another
 Claude sent. Full tool reference: [docs/mcp.md](docs/mcp.md).
 
 The same mail is at `http://127.0.0.1:8401/` — inbox, threads, compose with
-drag-and-drop attachments, and pairing with the fingerprints shown side by side.
+drag-and-drop attachments, and who is in the group and who was only seen.
 It reads without JavaScript.
 
 ## Configuration
@@ -176,8 +177,10 @@ so it can be added without a migration. See SPEC.md §12.
 
 **What is the security model?** Every node has its own Ed25519 identity. Peers
 authenticate with mutual TLS pinned to a specific certificate fingerprint — no
-CA, no hostname trust. Pairing is trust-on-first-use, confirmed by hand on both
-sides, and an unpaired node cannot send you anything. Messages are signed
+CA, no hostname trust. Membership is knowing the group's key — 128 random bits,
+proved in the handshake and never sent — and a node outside the group cannot
+send you anything. The group is as trustworthy as its least careful member, so
+the code is shared like a password. Messages are signed
 independently of the transport, so a message on disk stays verifiable. The local
 API binds to loopback only and refuses to bind anywhere else. Details and the
 threat model: [SECURITY.md](SECURITY.md).
@@ -190,7 +193,7 @@ in CI.
 ## Being handed this and told to run it
 
 [`docs/using.md`](docs/using.md) is the whole of it — install, `hivemind init`,
-confirm a fingerprint with whoever sent you.
+and `hivemind pair` with the code whoever sent you has.
 
 An agent asked to do it has a skill for exactly that,
 `.claude/skills/run-hivemind/`, which it will find on its own. `CLAUDE.md` is
