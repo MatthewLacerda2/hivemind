@@ -7,13 +7,15 @@ and the first one in this repo's own merge loop.
 gate that starts with "first, `pip install`" is one that gets skipped.
 """
 
+import contextlib
+import io
 import pathlib
 import sys
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from mergeable import judge  # noqa: E402
+from mergeable import judge, main  # noqa: E402
 
 SHA = "1234567890abcdef"
 
@@ -134,6 +136,33 @@ class NotMergeable(unittest.TestCase):
         ok, why = judge(pull(isDraft=True), [run()], jobs())
         self.assertFalse(ok)
         self.assertIn("draft", why[0])
+
+
+class Arguments(unittest.TestCase):
+    """`just mergeable PR=12` was documented here from the first commit and
+    never worked: `PR` is a recipe parameter, so the whole string arrives as
+    its value. The number goes positionally (#48).
+    """
+
+    def refuse(self, arg: str) -> tuple[int, str]:
+        said = io.StringIO()
+        with contextlib.redirect_stderr(said):
+            code = main(["mergeable.py", arg])
+        return code, said.getvalue()
+
+    def test_a_pr_prefixed_argument_names_the_form_that_works(self):
+        code, said = self.refuse("PR=12")
+        self.assertEqual(code, 2)
+        self.assertIn("just mergeable 12", said)
+
+    def test_it_echoes_back_the_number_it_was_actually_given(self):
+        _, said = self.refuse("PR=4071")
+        self.assertIn("just mergeable 4071", said)
+
+    def test_an_ordinary_bad_argument_gets_the_ordinary_usage(self):
+        code, said = self.refuse("banana")
+        self.assertEqual(code, 2)
+        self.assertNotIn("just mergeable", said)
 
 
 if __name__ == "__main__":
