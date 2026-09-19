@@ -14,3 +14,7 @@
 /fuzz/corpus
 /fuzz/artifacts
 /fuzz/target
+# Python bytecode from `just scripts`. Regenerated on every run, and a
+# `.pyc` from one interpreter is noise to every other — two of them landed on
+# `main` in #56, one per Python version this machine had.
+__pycache__/
