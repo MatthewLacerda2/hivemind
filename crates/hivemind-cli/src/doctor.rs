@@ -11,6 +11,7 @@
 use std::fmt;
 use std::path::Path;
 
+use hivemind_core::config::{Config, Tailscale};
 use owo_colors::OwoColorize as _;
 
 /// How a check came out.
@@ -99,13 +100,18 @@ fn reachable(addr: &str) -> bool {
 }
 
 /// Everything `doctor` looks at.
-pub(crate) fn checks(home: &Path, api: &str, daemon: Option<&DaemonFacts>) -> Vec<Check> {
+pub(crate) fn checks(
+    home: &Path,
+    api: &str,
+    daemon: Option<&DaemonFacts>,
+    tailscale: Tailscale,
+) -> Vec<Check> {
     vec![
         daemon_check(api, daemon),
         peer_port_check(daemon),
         home_check(home),
         identity_check(home),
-        tailscale_check(),
+        tailscale_check(tailscale),
         claude_check(),
         hooks_check(),
         mdns_check(),
@@ -215,9 +221,9 @@ fn identity_check(home: &Path) -> Check {
     Check::good("identity", "keypair present and private")
 }
 
-fn tailscale_check() -> Check {
-    if !on_path("tailscale") {
-        return judge_tailscale(None);
+fn tailscale_check(mode: Tailscale) -> Check {
+    if mode == Tailscale::Off || !on_path("tailscale") {
+        return judge_tailscale(mode, None);
     }
 
     let output = std::process::Command::new("tailscale")
@@ -226,9 +232,9 @@ fn tailscale_check() -> Check {
 
     match output {
         Ok(output) if output.status.success() => {
-            judge_tailscale(Some(&String::from_utf8_lossy(&output.stdout)))
+            judge_tailscale(mode, Some(&String::from_utf8_lossy(&output.stdout)))
         }
-        _ => judge_tailscale(Some("")),
+        _ => judge_tailscale(mode, Some("")),
     }
 }
 
@@ -237,8 +243,28 @@ fn tailscale_check() -> Check {
 /// Split out from running the binary so both branches can be tested on a
 /// machine that happens to have Tailscale installed — which is most of the
 /// machines this will be written on, and none of the interesting case.
-fn judge_tailscale(status: Option<&str>) -> Check {
+fn judge_tailscale(mode: Tailscale, status: Option<&str>) -> Check {
+    if mode == Tailscale::Off {
+        // A deliberate setting, not a thing to fix. Said out loud all the
+        // same, because "why is hivemind not finding my tailnet" has exactly
+        // one answer and this is where somebody will look for it.
+        return Check::absent(
+            "tailscale",
+            "off in config.toml — hivemind will not look at your tailnet",
+        );
+    }
+
     let Some(status) = status else {
+        if mode.expects_it() {
+            // The one case worth complaining about: they asked for it by
+            // name. `auto` saying this would shout at every machine that
+            // simply has no Tailscale, which is most of them (SPEC §5.2).
+            return Check::bad(
+                "tailscale",
+                "tailscale = true in config.toml, but `tailscale` is not on PATH",
+                "install Tailscale, or set `tailscale = \"auto\"` to use it only when it is there",
+            );
+        }
         // SPEC §5.2: never required. Absent, not broken.
         return Check::absent("tailscale", "not installed — hivemind does not need it");
     };
@@ -247,9 +273,15 @@ fn judge_tailscale(status: Option<&str>) -> Check {
     if hosts.is_empty() {
         // Installed but not logged in, or logged in with nothing else on the
         // tailnet. Worth saying, not worth failing over.
-        Check::absent("tailscale", "installed, but no peers to try")
+        Check::absent(
+            "tailscale",
+            format!("{}, installed, but no peers to try", mode.as_str()),
+        )
     } else {
-        Check::good("tailscale", format!("up, {} addresses to try", hosts.len()))
+        Check::good(
+            "tailscale",
+            format!("{}, up, {} addresses to try", mode.as_str(), hosts.len()),
+        )
     }
 }
 
@@ -325,7 +357,11 @@ fn mdns_check() -> Check {
 pub(crate) async fn run(home: Option<&Path>, api: &str, json: bool) -> anyhow::Result<()> {
     let home = crate::paths::home(home)?;
     let daemon = ask_the_daemon(api).await;
-    let checks = checks(&home, api, daemon.as_ref());
+    // A configuration that will not load is its own check elsewhere; here the
+    // defaults are the right answer, because they are what the daemon would
+    // have refused to start with.
+    let config = Config::load(&home).unwrap_or_default();
+    let checks = checks(&home, api, daemon.as_ref(), config.tailscale);
 
     if json {
         let rows: Vec<serde_json::Value> = checks
@@ -435,18 +471,77 @@ mod tests {
         // would send somebody to fix a thing that is not broken. Driven
         // through the judgement rather than the machine, because whether this
         // laptop has Tailscale is not what is being tested.
-        assert_eq!(judge_tailscale(None).health, Health::Absent);
-        assert_eq!(judge_tailscale(Some("")).health, Health::Absent);
+        assert_eq!(
+            judge_tailscale(Tailscale::Auto, None).health,
+            Health::Absent
+        );
+        assert_eq!(
+            judge_tailscale(Tailscale::Auto, Some("")).health,
+            Health::Absent
+        );
         assert_eq!(judge_claude(false).health, Health::Absent);
 
         assert_eq!(judge_claude(true).health, Health::Good);
     }
 
     #[test]
+    fn asking_for_tailscale_by_name_and_not_having_it_is_worth_complaining_about() {
+        // The difference between the two modes that look for it. `auto` on a
+        // machine with no Tailscale is most machines and says nothing; `true`
+        // is somebody who asked for it, and silence there is the bug.
+        let check = judge_tailscale(Tailscale::On, None);
+
+        assert_eq!(check.health, Health::Bad);
+        assert!(
+            check.detail.contains("tailscale = true"),
+            "it has to name the setting they wrote: {check:?}"
+        );
+        let fix = check.fix.as_deref().unwrap_or_default();
+        assert!(
+            fix.contains("auto"),
+            "and the way out, which is usually `auto`: {fix}"
+        );
+    }
+
+    #[test]
+    fn turning_tailscale_off_is_reported_rather_than_hidden() {
+        // "Why is hivemind not finding my tailnet" has exactly one answer
+        // when somebody set this, and `doctor` is where they will look.
+        let check = judge_tailscale(Tailscale::Off, None);
+
+        assert_eq!(check.health, Health::Absent, "a setting, not a fault");
+        assert!(check.detail.contains("off"), "{check:?}");
+        assert!(check.detail.contains("config.toml"), "{check:?}");
+    }
+
+    #[test]
+    fn a_tailscale_that_is_off_is_never_run() {
+        // Not "run and ignored": somebody who wrote `false` should not have
+        // hivemind executing `tailscale` on their machine at all. Asserted
+        // through the check that shells out, with a status that would
+        // otherwise be reported as two addresses.
+        let check = tailscale_check(Tailscale::Off);
+        assert_eq!(check.health, Health::Absent);
+        assert!(check.detail.contains("off in config.toml"), "{check:?}");
+    }
+
+    #[test]
+    fn a_connected_tailscale_says_which_mode_it_is_in() {
+        // `doctor` is read when something is not working, and "is it even
+        // switched on" is the first question.
+        let status =
+            r#"{"Peer":{"k":{"DNSName":"a.ts.net.","TailscaleIPs":["100.64.0.2"],"Online":true}}}"#;
+        for mode in [Tailscale::Auto, Tailscale::On] {
+            let check = judge_tailscale(mode, Some(status));
+            assert!(check.detail.contains(mode.as_str()), "{mode:?}: {check:?}");
+        }
+    }
+
+    #[test]
     fn a_connected_tailscale_says_how_many_addresses_it_found() {
         let status =
             r#"{"Peer":{"k":{"DNSName":"a.ts.net.","TailscaleIPs":["100.64.0.2"],"Online":true}}}"#;
-        let check = judge_tailscale(Some(status));
+        let check = judge_tailscale(Tailscale::Auto, Some(status));
         assert_eq!(check.health, Health::Good);
         assert!(check.detail.contains('2'), "name and address: {check:?}");
     }
@@ -536,7 +631,12 @@ mod tests {
     #[test]
     fn every_broken_check_says_what_to_do_about_it() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let checks = checks(&dir.path().join("nothing-here"), "http://127.0.0.1:1", None);
+        let checks = checks(
+            &dir.path().join("nothing-here"),
+            "http://127.0.0.1:1",
+            None,
+            Tailscale::Auto,
+        );
 
         for check in &checks {
             if check.health == Health::Bad {

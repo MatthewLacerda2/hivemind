@@ -38,8 +38,13 @@ hivemind pair hm-xxxx-xxxx-xxxx-xxxx-xxxx-xxxx-xx
 
 That is all. Machines in the same group on a LAN find each other by themselves
 and become peers with nobody asked anything; every member reaches every other.
-On a tailnet, where there is no multicast to find anybody with, one side runs
-`hivemind join <their-tailscale-ip>` once.
+On a tailnet, where there is no multicast to find anybody with, each machine
+asks Tailscale who is up every thirty seconds and introduces itself — so that
+works by itself too, as long as `tailscale` is on your PATH. `hivemind join
+<their-tailscale-ip>` still works and is worth it when you do not want to wait
+for the next sweep. If you would rather hivemind never ran `tailscale`, set
+`tailscale = false` in `config.toml`; `hivemind doctor` says which mode you
+are in.
 
 **The code is the decision.** Anyone who has it can join, and a member can add
 any machine. Share it the way you would a password, and take one only from a

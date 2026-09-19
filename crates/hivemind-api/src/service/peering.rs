@@ -263,9 +263,36 @@ impl MailService {
     /// # Errors
     /// [`ServiceError::Unavailable`] if the address book is poisoned.
     pub async fn refresh_peers(&self) -> Result<usize, ServiceError> {
-        use hivemind_net::discovery::{Tailscale as _, hosts_from_status, probe};
+        self.refresh_peers_from(&hivemind_net::discovery::TailscaleCli)
+            .await
+    }
 
-        let status = hivemind_net::discovery::TailscaleCli.status_json();
+    /// `refresh_peers`, against a named source of `tailscale status --json`.
+    ///
+    /// The backend is a parameter for the reason the trait exists: a test
+    /// that used the real binary would pass on a machine with no Tailscale
+    /// *and* on one where the setting was ignored, which is no test at all.
+    /// That is the same shape `doctor`'s optional-tools rule had to be split
+    /// into, and it was found here the same way — by applying the mutation
+    /// and watching nothing fail.
+    ///
+    /// # Errors
+    /// [`ServiceError::Unavailable`] if the address book is poisoned.
+    pub async fn refresh_peers_from<T>(&self, backend: &T) -> Result<usize, ServiceError>
+    where
+        T: hivemind_net::discovery::Tailscale + Sync,
+    {
+        use hivemind_net::discovery::{hosts_from_status, probe};
+
+        // `tailscale = false` means the binary is never run, not that its
+        // answer is thrown away (SPEC §5.2). `hivemind peers refresh` is
+        // "now rather than in thirty seconds", never "despite the setting".
+        if !self.tailscale.wanted() {
+            tracing::debug!("tailscale discovery is off; not refreshing from it");
+            return Ok(0);
+        }
+
+        let status = backend.status_json();
         let hosts = match status {
             Ok(json) => hosts_from_status(&json),
             Err(reason) => {

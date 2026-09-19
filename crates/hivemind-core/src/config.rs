@@ -30,6 +30,95 @@ pub const DEFAULT_PRESENCE_INTERVAL: u64 = 60;
 /// choose it on purpose; below that the value is almost certainly a typo.
 pub const MIN_PRESENCE_INTERVAL: u64 = 5;
 
+/// Whether to use Tailscale as a discovery source (SPEC §5.2).
+///
+/// Three states rather than a boolean, because "I do not have Tailscale" and
+/// "I have it and do not want hivemind using it" are different answers and
+/// only one of them deserves to be mentioned by `doctor`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tailscale {
+    /// Use it if it is there, and say nothing if it is not.
+    ///
+    /// The default, and what makes discovery work on a tailnet without
+    /// anybody configuring anything. Tailscale is never required (SPEC §5.2),
+    /// so its absence under `auto` is not worth a word.
+    #[default]
+    Auto,
+    /// Expect it. `doctor` complains if it is missing or will not answer.
+    On,
+    /// Never touch it, however installed it is.
+    Off,
+}
+
+impl Tailscale {
+    /// Should discovery try Tailscale at all?
+    #[must_use]
+    pub fn wanted(self) -> bool {
+        matches!(self, Self::Auto | Self::On)
+    }
+
+    /// Should a missing binary be said out loud?
+    #[must_use]
+    pub fn expects_it(self) -> bool {
+        matches!(self, Self::On)
+    }
+
+    /// What `doctor` calls this mode.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+}
+
+impl std::str::FromStr for Tailscale {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            other => match parse_bool(other) {
+                Some(true) => Ok(Self::On),
+                Some(false) => Ok(Self::Off),
+                None => Err(()),
+            },
+        }
+    }
+}
+
+impl Serialize for Tailscale {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // Always as a string, including for on and off. `true` and `false`
+        // round-trip back through `FromStr`, and one spelling in the file is
+        // easier to explain than three.
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for Tailscale {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // `tailscale = true` and `tailscale = "auto"` are both things a person
+        // would write, and refusing either would be a papercut with no
+        // argument behind it.
+        let value = toml::Value::deserialize(deserializer)?;
+        match &value {
+            toml::Value::Boolean(true) => Ok(Self::On),
+            toml::Value::Boolean(false) => Ok(Self::Off),
+            toml::Value::String(text) => text.parse().map_err(|()| {
+                serde::de::Error::custom(format!(
+                    "`{text}` is not a Tailscale mode; use \"auto\", true or false"
+                ))
+            }),
+            other => Err(serde::de::Error::custom(format!(
+                "a Tailscale mode is \"auto\", true or false, not {other}"
+            ))),
+        }
+    }
+}
+
 /// Everything `config.toml` can say.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -59,6 +148,12 @@ pub struct Config {
     pub max_attachment_bytes: u64,
     /// Attachments at or below this size ship with the message.
     pub inline_max_bytes: u64,
+    /// Whether to find peers through Tailscale (SPEC §5.2).
+    ///
+    /// `auto` uses it when it is there and says nothing when it is not, which
+    /// is what makes a tailnet work with no configuration. `true` expects it
+    /// and has `doctor` complain if it is missing; `false` never touches it.
+    pub tailscale: Tailscale,
     /// Seconds between presence rounds (SPEC §5.5).
     ///
     /// A peer counts as online while its last hello is younger than two of
@@ -80,6 +175,7 @@ impl Default for Config {
             max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
             inline_max_bytes: DEFAULT_INLINE_MAX_BYTES,
             presence_interval: DEFAULT_PRESENCE_INTERVAL,
+            tailscale: Tailscale::Auto,
         }
     }
 }
@@ -205,6 +301,11 @@ impl Config {
         {
             self.discovery = flag;
         }
+        if let Ok(value) = std::env::var("HIVEMIND_TAILSCALE")
+            && let Ok(mode) = value.parse()
+        {
+            self.tailscale = mode;
+        }
         if let Ok(seconds) = std::env::var("HIVEMIND_PRESENCE_INTERVAL")
             && let Ok(seconds) = seconds.parse()
         {
@@ -327,6 +428,60 @@ mod tests {
         assert_eq!(strip("laptop.local"), "laptop");
         assert_eq!(strip("arch.lan"), "arch");
         assert_eq!(strip("plain"), "plain");
+    }
+
+    #[test]
+    fn a_tailscale_mode_can_be_written_the_way_a_person_would_write_it() {
+        // `tailscale = true` and `tailscale = "auto"` are both things
+        // somebody would type, and refusing either is a papercut with no
+        // argument behind it.
+        for (text, expected) in [
+            ("tailscale = \"auto\"", Tailscale::Auto),
+            ("tailscale = true", Tailscale::On),
+            ("tailscale = false", Tailscale::Off),
+            ("tailscale = \"on\"", Tailscale::On),
+            ("tailscale = \"off\"", Tailscale::Off),
+            ("tailscale = \"AUTO\"", Tailscale::Auto),
+        ] {
+            let config: Config = toml::from_str(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+            assert_eq!(config.tailscale, expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_tailscale_mode_that_is_not_one_says_what_the_modes_are() {
+        // The message is the whole value of refusing rather than defaulting:
+        // somebody who wrote `tailscale = "yes please"` needs to be told the
+        // three words, not have their intent quietly ignored.
+        let error = toml::from_str::<Config>("tailscale = \"sometimes\"").expect_err("not a mode");
+        let message = error.to_string();
+        assert!(message.contains("auto"), "{message}");
+        assert!(message.contains("sometimes"), "{message}");
+    }
+
+    #[test]
+    fn a_tailscale_mode_survives_a_round_trip() {
+        for mode in [Tailscale::Auto, Tailscale::On, Tailscale::Off] {
+            let config = Config {
+                tailscale: mode,
+                ..Config::default()
+            };
+            let text = toml::to_string(&config).expect("serialise");
+            let back: Config = toml::from_str(&text).expect("deserialise");
+            assert_eq!(back.tailscale, mode);
+        }
+    }
+
+    #[test]
+    fn only_the_modes_that_want_tailscale_go_looking_for_it() {
+        assert!(Tailscale::Auto.wanted());
+        assert!(Tailscale::On.wanted());
+        assert!(!Tailscale::Off.wanted(), "off means off, however installed");
+
+        // The difference between the two that look: `auto` is silent about a
+        // machine that simply has no Tailscale, which is most machines.
+        assert!(!Tailscale::Auto.expects_it());
+        assert!(Tailscale::On.expects_it());
     }
 
     #[test]
