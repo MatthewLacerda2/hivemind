@@ -224,6 +224,10 @@ pub struct MailService {
     woken: Mutex<std::collections::HashSet<NodeId>>,
     /// Addresses worth a hello next round, from gossip and from hints.
     candidates: Mutex<std::collections::BTreeSet<String>>,
+    /// Set when a hello could not be delivered, so discovery looks sooner
+    /// than its next scheduled round (SPEC §5.2). An address that stopped
+    /// working is the best moment to go looking for the one that replaced it.
+    rediscover: std::sync::atomic::AtomicBool,
     /// The Claude Code sessions open on this machine (SPEC §9.3). In memory
     /// only: a daemon that restarts hears about each again at its next turn,
     /// which is more honest than a file claiming something about a process
@@ -236,6 +240,9 @@ pub struct MailService {
     /// How often presence runs, which is also how long a hello counts for —
     /// a peer is online while its last one is younger than two of these.
     presence_interval: std::time::Duration,
+    /// Whether Tailscale is a discovery source here (SPEC §5.2). `Off` means
+    /// the binary is never run, not that its results are ignored.
+    tailscale: hivemind_core::config::Tailscale,
     /// Where `group.toml` lives.
     home: std::path::PathBuf,
     identity: NodeId,
@@ -280,6 +287,8 @@ pub struct NodeDescription {
     /// Seconds between presence rounds (SPEC §5.5), and half the window a
     /// hello keeps a peer looking online for.
     pub presence_interval: u64,
+    /// Whether to find peers through Tailscale (SPEC §5.2).
+    pub tailscale: hivemind_core::config::Tailscale,
 }
 
 impl MailService {
@@ -314,9 +323,11 @@ impl MailService {
             presence: Mutex::new(std::collections::HashMap::new()),
             woken: Mutex::new(std::collections::HashSet::new()),
             candidates: Mutex::new(std::collections::BTreeSet::new()),
+            rediscover: std::sync::atomic::AtomicBool::new(false),
             sessions: Mutex::new(sessions::Sessions::new()),
             hints: Mutex::new(std::collections::BTreeMap::new()),
             presence_interval: std::time::Duration::from_secs(node.presence_interval),
+            tailscale: node.tailscale,
             home: root.to_path_buf(),
             identity: node.id,
             tls: hivemind_net::tls::LocalIdentity::new(node.certificate.clone(), node.private_key),
@@ -1136,7 +1147,7 @@ fn verifying_key_from_certificate(der: &[u8]) -> Option<hivemind_core::crypto::V
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -1188,10 +1199,29 @@ mod tests {
             inline_max_bytes: hivemind_core::config::DEFAULT_INLINE_MAX_BYTES,
             prefetch: false,
             presence_interval: hivemind_core::config::DEFAULT_PRESENCE_INTERVAL,
+            tailscale: hivemind_core::config::Tailscale::Auto,
         }
     }
 
-    pub(super) fn service() -> (tempfile::TempDir, MailService) {
+    /// A service whose Tailscale mode is not the default.
+    pub(crate) fn service_with_tailscale(
+        mode: hivemind_core::config::Tailscale,
+    ) -> (tempfile::TempDir, std::sync::Arc<MailService>) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let id = NodeId::from_certificate_der(b"this node");
+        let service = MailService::open(
+            dir.path(),
+            NodeDescription {
+                tailscale: mode,
+                ..describe(id)
+            },
+            SigningKey::from_bytes(&[11u8; 32]),
+        )
+        .expect("service");
+        (dir, std::sync::Arc::new(service))
+    }
+
+    pub(crate) fn service() -> (tempfile::TempDir, MailService) {
         let dir = tempfile::tempdir().expect("temp dir");
         let key = SigningKey::from_bytes(&[11u8; 32]);
         let identity = NodeId::from_certificate_der(b"this node");

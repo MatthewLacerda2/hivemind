@@ -7,6 +7,7 @@
 
 #![doc(html_root_url = "https://docs.rs/hivemind-api/0.1.0")]
 
+pub mod discovery;
 pub mod local;
 pub mod openapi;
 pub mod outbox;

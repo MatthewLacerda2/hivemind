@@ -253,6 +253,26 @@ async fn a_hello_wakes_delivery_for_the_peer_that_sent_it() {
 }
 
 #[tokio::test]
+async fn a_discovery_request_is_one_instruction_not_a_standing_order() {
+    // Taken rather than read, for the same reason a wake is: leaving it set
+    // would turn every five-second tick into a full `tailscale status` plus a
+    // TCP connect per host, for as long as one peer stayed unreachable —
+    // which on a tailnet of sleeping machines is always.
+    let host = identity(96);
+    let (_dir, service) = service(&host);
+    join_group(&service);
+
+    assert!(!service.take_discovery_request(), "nothing asked yet");
+
+    service.ask_for_discovery();
+    assert!(service.take_discovery_request());
+    assert!(
+        !service.take_discovery_request(),
+        "the request is spent by the round that acts on it"
+    );
+}
+
+#[tokio::test]
 async fn a_peer_list_tops_up_the_addresses_of_a_peer_we_already_know() {
     let host = identity(71);
     let friend = identity(72);

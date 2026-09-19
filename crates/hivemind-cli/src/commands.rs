@@ -61,6 +61,7 @@ pub(crate) async fn daemon(home: Option<&Path>, port: u16) -> Result<()> {
                 inline_max_bytes: config.inline_max_bytes,
                 prefetch: config.prefetch,
                 presence_interval: config.presence_interval,
+                tailscale: config.tailscale,
             },
             identity.signing_key().clone(),
         )
@@ -137,7 +138,8 @@ pub(crate) async fn daemon(home: Option<&Path>, port: u16) -> Result<()> {
     Ok(())
 }
 
-/// Start the peer listener, the delivery worker, mDNS and presence.
+/// Start the peer listener, the delivery worker, mDNS, presence and the
+/// tailnet sweep.
 ///
 /// Returns their handles so the caller can wait for them on the way out.
 async fn spawn_background<F, S>(

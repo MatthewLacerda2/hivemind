@@ -219,6 +219,9 @@ impl MailService {
         // Every address tried and none answered. That is the same evidence a
         // failed delivery gives, and SPEC §5.5 says it wins over any hello.
         self.mark_offline(peer.id);
+        // And it is the best moment to go looking: on a tailnet the address
+        // we have may simply be the one this peer had yesterday (SPEC §5.2).
+        self.ask_for_discovery();
     }
 
     /// Take what a peer said in answer to our hello.
@@ -338,6 +341,24 @@ impl MailService {
             .lock()
             .map(|mut set| std::mem::take(&mut *set).into_iter().collect())
             .unwrap_or_default()
+    }
+
+    /// Ask the discovery worker to look now rather than at its next round.
+    pub fn ask_for_discovery(&self) {
+        self.rediscover
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether discovery was asked for, clearing the request.
+    ///
+    /// Taken rather than read, for the reason `take_woken` is: a request is
+    /// one instruction, and leaving it set would make every subsequent tick a
+    /// full round for as long as one peer stayed unreachable — which on a
+    /// tailnet of sleeping machines is always.
+    #[must_use]
+    pub fn take_discovery_request(&self) -> bool {
+        self.rediscover
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Say that `id` was heard from, so the next round can pass it on.
