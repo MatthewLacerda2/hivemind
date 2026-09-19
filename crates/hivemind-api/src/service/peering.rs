@@ -159,6 +159,7 @@ impl MailService {
             owner: None,
             addr,
             last_seen: Utc::now(),
+            was_a_member: false,
         })))
     }
 

@@ -11,7 +11,7 @@ use hivemind_core::identity::Identity;
 use hivemind_core::peer::NodeId;
 use hivemind_core::peerbook::{AddrSource, PeerAddr};
 
-use super::tests::{call, group_key, identity, pair_with, proof, service};
+use super::tests::{call, group_key, identity, join_group, offer, pair_with, proof, service};
 use super::{Hello, PeerNote};
 use crate::service::MailService;
 
@@ -115,6 +115,69 @@ async fn a_member_that_can_no_longer_prove_the_key_is_refused_and_dropped() {
             .any(|node| node.id == friend.node_id()),
         "and it is still a node we have met, listed as seen"
     );
+}
+
+#[tokio::test]
+async fn a_dropped_member_is_remembered_as_one_so_later_rounds_retry_it() {
+    // A rotation drops every member that has not pasted the new code yet,
+    // including the ones about to. Two members that drop *each other* both
+    // stop being peers, and a presence round greets peers — so without this
+    // nothing would ever greet either of them again. On a tailnet, with no
+    // mDNS to find anybody a second time, that partition is permanent.
+    let host = identity(92);
+    let friend = identity(93);
+    let (_dir, service) = service(&host);
+    pair_with(&service, &host, &friend).await;
+
+    let stale = group_key();
+    service.create_group(true).expect("a new key");
+
+    let (status, _) = call(
+        &service,
+        &friend,
+        "/peer/v1/hello",
+        &greeting(&friend, &host, Some(&stale)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let seen = service.seen_nodes().expect("seen");
+    let node = seen
+        .iter()
+        .find(|node| node.id == friend.node_id())
+        .expect("it is on the seen list");
+    assert!(
+        node.was_a_member,
+        "it was in the group a moment ago, and is one pasted code from being in it again"
+    );
+}
+
+#[tokio::test]
+async fn a_stranger_that_was_never_a_member_is_not_marked_as_one() {
+    // The other half: presence retries ex-members and leaves strangers
+    // alone, so the two have to be distinguishable. A node from another
+    // group would otherwise be greeted once a minute forever.
+    let host = identity(94);
+    let stranger = identity(95);
+    let (_dir, service) = service(&host);
+    join_group(&service);
+
+    let other_group = hivemind_core::group::GroupKey::from_bytes([7u8; 16]);
+    let (status, _) = call(
+        &service,
+        &stranger,
+        "/peer/v1/handshake",
+        &offer(&stranger, &host, "127.0.0.1", 8400, Some(&other_group)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let seen = service.seen_nodes().expect("seen");
+    let node = seen
+        .iter()
+        .find(|node| node.id == stranger.node_id())
+        .expect("it is on the seen list");
+    assert!(!node.was_a_member);
 }
 
 #[tokio::test]

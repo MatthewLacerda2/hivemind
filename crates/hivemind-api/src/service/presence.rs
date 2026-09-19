@@ -124,8 +124,22 @@ impl MailService {
         let greetings = peers.iter().map(|peer| self.say_hello_to(peer));
         futures_util::future::join_all(greetings).await;
 
-        // Gossip about a node we do not peer with, and another member's
-        // "X is up". Both are claims, and this is the attempt they buy.
+        // Nodes that were members until a rotation took them out. They are
+        // one pasted code away from being members again, and nothing else
+        // would ever greet them: a round greets peers, and these are not.
+        // Bounded by the seen list, which holds at most `MAX_SEEN`.
+        let returning: Vec<String> = self
+            .seen_nodes()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|node| node.was_a_member)
+            .map(|node| node.addr.authority())
+            .collect();
+        self.note_candidates(returning);
+
+        // Gossip about a node we do not peer with, another member's "X is
+        // up", and the ex-members above. All are claims, and this is the
+        // attempt they buy.
         for authority in self.take_candidates() {
             if let Err(error) = self.greet(&authority, AddrSource::Gossip).await {
                 tracing::debug!(%authority, %error, "could not greet a node we were told about");
@@ -455,6 +469,15 @@ impl MailService {
         }
         self.mark_offline(id);
         self.record_seen(id, name, owner, addr);
+        if was_a_peer {
+            // So later rounds keep trying it. A rotation drops every member
+            // that has not yet pasted the new code, and two members that drop
+            // *each other* both end up here — with nothing left to greet
+            // either of them, because a round greets peers and this is no
+            // longer one. On a tailnet, with no mDNS to find anybody again,
+            // that partition is permanent.
+            self.mark_was_a_member(id);
+        }
     }
 
     /// The sessions open on this machine (SPEC §9.3).

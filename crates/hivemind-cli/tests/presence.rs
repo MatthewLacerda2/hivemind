@@ -136,15 +136,19 @@ fn rotating_the_key_drops_the_member_that_kept_the_old_one() {
     let rotated = created_code(&alice.run(&["group", "create", "--replace"]));
     bob.run(&["pair", &rotated, "--replace"]);
 
-    wait_for_peers(&alice, "carol is dropped for failing the proof", |peers| {
-        !member(peers, &carol_id)
-    });
-
-    let peers = json(&alice.run(&["peers", "--json"]));
-    assert!(
-        member(&peers, &bob_id),
-        "bob pasted the new code and stays: {peers}"
+    // Both halves are waited for, and bob's is not a formality. Rotating a
+    // key is not atomic across machines: between alice making the new one and
+    // bob pasting it, bob is a member holding the wrong key and is dropped
+    // exactly as carol is. It heals by itself — pasting the code greets
+    // everything seen, so bob is re-admitted by the ordinary handshake — but
+    // asserting on bob the instant carol goes catches that window about one
+    // run in ten, which is what CI found on macOS and this machine did not.
+    let peers = wait_for_peers(
+        &alice,
+        "carol is dropped and bob, who pasted the new code, is back",
+        |peers| !member(peers, &carol_id) && member(peers, &bob_id),
     );
+
     assert!(
         peers
             .as_array()
