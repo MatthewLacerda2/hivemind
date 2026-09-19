@@ -87,12 +87,12 @@ openapi-check:
 # checks ran" are not the same claim, and a loop that waits for checks to
 # finish reads *absent* as settled — see the script's own docstring.
 
-# Did CI really run on this pull request's head? `just mergeable PR=12`
+# Did CI really run on this pull request's head? `just mergeable 12`
 mergeable PR="":
     #!/usr/bin/env bash
     set -euo pipefail
     if [[ -z "{{PR}}" ]]; then
-        echo "usage: just mergeable PR=12" >&2
+        echo "usage: just mergeable 12" >&2
         exit 2
     fi
     python3 .github/scripts/mergeable.py "{{PR}}"

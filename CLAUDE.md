@@ -169,7 +169,7 @@ Signals, opt-in and never part of passing: `just mutants`, `just cov`.
 
 ## Merging
 
-**`just mergeable PR=N` before `gh pr merge`, always.** It asks GitHub whether
+**`just mergeable N` before `gh pr merge`, always.** It asks GitHub whether
 CI genuinely ran on the head commit, which is a different question from whether
 the checks look green. `gh pr checks` is not a substitute — it blends runs, so a
 skipped one hides behind a real one.

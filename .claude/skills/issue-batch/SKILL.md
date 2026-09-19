@@ -93,10 +93,10 @@ as a confusing build error rather than as "no disk".
 ## Waiting for CI is the expensive step, and it is manual here
 
 `just ci` locally, then ready, then wait for the run on the rebased head, then
-**`just mergeable N`** — the number positionally. `PR=N` is what the rest of the
-documentation says and it does not work: `PR` is a recipe parameter rather than
-a variable, so `PR=N` reaches the script as a literal string and fails with a
-usage error. That is #48, and until it is decided, type the number.
+**`just mergeable N`** — the number positionally. `PR=N` reads like a named
+argument and is not one: `PR` is a recipe parameter, so `just` hands the whole
+string over as its value. It is refused by name rather than by a generic usage
+line (#48).
 
 The waiting is minutes per branch and no recipe does the sequence unattended —
 **#25 is exactly that gap** (`mergeable.py` needs a `--wait`). Until it lands, a
