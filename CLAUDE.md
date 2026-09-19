@@ -38,10 +38,11 @@ argument, not a shrug:
 impossible, **write an ADR proposing the change and say so — never silently
 diverge** (§16).
 
-Five have been written that way, and each amended the spec in the same commit:
+Seven have been written that way, and each amended the spec in the same commit:
 the node id's group count (0006), `received_at` not being signed (0007), the
-service layer staying synchronous (0008), TLS admitting strangers (0010), and
-what adopting `dist` cost (0011).
+service layer staying synchronous (0008), TLS admitting strangers (0010), what
+adopting `dist` cost (0011), membership being a group key rather than pairwise
+confirmation (0013), and a relay needing end-to-end encryption (0014).
 
 An amendment is cheap. A quiet divergence is a document that lies, and the next
 person to read it cannot tell which half to trust.

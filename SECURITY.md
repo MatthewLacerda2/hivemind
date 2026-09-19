@@ -17,9 +17,11 @@ what that does and does not protect:
 
 ### What hivemind defends against
 
-- **An unpaired machine on your network.** Discovery tells peers that a node
-  exists; it never grants trust. Until both sides confirm the fingerprint by
-  hand, mail from an unpaired node is rejected with `403 not_paired`.
+- **A machine on your network that is not in your group.** Discovery tells
+  peers that a node exists; it never grants trust. A node that cannot prove
+  the group key — in the handshake and in every hello afterwards — is
+  rejected with `403 not_paired`, and the key is 128 random bits, so a proof
+  captured off the wire cannot be brute-forced (ADR 0013).
 - **Interception or tampering in transit.** All peer traffic is TLS 1.3 with
   mutual authentication. Certificates are pinned by SHA-256 fingerprint against
   `peers.toml` — there is no CA to mis-issue and no hostname to spoof.
@@ -37,10 +39,14 @@ what that does and does not protect:
 
 ### What it does not defend against
 
-- **A compromised paired peer.** Pairing is a deliberate trust decision. A peer
-  you have paired with can send you anything, and can claim any `owner` label —
-  `owner` is a free-text convenience for fan-out and is never a security
-  boundary. Everything that grants access keys off the node fingerprint.
+- **A member of your group.** The group is as trustworthy as its least
+  careful member: anyone holding the key can admit any machine, and a member
+  can send you anything and claim any `owner` label — `owner` is a free-text
+  convenience for fan-out and is never a security boundary. This is the
+  stated model (ADR 0013): the people it is for already share a network and a
+  repository. The response to a member you no longer trust, or a machine you
+  have lost, is to rotate the key — `hivemind group create` — and paste the
+  new code on the machines that stay.
 - **Anyone with access to your user account.** Mail, blobs and your private key
   live under `~/.hivemind/` with the key at mode `0600`. They are not encrypted
   at rest: a process running as you can read your mail, as it can read your SSH
@@ -48,10 +54,10 @@ what that does and does not protect:
 - **Traffic analysis.** Sizes and timings of deliveries are visible to anyone
   who can watch the network, and mDNS advertises your node's name and
   fingerprint to the local segment by design.
-- **`--trust-network`.** This flag auto-accepts any node discovered over mDNS
-  and exists for networks you fully control. On a coffee shop or conference
-  network it means exactly what it sounds like. It is off by default and warns
-  loudly.
+- **A group key that has leaked.** It lives in `~/.hivemind/group.toml` at
+  mode `0600`, beside the private key and the mail; a process running as you,
+  or whoever has your laptop, has it. Until the group rotates, it admits new
+  machines. Rotation is the remedy, and it is one command plus a paste.
 - **Malicious content inside a message.** hivemind delivers what it is given. A
   message body is untrusted input, including — especially — when a Claude reads
   it. Treat mail from another machine the way you would treat any other external
