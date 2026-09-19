@@ -69,14 +69,14 @@ checkout mixes another issue's edits into `just ci` and thrashes `target/`.
 
 **Never set `CARGO_TARGET_DIR`.** Cargo's default already gives every worktree
 its own `target/`; an override makes worktrees overwrite each other's artifacts
-and produces a false green. Nothing enforces this yet — see issue #46 — so until
-it does, the rule is held by remembering it, which is the weakest kind of rule
-and a reason to check twice.
+and produces a false green. `just workspace` refuses it and `just ci` runs that
+first, so this one is enforced rather than remembered.
 
-**Remove a worktree the moment its branch merges.** `target/` in this repo
-measured **32 GB** in September 2026, and each worktree carries its own.
-Disposal is what keeps disk from becoming the overnight failure, and it arrives
-as a confusing build error rather than as "no disk".
+**Remove a worktree the moment its branch merges**, and `just reap` frees the
+`target/` of any you forgot. `target/` in this repo measured **32 GB** in
+September 2026, and each worktree carries its own. Disposal is what keeps disk
+from becoming the overnight failure, and it arrives as a confusing build error
+rather than as "no disk" — `just workspace` warns below 10 GB.
 
 ## Starting
 

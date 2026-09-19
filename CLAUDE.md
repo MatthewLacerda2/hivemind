@@ -126,7 +126,13 @@ artifacts by package, version, features and profile — never by source path —
 worktrees sharing a target directory overwrite each other's output for anything
 a given build did not itself rebuild. The phantom failures waste an hour; the
 false *green* is the reason it is a rule, because it claims the gates passed on
-code that was never compiled.
+code that was never compiled. `just workspace` refuses it, and `just ci` runs
+that first — a rule held by remembering it is the weakest kind there is.
+
+**`just reap` frees the `target/` of every worktree whose branch has merged.**
+Disk filling up does not announce itself: it arrives as a linker error, or as
+four unrelated integration tests failing at once, in the middle of whatever you
+were actually doing (#61). `just workspace` warns below 10 GB.
 
 ### A ready pull request claims it passes; a draft makes no such claim
 
@@ -164,6 +170,7 @@ lean; keep CI fast. That is part of Craft, not a trade against it.
 | `just openapi-check` | `docs/openapi.json` against the code |
 | `just dist-check` | `release.yml`, which `dist` generates |
 | `just cov-gate` | The 85% floor SPEC §13.2 asks for |
+| `just workspace` | One `target/` per worktree, and room to build in |
 
 Signals, opt-in and never part of passing: `just mutants`, `just cov`.
 
