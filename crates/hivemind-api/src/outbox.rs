@@ -146,10 +146,10 @@ impl hivemind_net::delivery::Transport for PeerTransport {
 
 /// Feeds mDNS results into the address book (SPEC §5.4).
 ///
-/// A known peer gets its address refreshed. An unknown one is greeted, which
-/// records a pending offer — an introduction, not an agreement, still needing
-/// a human on both sides (SPEC §6.2). Without that there would be nothing for
-/// `hivemind peers` to list and nothing for anyone to confirm.
+/// A known peer gets its address refreshed. An unknown one is remembered as
+/// seen and, if this node is in a group, greeted: the two proofs are
+/// exchanged, and a node in the same group is a peer by the time the
+/// handshake returns (SPEC §6.2). Nobody is asked anything.
 #[derive(Debug, Clone)]
 pub struct ServiceSink {
     service: Arc<MailService>,
@@ -202,14 +202,24 @@ impl hivemind_net::discovery::Seen for ServiceSink {
             }
         }
 
-        if !self.due_a_greeting(node.id) {
+        self.service.record_seen(
+            node.id,
+            Some(node.name.clone()),
+            node.owner.clone(),
+            node.addr.clone(),
+        );
+
+        // With no key there is no proof to offer, and a greeting would only
+        // be refused. Joining a group greets everything seen so far instead.
+        if !self.service.in_group().unwrap_or(false) || !self.due_a_greeting(node.id) {
             return;
         }
 
         let service = Arc::clone(&self.service);
         let authority = node.addr.authority();
+        let source = node.addr.source;
         tokio::spawn(async move {
-            if let Err(error) = service.join(&authority).await {
+            if let Err(error) = service.greet(&authority, source).await {
                 tracing::debug!(%authority, %error, "could not greet a node seen on the LAN");
             }
         });
@@ -367,7 +377,7 @@ mod tests {
         let id = friend.node_id();
 
         service
-            .record_pairing_offer(
+            .admit(
                 id,
                 &crate::peer::Handshake {
                     id: id.to_string(),
@@ -376,13 +386,13 @@ mod tests {
                     version: "0.1.0".to_owned(),
                     callback_host: "10.0.0.1".to_owned(),
                     callback_port: 8400,
+                    proof: None,
                     gossip: None,
                 },
                 friend.certificate_der().to_vec(),
                 hivemind_core::peerbook::PeerAddr::manual("10.0.0.1", 8400),
             )
-            .expect("offer");
-        service.confirm_pair(id).expect("confirm");
+            .expect("admit");
 
         let sink = ServiceSink::new(Arc::clone(&service));
         sink.seen(hivemind_net::discovery::Discovered {
@@ -405,6 +415,55 @@ mod tests {
         assert!(
             sink.greeted.lock().expect("lock").is_empty(),
             "a peer we already know needs no greeting"
+        );
+    }
+
+    fn stranger_on_the_lan(id: NodeId) -> hivemind_net::discovery::Discovered {
+        hivemind_net::discovery::Discovered {
+            id,
+            name: "their-laptop".to_owned(),
+            owner: Some("ana".to_owned()),
+            // Port 1 on loopback: a greeting fails at once rather than
+            // hanging the test on an address that never answers.
+            addr: hivemind_core::peerbook::PeerAddr {
+                host: "127.0.0.1".to_owned(),
+                port: 1,
+                source: hivemind_core::peerbook::AddrSource::Mdns,
+                last_ok: None,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stranger_on_the_lan_is_listed_but_not_greeted_by_a_node_in_no_group() {
+        // With no key there is no proof to offer, and the greeting would only
+        // be refused. `hivemind peers` still shows it, so a person can see
+        // there is somebody there to give the code to.
+        let (_dir, service) = service();
+        let sink = ServiceSink::new(Arc::clone(&service));
+
+        sink.seen(stranger_on_the_lan(node(5)));
+
+        let seen = service.seen_nodes().expect("seen");
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].name.as_deref(), Some("their-laptop"));
+        assert!(
+            sink.greeted.lock().expect("lock").is_empty(),
+            "a node with no group has nothing to greet with"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stranger_on_the_lan_is_greeted_by_a_node_in_a_group() {
+        let (_dir, service) = service();
+        service.create_group(false).expect("create");
+        let sink = ServiceSink::new(Arc::clone(&service));
+
+        sink.seen(stranger_on_the_lan(node(6)));
+
+        assert!(
+            sink.greeted.lock().expect("lock").contains_key(&node(6)),
+            "a node in the same group becomes a peer by being greeted"
         );
     }
 

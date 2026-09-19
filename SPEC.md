@@ -229,7 +229,7 @@ There is one group per node, and being in it is knowing its key (ADR 0013).
 1. `hivemind group create` generates 128 random bits, writes them to `group.toml` and prints them as a code. `hivemind pair <code>` writes the same key. That is the whole of setup on every machine.
 2. When two nodes first meet — by mDNS, Tailscale, gossip or `join` — each side's `POST /peer/v1/handshake` carries a proof of possession: `HMAC-SHA256(key, cert_sender ‖ cert_receiver ‖ sent_at)`. The exact bytes and a golden vector live in `docs/protocol.md`. Both proofs verify → each side pins the other's certificate in `peers.toml`; nobody is asked anything. A proof that fails is `403 not_paired`.
 3. Every hello (§5.5) carries a fresh proof under the current key. A node is a member while it keeps proving it.
-4. Revocation is rotation: `hivemind group create` again on any member, and the humans paste the new code on the machines that stay. A node holding the old key fails its next hello and stops receiving mail. There is no per-member revocation in v1.
+4. Revocation is rotation: `hivemind group create --replace` on any member, and the humans paste the new code on the machines that stay. Without `--replace`, `create` on a node already in a group refuses: an accidental rotation would cut every other machine off until each is given the new code. A node holding the old key fails its next hello and stops receiving mail. There is no per-member revocation in v1.
 5. `pair` with a code different from the one held refuses and explains; `--replace` switches. No peer and no message carries a group id — a second group later is a field on `group.toml`, not a migration.
 
 The group is as trustworthy as its least careful member, and `SECURITY.md` says so.
@@ -256,7 +256,7 @@ DELETE /api/v1/peers/{id}
 POST   /api/v1/peers/refresh               re-run discovery now
 
 GET    /api/v1/group                       joined? created when, member count — never the key
-POST   /api/v1/group/create                new key; returns the code once
+POST   /api/v1/group/create    {replace?}  new key; returns the code once; refuses a node in a group without `replace`
 POST   /api/v1/group/join      {code}      store the key; refuses a different one without `replace`
 GET    /api/v1/sessions                    open sessions on this node (§9.3)
 POST   /api/v1/sessions/{id}   {label}     register or renew one; DELETE removes it
@@ -349,7 +349,7 @@ On `message.received`, post a macOS notification (`osascript`) unless `notificat
 hivemind init [--name] [--owner] [--no-launchd] [--no-mcp] [--no-hooks]
 hivemind daemon                       # foreground; launchd runs this
 hivemind status                       # daemon up? addresses, peer count, unread
-hivemind group [create]               # show the group; `create` makes a new key and prints the code (rotation is `create` again)
+hivemind group [create [--replace]]   # show the group; `create` makes a new key and prints the code (rotation is `create --replace`)
 hivemind pair <code> [--replace]      # store the key; the one command a new machine runs after `init`
 hivemind join <host[:port]>           # contact a node discovery cannot find
 hivemind peers [refresh|remove <id>]  # online, last seen, sessions

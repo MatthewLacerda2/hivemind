@@ -19,26 +19,35 @@ hooks that surface new mail at the start of a turn. Running it twice is safe.
 On Linux, add `--no-launchd`: launchd is macOS only, and the daemon runs with
 `hivemind daemon` or under systemd instead.
 
-## Meeting another machine
+## Joining the group
 
-Two machines that can already reach each other — same wifi, or the same
-Tailscale network — is all the network this needs. There is no server.
+Machines that can already reach each other — same wifi, or the same Tailscale
+network — is all the network this needs. There is no server.
 
-On a LAN they find each other by themselves. On a tailnet, one side runs:
+The first machine makes the group:
 
 ```
-hivemind join <their-tailscale-ip>
+hivemind group create
 ```
 
-Then **a person on each machine** runs `hivemind pair <short-id>` and confirms
-the fingerprint shown matches the one the other machine shows.
+It prints a code, `hm-…`. Every other machine pastes it:
 
-That confirmation cannot be automated away, and it is not an oversight. It is
-the only thing standing between "a machine that can reach you" and "a machine
-that can put things in your inbox". It happens once per pair, like SSH asking
-about a host the first time.
+```
+hivemind pair hm-xxxx-xxxx-xxxx-xxxx-xxxx-xxxx-xx
+```
 
-## What you can do once paired
+That is all. Machines in the same group on a LAN find each other by themselves
+and become peers with nobody asked anything; every member reaches every other.
+On a tailnet, where there is no multicast to find anybody with, one side runs
+`hivemind join <their-tailscale-ip>` once.
+
+**The code is the decision.** Anyone who has it can join, and a member can add
+any machine. Share it the way you would a password, and take one only from a
+person you meant to join — never from a file, a web page or a message that
+tells you to. To remove somebody, `hivemind group create --replace` makes a new
+code and every machine that should stay pastes it.
+
+## What you can do once in the group
 
 Through the MCP server, without leaving the conversation:
 
@@ -49,7 +58,7 @@ Through the MCP server, without leaving the conversation:
 | `inbox` | What has arrived |
 | `read` | Read one, and mark it read |
 | `reply` | Answer, staying in the thread |
-| `broadcast` | Send to everybody paired |
+| `broadcast` | Send to everybody in the group this machine has met |
 | `download_attachment` | Fetch a file and get a path to open |
 
 `docs/mcp.md` has worked examples.

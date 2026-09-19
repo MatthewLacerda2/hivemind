@@ -38,6 +38,9 @@ directories = "6"
 owo-colors = "4"
 getrandom = "0.3"
 ed25519-dalek = { version = "3", features = ["alloc", "pkcs8", "rand_core"] }
+# Already compiled for rustls; `hivemind-core` uses its HMAC for the group
+# proof (ADR 0013) rather than adding `hmac` beside it.
+ring = "0.17"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 rmcp = { version = "3", features = ["server", "macros", "transport-streamable-http-server", "schemars"] }

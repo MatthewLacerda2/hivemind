@@ -150,7 +150,8 @@ where
     S: std::future::Future<Output = ()> + Send + 'static,
 {
     // SPEC §6.3 and ADR 0010: the peer port admits any client that can
-    // complete a TLS handshake, and the router refuses anyone unpaired.
+    // complete a TLS handshake, and the router refuses anyone who has not
+    // proved the group key.
     let peer_addr = std::net::SocketAddr::from(([0, 0, 0, 0], config.peer_port));
     let peers = tokio::net::TcpListener::bind(peer_addr)
         .await
@@ -182,8 +183,9 @@ where
         }
     });
 
-    // SPEC §5.1: advertise on start, browse continuously. Discovery only ever
-    // updates addresses — pairing still needs a human on both sides.
+    // SPEC §5.1: advertise on start, browse continuously. Discovery never
+    // trusts anybody by itself: a node it finds becomes a peer only by proving
+    // the group key when greeted (SPEC §6.2).
     let mdns = tokio::spawn({
         let enabled = config.discovery;
         let sink = hivemind_api::ServiceSink::new(Arc::clone(service));
@@ -298,7 +300,8 @@ struct Me {
     owner: Option<String>,
     peer_port: u16,
     peers: usize,
-    pending_pairs: usize,
+    in_group: bool,
+    seen: usize,
     outbox: usize,
 }
 
@@ -312,7 +315,7 @@ pub(crate) async fn status(api: &str, json: bool) -> Result<()> {
                 "id": me.id, "short_id": me.short_id, "version": me.version,
                 "unread": me.unread, "name": me.name, "owner": me.owner,
                 "peer_port": me.peer_port, "peers": me.peers,
-                "pending_pairs": me.pending_pairs, "outbox": me.outbox,
+                "in_group": me.in_group, "seen": me.seen, "outbox": me.outbox,
             }))?
         );
         return Ok(());
@@ -330,13 +333,20 @@ pub(crate) async fn status(api: &str, json: bool) -> Result<()> {
     println!("{} {}", "  mail  ".dimmed(), unread_phrase(me.unread));
     println!("{} {}", "  known ".dimmed(), peer_phrase(me.peers));
 
-    // These two are what a person is usually looking for when they run this:
-    // something is waiting on them, or something is waiting on the network.
-    if me.pending_pairs > 0 {
+    // These are what a person is usually looking for when they run this:
+    // something is stopping mail, or something is waiting on the network.
+    if !me.in_group {
         println!(
-            "{} {} — `hivemind peers` to confirm",
-            "  pair  ".dimmed(),
-            pending_phrase(me.pending_pairs).yellow()
+            "{} {}",
+            "  group ".dimmed(),
+            "not in one — `hivemind group create`, or `hivemind pair <code>`".yellow()
+        );
+    }
+    if me.seen > 0 {
+        println!(
+            "{} {} — `hivemind peers` to see them",
+            "  seen  ".dimmed(),
+            seen_phrase(me.seen).yellow()
         );
     }
     if me.outbox > 0 {
@@ -351,16 +361,16 @@ pub(crate) async fn status(api: &str, json: bool) -> Result<()> {
 
 fn peer_phrase(peers: usize) -> String {
     match peers {
-        0 => "no peers — `hivemind join <host>` to meet one".to_owned(),
+        0 => "no peers yet — machines in the same group find each other on the LAN".to_owned(),
         1 => "1 peer".to_owned(),
         n => format!("{n} peers"),
     }
 }
 
-fn pending_phrase(pending: usize) -> String {
-    match pending {
-        1 => "1 node is waiting for you".to_owned(),
-        n => format!("{n} nodes are waiting for you"),
+fn seen_phrase(seen: usize) -> String {
+    match seen {
+        1 => "1 node answered that is not in this group".to_owned(),
+        n => format!("{n} nodes answered that are not in this group"),
     }
 }
 
@@ -795,8 +805,8 @@ pub(crate) fn init(home: Option<&Path>, api: &str, options: InitOptions) -> Resu
     }
 
     println!();
-    println!("Next: `hivemind join <host>` on one machine, then");
-    println!("`hivemind pair <short-id>` on both.");
+    println!("Next: `hivemind group create` on the first machine, and");
+    println!("`hivemind pair <code>` with the code it prints on every other.");
     Ok(())
 }
 

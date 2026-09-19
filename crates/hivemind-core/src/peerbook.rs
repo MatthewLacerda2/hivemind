@@ -1,9 +1,11 @@
-//! `peers.toml`: the address book, and the source of truth for who we trust.
+//! `peers.toml`: the address book — where each member can be reached, and the
+//! certificate it is pinned to.
 //!
-//! A peer is in this file if and only if both sides confirmed each other's
-//! fingerprint by hand (SPEC §6.2). Discovery never writes here — it only ever
-//! updates the addresses of peers that are already in it, or reports a node as
-//! seen-but-not-paired.
+//! A peer is in this file once it has proved the group key in a handshake
+//! (SPEC §6.2, ADR 0013). It is not a list of decisions any more: the key is
+//! what admits, and this is what remembers who was admitted. Discovery never
+//! writes a new entry here — it only updates the addresses of peers already in
+//! it.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -12,12 +14,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::peer::NodeId;
-
-/// How many unconfirmed pairing offers we keep.
-///
-/// Anyone who can reach the peer port can create one (ADR 0010), so the list is
-/// bounded. Confirmed entries are never evicted: the user said yes to those.
-pub const MAX_PENDING: usize = 64;
 
 /// How an address was learned (SPEC §5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -80,7 +76,7 @@ pub struct Peer {
     pub certificate: CertificateDer,
     /// Everywhere we know to reach it.
     pub addrs: Vec<PeerAddr>,
-    /// When both sides confirmed.
+    /// When it proved the group key to this node (SPEC §6.2).
     pub paired_at: DateTime<Utc>,
     /// When it last answered.
     pub last_seen: Option<DateTime<Utc>>,
@@ -180,33 +176,12 @@ impl<'de> Deserialize<'de> for CertificateDer {
     }
 }
 
-/// A node that has offered to pair but has not been confirmed yet (SPEC §6.2).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PendingPair {
-    /// Its fingerprint.
-    pub id: NodeId,
-    /// The name it gave.
-    pub name: String,
-    /// The owner it claimed. Unverified.
-    pub owner: Option<String>,
-    /// Its certificate, so the handshake endpoint can accept it.
-    pub certificate: CertificateDer,
-    /// Where it contacted us from, or where we contacted it.
-    pub addr: PeerAddr,
-    /// When it was first seen.
-    pub first_seen: DateTime<Utc>,
-    /// Whether *we* have confirmed. Pairing needs both sides (SPEC §6.2).
-    pub confirmed_by_us: bool,
-}
-
 /// The on-disk form of `peers.toml`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 struct PeerBookFile {
     /// Paired peers, keyed by node id so the file is stable under diff.
     peers: BTreeMap<String, Peer>,
-    /// Pairings waiting on a confirmation.
-    pending: BTreeMap<String, PendingPair>,
 }
 
 /// Why the address book could not be read or written.
@@ -263,7 +238,7 @@ impl PeerBook {
 
                 // The id is the fingerprint of the certificate. If the file
                 // disagrees with itself, trusting it would mean pinning TLS
-                // against a certificate nobody confirmed.
+                // against a certificate nobody admitted.
                 for (id, peer) in &file.peers {
                     if peer.certificate.node_id() != peer.id || peer.id.to_string() != *id {
                         return Err(PeerBookError::FingerprintMismatch { id: id.clone() });
@@ -352,103 +327,6 @@ impl PeerBook {
     pub fn remove_peer(&mut self, id: NodeId) -> bool {
         self.file.peers.remove(&id.to_string()).is_some()
     }
-
-    /// Everything waiting on a confirmation.
-    pub fn pending(&self) -> impl Iterator<Item = &PendingPair> {
-        self.file.pending.values()
-    }
-
-    /// One pending pair.
-    #[must_use]
-    pub fn pending_pair(&self, id: NodeId) -> Option<&PendingPair> {
-        self.file.pending.get(&id.to_string())
-    }
-
-    /// Record a pairing offer, keeping any confirmation we already gave.
-    ///
-    /// Evicts the oldest *unconfirmed* offer once the list is full, so an
-    /// unpaired node cannot grow this without bound (ADR 0010).
-    pub fn insert_pending(&mut self, pending: PendingPair) {
-        let key = pending.id.to_string();
-        let already_confirmed = self
-            .file
-            .pending
-            .get(&key)
-            .is_some_and(|p| p.confirmed_by_us);
-
-        let mut pending = pending;
-        // A second handshake from the same node must not silently un-confirm
-        // what the user already agreed to.
-        pending.confirmed_by_us |= already_confirmed;
-
-        let replacing = self.file.pending.contains_key(&key);
-        if !replacing && self.file.pending.len() >= MAX_PENDING {
-            self.evict_oldest_unconfirmed();
-        }
-        self.file.pending.insert(key, pending);
-    }
-
-    /// Drop the oldest offer the user has not confirmed.
-    ///
-    /// If every entry is confirmed, nothing is evicted: those are decisions a
-    /// human made, and a stranger must not be able to push them out.
-    fn evict_oldest_unconfirmed(&mut self) {
-        let oldest = self
-            .file
-            .pending
-            .values()
-            .filter(|p| !p.confirmed_by_us)
-            .min_by_key(|p| p.first_seen)
-            .map(|p| p.id.to_string());
-
-        if let Some(key) = oldest {
-            self.file.pending.remove(&key);
-        }
-    }
-
-    /// Mark that we have confirmed a pending pair. Returns whether it existed.
-    pub fn confirm_pending(&mut self, id: NodeId) -> bool {
-        match self.file.pending.get_mut(&id.to_string()) {
-            Some(pending) => {
-                pending.confirmed_by_us = true;
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// Drop a pending pair.
-    pub fn remove_pending(&mut self, id: NodeId) -> Option<PendingPair> {
-        self.file.pending.remove(&id.to_string())
-    }
-
-    /// Find a pending pair by the short form a human would type (SPEC §10).
-    #[must_use]
-    pub fn pending_by_short(&self, short: &str) -> Vec<&PendingPair> {
-        let short = short.trim().to_ascii_lowercase();
-        self.file
-            .pending
-            .values()
-            .filter(|p| p.id.short().starts_with(&short) || p.id.to_string().contains(&short))
-            .collect()
-    }
-
-    /// Certificates the TLS layer should accept: paired peers, plus pending
-    /// ones so the handshake endpoint can talk to them at all (SPEC §6.3).
-    #[must_use]
-    pub fn acceptable_certificates(&self) -> Vec<(NodeId, Vec<u8>)> {
-        self.file
-            .peers
-            .values()
-            .map(|p| (p.id, p.certificate.as_bytes().to_vec()))
-            .chain(
-                self.file
-                    .pending
-                    .values()
-                    .map(|p| (p.id, p.certificate.as_bytes().to_vec())),
-            )
-            .collect()
-    }
 }
 
 #[cfg(test)]
@@ -514,7 +392,7 @@ mod tests {
     #[test]
     fn a_certificate_that_does_not_match_its_node_id_is_refused() {
         // The id *is* the fingerprint. A file that disagrees with itself would
-        // have TLS pinning against a certificate nobody confirmed (SPEC §6.3).
+        // have TLS pinning against a certificate nobody admitted (SPEC §6.3).
         let dir = tempfile::tempdir().expect("temp dir");
         let mut book = PeerBook::load(dir.path()).expect("load");
         let mut peer = peer(b"their certificate", None);
@@ -634,177 +512,27 @@ mod tests {
     }
 
     #[test]
-    fn a_second_handshake_does_not_undo_a_confirmation_the_user_already_gave() {
+    fn an_address_book_with_offers_from_before_the_group_key_still_loads() {
+        // Before ADR 0013 the book also held `pending` offers. They meant
+        // "waiting for a human", which no longer exists; the peers beside
+        // them are real pins and must survive the upgrade.
         let dir = tempfile::tempdir().expect("temp dir");
         let mut book = PeerBook::load(dir.path()).expect("load");
-        let certificate = certificate(b"offering node");
-        let pending = PendingPair {
-            id: certificate.node_id(),
-            name: "their-mbp".to_owned(),
-            owner: None,
-            certificate,
-            addr: PeerAddr::manual("10.0.0.2", 8400),
-            first_seen: Utc::now(),
-            confirmed_by_us: false,
-        };
+        let kept = peer(b"already paired", None);
+        let kept_id = kept.id;
+        book.insert_peer(kept);
+        book.save().expect("save");
 
-        book.insert_pending(pending.clone());
-        assert!(book.confirm_pending(pending.id));
-        book.insert_pending(pending.clone());
-
-        assert!(
-            book.pending_pair(pending.id)
-                .expect("still pending")
-                .confirmed_by_us,
-            "a repeated handshake must not silently un-confirm"
+        let path = dir.path().join("peers.toml");
+        let mut text = std::fs::read_to_string(&path).expect("read");
+        text.push_str(
+            "\n[pending.\"hm1:whatever\"]\nname = \"old offer\"\nconfirmed_by_us = false\n",
         );
-    }
+        std::fs::write(&path, text).expect("write");
 
-    fn pending_from(seed: &[u8], first_seen: DateTime<Utc>, confirmed: bool) -> PendingPair {
-        let certificate = certificate(seed);
-        PendingPair {
-            id: certificate.node_id(),
-            name: "offering".to_owned(),
-            owner: None,
-            certificate,
-            addr: PeerAddr::manual("10.0.0.2", 8400),
-            first_seen,
-            confirmed_by_us: confirmed,
-        }
-    }
-
-    #[test]
-    fn pending_offers_are_bounded_so_a_stranger_cannot_grow_them_forever() {
-        // Anyone who can reach the peer port can create one of these (ADR 0010).
-        let dir = tempfile::tempdir().expect("temp dir");
-        let mut book = PeerBook::load(dir.path()).expect("load");
-
-        for i in 0..(MAX_PENDING + 20) {
-            book.insert_pending(pending_from(format!("node {i}").as_bytes(), at(i), false));
-        }
-
-        assert_eq!(book.pending().count(), MAX_PENDING);
-    }
-
-    #[test]
-    fn eviction_takes_the_oldest_offer_first() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let mut book = PeerBook::load(dir.path()).expect("load");
-
-        let oldest = pending_from(b"the first one", at(1), false);
-        book.insert_pending(oldest.clone());
-        for i in 1..MAX_PENDING {
-            book.insert_pending(pending_from(
-                format!("node {i}").as_bytes(),
-                at(100 + i),
-                false,
-            ));
-        }
-        assert!(book.pending_pair(oldest.id).is_some());
-
-        book.insert_pending(pending_from(b"one too many", at(9_999), false));
-        assert!(
-            book.pending_pair(oldest.id).is_none(),
-            "the oldest unconfirmed offer should have been evicted"
-        );
-    }
-
-    #[test]
-    fn a_stranger_cannot_push_out_an_offer_the_user_already_confirmed() {
-        // Otherwise flooding the peer port would undo a pairing in progress.
-        let dir = tempfile::tempdir().expect("temp dir");
-        let mut book = PeerBook::load(dir.path()).expect("load");
-
-        let confirmed = pending_from(b"the one we want", at(1), true);
-        book.insert_pending(confirmed.clone());
-        for i in 0..(MAX_PENDING * 2) {
-            book.insert_pending(pending_from(
-                format!("flood {i}").as_bytes(),
-                at(1_000 + i),
-                false,
-            ));
-        }
-
-        assert!(
-            book.pending_pair(confirmed.id)
-                .is_some_and(|p| p.confirmed_by_us),
-            "a confirmed offer must survive a flood"
-        );
-        assert_eq!(book.pending().count(), MAX_PENDING);
-    }
-
-    #[test]
-    fn re_offering_an_existing_pair_does_not_count_against_the_bound() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let mut book = PeerBook::load(dir.path()).expect("load");
-        let pending = pending_from(b"repeat caller", at(1), false);
-
-        for _ in 0..(MAX_PENDING * 2) {
-            book.insert_pending(pending.clone());
-        }
-        assert_eq!(book.pending().count(), 1);
-    }
-
-    #[test]
-    fn confirming_something_that_is_not_pending_says_so() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let mut book = PeerBook::load(dir.path()).expect("load");
-        assert!(!book.confirm_pending(certificate(b"stranger").node_id()));
-    }
-
-    #[test]
-    fn a_pending_pair_is_found_by_the_short_id_a_human_would_type() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let mut book = PeerBook::load(dir.path()).expect("load");
-        let certificate = certificate(b"offering node");
-        let id = certificate.node_id();
-        book.insert_pending(PendingPair {
-            id,
-            name: "their-mbp".to_owned(),
-            owner: None,
-            certificate,
-            addr: PeerAddr::manual("10.0.0.2", 8400),
-            first_seen: Utc::now(),
-            confirmed_by_us: false,
-        });
-
-        assert_eq!(book.pending_by_short(&id.short()).len(), 1);
-        assert_eq!(book.pending_by_short(&id.short()[..4]).len(), 1);
-        assert_eq!(book.pending_by_short(&id.short().to_uppercase()).len(), 1);
-        assert_eq!(book.pending_by_short("zzzz").len(), 0);
-    }
-
-    #[test]
-    fn tls_accepts_paired_and_pending_certificates_and_nothing_else() {
-        // Pending certificates have to be acceptable or the handshake could
-        // never happen; everything else is rejected at the TLS layer (SPEC §6.3).
-        let dir = tempfile::tempdir().expect("temp dir");
-        let mut book = PeerBook::load(dir.path()).expect("load");
-
-        let paired = peer(b"paired node", None);
-        let paired_id = paired.id;
-        book.insert_peer(paired);
-
-        let certificate = certificate(b"pending node");
-        let pending_id = certificate.node_id();
-        book.insert_pending(PendingPair {
-            id: pending_id,
-            name: "pending".to_owned(),
-            owner: None,
-            certificate,
-            addr: PeerAddr::manual("10.0.0.3", 8400),
-            first_seen: Utc::now(),
-            confirmed_by_us: false,
-        });
-
-        let acceptable: Vec<NodeId> = book
-            .acceptable_certificates()
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
-        assert!(acceptable.contains(&paired_id));
-        assert!(acceptable.contains(&pending_id));
-        assert_eq!(acceptable.len(), 2);
+        let book = PeerBook::load(dir.path()).expect("an old book must still load");
+        assert!(book.is_paired(kept_id));
+        assert_eq!(book.peers().count(), 1);
     }
 
     #[test]

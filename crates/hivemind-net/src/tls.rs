@@ -1,13 +1,14 @@
 //! TLS 1.3 with mutual authentication, pinned by certificate fingerprint.
 //!
-//! There is no CA and no hostname verification: a connection is accepted iff
-//! the presented certificate is one listed in `peers.toml`, plus the pending
-//! pairs that the handshake endpoint alone will talk to (SPEC §6.3).
+//! There is no CA and no hostname verification. Outbound, a connection is
+//! accepted iff the presented certificate is one pinned in `peers.toml`;
+//! inbound, any well-formed certificate is admitted and the application
+//! decides (SPEC §6.3, ADR 0010).
 //!
 //! This is deliberately *not* how the public web works, and the difference is
 //! the point. There is no authority to mis-issue, no name to spoof, and no
 //! expiry to chase — the certificate a peer presents either hashes to a
-//! fingerprint a human confirmed, or the connection does not happen.
+//! fingerprint pinned when it proved the group key, or mail does not go to it.
 
 use std::sync::Arc;
 
@@ -662,8 +663,9 @@ mod handshake_tests {
 
     #[tokio::test]
     async fn a_client_the_server_has_not_paired_with_is_rejected() {
-        // SPEC §6.2: until both sides confirm, mail is refused. This is the
-        // layer below that — an unpaired node cannot even open a connection.
+        // SPEC §6.2: a node that has not proved the group key gets no mail.
+        // This is the layer below that — against a pinned configuration, an
+        // unpinned node cannot even open a connection.
         let alice = identity(1);
         let stranger = identity(3);
 

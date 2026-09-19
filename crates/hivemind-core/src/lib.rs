@@ -11,6 +11,7 @@
 //! - [`message`] — the `Message` type, its canonical encoding and signature.
 //! - [`blobs`] — content-addressed attachment storage (SPEC §4.3).
 //! - [`peer`] — node identity and fingerprints.
+//! - [`group`] — the group key, its code and its proof (SPEC §6.2, ADR 0013).
 //! - [`peerbook`] — the address book: who we have paired with (SPEC §4.2).
 //! - [`store`] — the maildir-style store; files are the source of truth (SPEC §4.3).
 //! - [`index`] — the derived `SQLite` cache and its rebuild logic.
@@ -23,6 +24,7 @@
 pub mod blobs;
 pub mod config;
 pub mod crypto;
+pub mod group;
 pub mod identity;
 pub mod index;
 pub mod message;

@@ -5,50 +5,88 @@
 //! that was already there: everything here answers a question about peers, and
 //! nothing here touches a mailbox. A child module rather than a sibling
 //! because it continues `impl MailService` and needs the private fields.
+//!
+//! Trust comes from the group key (ADR 0013). A node that proves it in a
+//! handshake is admitted — its certificate pinned in `peers.toml` — with
+//! nobody asked anything; one that does not is remembered as seen, and that
+//! is all.
 
 use super::*;
 
+/// What came of greeting a node.
+#[derive(Debug, Clone)]
+pub enum Met {
+    /// It proved the group key, and is now a peer.
+    Member(Peer),
+    /// It answered, but is not in this node's group — or this node is in none.
+    Stranger(SeenNode),
+}
+
 impl MailService {
-    /// How this node introduces itself (SPEC §7.2).
-    pub fn own_handshake(&self) -> crate::peer::Handshake {
-        crate::peer::Handshake {
+    /// How this node introduces itself to the node holding `receiver_cert`
+    /// (SPEC §7.2).
+    ///
+    /// # Errors
+    /// [`ServiceError::Unavailable`] if the group lock is poisoned.
+    pub fn own_handshake(
+        &self,
+        receiver_cert: &[u8],
+    ) -> Result<crate::peer::Handshake, ServiceError> {
+        Ok(crate::peer::Handshake {
             id: self.identity.to_string(),
             name: self.name.clone(),
             owner: self.owner.clone(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
             callback_host: self.callback_host.clone(),
             callback_port: self.peer_port,
-            // Reserved for v2 (SPEC §12). Sending nothing today keeps the
-            // field's meaning open.
+            proof: self.prove_to(receiver_cert)?,
+            // Reserved for the peer list (SPEC §5.4), which rides on the hello
+            // (#51). Sending nothing today keeps the field's meaning open.
             gossip: None,
-        }
+        })
     }
 
-    /// Introduce ourselves to a host, and record what it says back (SPEC §6.2).
+    /// Answer a handshake from the node that presented `certificate`.
     ///
-    /// This is the "first use" in trust-on-first-use: the host's certificate is
-    /// accepted so that its fingerprint can be shown to a human, and nothing is
-    /// trusted until [`MailService::confirm_pair`] is called on both sides.
+    /// Admits it if its proof of the group key verifies, and answers with ours;
+    /// otherwise remembers it as seen and refuses (SPEC §6.2).
+    ///
+    /// # Errors
+    /// [`ServiceError::NotInGroup`] if the proof does not verify, saying why,
+    /// or [`ServiceError::PeerBook`] if the admission cannot be written.
+    pub fn answer_handshake(
+        &self,
+        id: NodeId,
+        theirs: &crate::peer::Handshake,
+        certificate: &[u8],
+        addr: PeerAddr,
+    ) -> Result<crate::peer::Handshake, ServiceError> {
+        if let Err(refusal) = self.check_proof(certificate, theirs.proof.as_ref()) {
+            self.record_seen(id, Some(theirs.name.clone()), theirs.owner.clone(), addr);
+            return Err(refusal);
+        }
+        self.admit(id, theirs, certificate.to_vec(), addr)?;
+        self.own_handshake(certificate)
+    }
+
+    /// Contact a host discovery cannot find (SPEC §5.3).
+    ///
+    /// The host's certificate is accepted for the length of the handshake so
+    /// the two proofs can be exchanged, and pinned only if theirs verifies.
+    /// The key decides, as it does everywhere; nobody is asked to confirm.
     ///
     /// `host` may name a port; without one the peer port is assumed.
     ///
     /// # Errors
-    /// [`ServiceError::Peer`] if the host cannot be reached,
+    /// [`ServiceError::Peer`] if the host cannot be reached, or
     /// [`ServiceError::IdentityMismatch`] if it does not answer as the node it
-    /// claims to be, or [`ServiceError::PeerBook`] if the offer cannot be
-    /// written.
-    pub async fn join(&self, host: &str) -> Result<PendingPair, ServiceError> {
+    /// claims to be.
+    pub async fn join(&self, host: &str) -> Result<Met, ServiceError> {
         self.greet(host, AddrSource::Manual).await
     }
 
     /// `join`, recording how the address was come by.
-    ///
-    /// `join` is what a person typed; discovery reaches the same code and did
-    /// not. The distinction is what `pair --trust-network` turns on: "I found
-    /// this myself, on a network I control" is a different claim from
-    /// "somebody typed a host", and the flag used to cover only mDNS because
-    /// Tailscale's discovery went through `join` and inherited `Manual` (#21).
-    async fn greet(&self, host: &str, source: AddrSource) -> Result<PendingPair, ServiceError> {
+    pub(crate) async fn greet(&self, host: &str, source: AddrSource) -> Result<Met, ServiceError> {
         let (hostname, port) = split_host(host, DEFAULT_PEER_PORT);
         let addr = PeerAddr {
             host: hostname.clone(),
@@ -58,39 +96,108 @@ impl MailService {
         };
         let authority = addr.authority();
 
+        // The body is built after TLS, because our proof covers the
+        // certificate the host is about to present (SPEC §6.2). A poisoned
+        // lock here sends `null`, which the host refuses as unreadable — a
+        // failure either way, after an earlier panic, and not worth a second
+        // error path.
         let client = hivemind_net::client::PeerClient::joining(&self.tls)?;
-        let answer: hivemind_net::client::PeerResponse<crate::peer::Handshake> = client
-            .post(&authority, "/peer/v1/handshake", &self.own_handshake())
+        let answer = client
+            .post_bound::<_, crate::peer::Handshake>(&authority, "/peer/v1/handshake", |cert| {
+                self.own_handshake(cert).ok()
+            })
             .await?;
 
         // The certificate is the identity (SPEC §6.1); the body is a claim.
-        // A host whose one checkable claim is wrong is not one to record.
         let id = NodeId::from_certificate_der(&answer.certificate);
-        if answer.body.id != id.to_string() {
-            return Err(ServiceError::IdentityMismatch(format!(
-                "{authority} calls itself {} but presented {id}",
-                answer.body.id
-            )));
-        }
         if id == self.identity {
             return Err(ServiceError::IdentityMismatch(
                 "that address is this node".to_owned(),
             ));
         }
 
-        self.record_pairing_offer(id, &answer.body, answer.certificate, addr)?;
-        self.peers()?
-            .pending_pair(id)
-            .cloned()
-            .ok_or_else(|| ServiceError::NoSuchPeer { id: id.to_string() })
+        match answer.body {
+            Ok(theirs) => {
+                // A host whose one checkable claim is wrong is not one to
+                // record, as a member or as anything else.
+                if theirs.id != id.to_string() {
+                    return Err(ServiceError::IdentityMismatch(format!(
+                        "{authority} calls itself {} but presented {id}",
+                        theirs.id
+                    )));
+                }
+                if self
+                    .check_proof(&answer.certificate, theirs.proof.as_ref())
+                    .is_ok()
+                {
+                    let peer = self.admit(id, &theirs, answer.certificate, addr)?;
+                    return Ok(Met::Member(peer));
+                }
+                self.record_seen(id, Some(theirs.name), theirs.owner, addr.clone());
+            }
+            // It refused our proof, or we had none to offer. Either way it is
+            // a node, and now we know which one.
+            Err(hivemind_net::client::ClientError::Status { status: 403, .. }) => {
+                self.record_seen(id, None, None, addr.clone());
+            }
+            Err(error) => return Err(error.into()),
+        }
+
+        Ok(Met::Stranger(self.seen_node(id).unwrap_or(SeenNode {
+            id,
+            name: None,
+            owner: None,
+            addr,
+            last_seen: Utc::now(),
+        })))
+    }
+
+    /// Pin a node that has proved the group key (SPEC §6.2).
+    ///
+    /// A node already pinned gets its address refreshed and nothing else. Its
+    /// certificate needs no comparing: the id is that certificate's
+    /// fingerprint, so the same id is the same certificate.
+    ///
+    /// # Errors
+    /// [`ServiceError::PeerBook`] if the book cannot be written.
+    pub fn admit(
+        &self,
+        id: NodeId,
+        theirs: &crate::peer::Handshake,
+        certificate: Vec<u8>,
+        addr: PeerAddr,
+    ) -> Result<Peer, ServiceError> {
+        let mut peers = self.peers()?;
+        if let Some(peer) = peers.peer_mut(id) {
+            peer.learn_addr(addr);
+            peer.last_seen = Some(Utc::now());
+            let peer = peer.clone();
+            peers.save()?;
+            return Ok(peer);
+        }
+
+        let peer = Peer {
+            id,
+            name: theirs.name.clone(),
+            owner: theirs.owner.clone(),
+            certificate: CertificateDer::new(certificate),
+            addrs: vec![addr],
+            paired_at: Utc::now(),
+            last_seen: Some(Utc::now()),
+        };
+        peers.insert_peer(peer.clone());
+        peers.save()?;
+        drop(peers);
+
+        self.forget_seen(id);
+        Ok(peer)
     }
 
     /// Turn what a human typed into a node id.
     ///
     /// Accepts the full `hm1:` form or the eight-character short form people
     /// actually compare by eye (SPEC §6.1). A short form that matches more than
-    /// one peer is refused rather than guessed at — picking one would be
-    /// picking who gets trusted.
+    /// one node is refused rather than guessed at.
     ///
     /// # Errors
     /// [`ServiceError::NoSuchPeer`] if nothing matches, or more than one does.
@@ -99,13 +206,13 @@ impl MailService {
             return Ok(id);
         }
 
-        let peers = self.peers()?;
-        let mut matches: Vec<NodeId> = peers
-            .peers()
-            .map(|p| p.id)
-            .chain(peers.pending().map(|p| p.id))
+        let paired: Vec<NodeId> = self.peers()?.peers().map(|p| p.id).collect();
+        let mut matches: Vec<NodeId> = paired
+            .into_iter()
+            .chain(self.seen_nodes()?.into_iter().map(|s| s.id))
             .filter(|id| id.short().eq_ignore_ascii_case(typed))
             .collect();
+        matches.sort();
         matches.dedup();
 
         match matches.as_slice() {
@@ -119,8 +226,8 @@ impl MailService {
     /// Record an address discovery found for a peer we already know.
     ///
     /// Returns whether it was one. SPEC §5.4: discovery keeps the address book
-    /// current for known peers and never creates trust — a node we have not
-    /// paired with gets nothing from being on the same LAN.
+    /// current for known peers and never creates trust — a node gets nothing
+    /// from being on the same LAN.
     ///
     /// # Errors
     /// [`ServiceError::PeerBook`] if the book cannot be written.
@@ -135,7 +242,7 @@ impl MailService {
         Ok(true)
     }
 
-    /// Re-run discovery now and return how many nodes it turned up (SPEC §5.2).
+    /// Re-run discovery now and return how many nodes answered (SPEC §5.2).
     ///
     /// Tailscale is a source, never a requirement: if it is not installed, not
     /// logged in, or answers with nonsense, that is zero nodes rather than an
@@ -162,25 +269,23 @@ impl MailService {
         )
         .await;
 
-        // Each one gets a handshake, which is an introduction and not an
-        // agreement: it records a pending offer that still needs a human on
-        // both sides (SPEC §6.2). Without it there would be nothing for
-        // `hivemind peers` to list and nothing to confirm.
-        // Counted by node, not by address. The same machine answers on its
-        // MagicDNS name *and* its IP — trying both is deliberate, since which
-        // one resolves depends on the asking machine's DNS — so counting
-        // greetings reported two nodes where `hivemind peers` then listed one
-        // (#22).
-        let mut greeted: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+        // Each one is greeted: a member is admitted, anybody else is listed as
+        // seen. Counted by node, not by address — the same machine answers on
+        // its MagicDNS name *and* its IP, and trying both is deliberate, since
+        // which resolves depends on the asking machine's DNS (#22).
+        let mut answered: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
         for authority in reachable {
             match self.greet(&authority, AddrSource::Tailscale).await {
-                Ok(pending) => {
-                    greeted.insert(pending.id);
+                Ok(Met::Member(peer)) => {
+                    answered.insert(peer.id);
+                }
+                Ok(Met::Stranger(node)) => {
+                    answered.insert(node.id);
                 }
                 Err(error) => tracing::debug!(%authority, %error, "could not greet a peer"),
             }
         }
-        Ok(greeted.len())
+        Ok(answered.len())
     }
 
     /// Is this node allowed to send us mail?
@@ -199,122 +304,28 @@ impl MailService {
         Ok(self.peers()?.peers().cloned().collect())
     }
 
-    /// Everything waiting on a confirmation.
+    /// Forget a peer, or a node merely seen.
     ///
     /// # Errors
-    /// [`ServiceError::Unavailable`] if the address book lock is poisoned.
-    pub fn pending_pairs(&self) -> Result<Vec<PendingPair>, ServiceError> {
-        Ok(self.peers()?.pending().cloned().collect())
-    }
-
-    /// Record that a node introduced itself, without trusting it yet.
-    ///
-    /// # Errors
-    /// [`ServiceError::PeerBook`] if the book cannot be written.
-    pub fn record_pairing_offer(
-        &self,
-        id: NodeId,
-        handshake: &crate::peer::Handshake,
-        certificate: Vec<u8>,
-        addr: PeerAddr,
-    ) -> Result<(), ServiceError> {
-        let mut peers = self.peers()?;
-
-        // Already paired: this is a peer saying hello again, not an offer.
-        // Refresh where it can be reached and leave the trust decision alone.
-        if let Some(peer) = peers.peer_mut(id) {
-            peer.learn_addr(addr);
-            peer.last_seen = Some(Utc::now());
-            return peers.save().map_err(Into::into);
-        }
-
-        peers.insert_pending(PendingPair {
-            id,
-            name: handshake.name.clone(),
-            owner: handshake.owner.clone(),
-            certificate: CertificateDer::new(certificate),
-            addr,
-            first_seen: Utc::now(),
-            confirmed_by_us: false,
-        });
-        peers.save()?;
-        let _ = self.events.send(Event::PairPending { id });
-        Ok(())
-    }
-
-    /// Confirm a pending pair from this side (SPEC §6.2).
-    ///
-    /// Promotes it to a real peer once *we* have agreed; the other side does
-    /// the same independently, and neither will accept mail until it has.
-    ///
-    /// # Errors
-    /// [`ServiceError::NoSuchPeer`] if nothing is pending for that id.
-    pub fn confirm_pair(&self, id: NodeId) -> Result<Peer, ServiceError> {
-        let mut peers = self.peers()?;
-        let Some(pending) = peers.remove_pending(id) else {
-            return Err(ServiceError::NoSuchPeer { id: id.to_string() });
-        };
-
-        let peer = Peer {
-            id: pending.id,
-            name: pending.name,
-            owner: pending.owner,
-            certificate: pending.certificate,
-            addrs: vec![pending.addr],
-            paired_at: Utc::now(),
-            last_seen: None,
-        };
-        peers.insert_peer(peer.clone());
-        peers.save()?;
-        Ok(peer)
-    }
-
-    /// Confirm every pending offer discovery found on the LAN (SPEC §6.2.4).
-    ///
-    /// For a network you fully trust and nothing else. It skips offers that
-    /// arrived any other way — a node that dialled in from a manual address is
-    /// not on "the network you trust", it is whoever could reach the port.
-    ///
-    /// # Errors
-    /// [`ServiceError::PeerBook`] if the book cannot be written.
-    pub fn confirm_all_discovered(&self) -> Result<Vec<Peer>, ServiceError> {
-        // Both kinds of discovery, not just mDNS. A tailnet is a *stronger*
-        // boundary than a LAN segment, not a weaker one — only what was
-        // authenticated and authorised gets in — and it was excluded by
-        // accident rather than by argument (#21).
-        //
-        // `Manual` is deliberately not here: somebody who typed a host made a
-        // choice, and erasing it with a blanket flag would be a surprise.
-        let discovered: Vec<NodeId> = self
-            .peers()?
-            .pending()
-            .filter(|p| matches!(p.addr.source, AddrSource::Mdns | AddrSource::Tailscale))
-            .map(|p| p.id)
-            .collect();
-
-        discovered
-            .into_iter()
-            .map(|id| self.confirm_pair(id))
-            .collect()
-    }
-
-    /// Forget a peer.
-    ///
-    /// # Errors
-    /// [`ServiceError::NoSuchPeer`] if it was not there.
+    /// [`ServiceError::NoSuchPeer`] if it was neither.
     pub fn remove_peer(&self, id: NodeId) -> Result<(), ServiceError> {
         let mut peers = self.peers()?;
-        if !peers.remove_peer(id) {
-            peers.remove_pending(id);
+        let was_peer = peers.remove_peer(id);
+        peers.save()?;
+        drop(peers);
+
+        if self.forget_seen(id) || was_peer {
+            Ok(())
+        } else {
+            Err(ServiceError::NoSuchPeer { id: id.to_string() })
         }
-        peers.save().map_err(Into::into)
     }
 
-    /// The certificates TLS should accept, for rebuilding the trust set.
-    ///
-    /// # Errors
-    /// [`ServiceError::Unavailable`] if the address book lock is poisoned.
-    pub fn trusted_certificates(&self) -> Result<Vec<(NodeId, Vec<u8>)>, ServiceError> {
-        Ok(self.peers()?.acceptable_certificates())
+    /// One node seen outside the group.
+    fn seen_node(&self, id: NodeId) -> Option<SeenNode> {
+        self.seen_nodes()
+            .ok()?
+            .into_iter()
+            .find(|node| node.id == id)
     }
 }

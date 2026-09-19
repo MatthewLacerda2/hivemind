@@ -111,29 +111,30 @@ enum Command {
         #[arg(long)]
         stdout: bool,
     },
-    /// Introduce yourself to another node (SPEC §6.2).
+    /// Show the group this machine is in, or make one (SPEC §6.2).
+    Group {
+        #[command(subcommand)]
+        action: Option<GroupCommand>,
+    },
+    /// Join a group with the code another member printed (SPEC §6.2).
     ///
-    /// This is the first half of trust on first use: it records the other
-    /// node's fingerprint but trusts nothing. Both sides then run `pair`.
+    /// The one command a new machine runs after `init`. Every machine in the
+    /// group it can reach becomes a peer, with nobody asked anything: the code
+    /// is the decision.
+    Pair {
+        /// The group's code, `hm-…`, as `hivemind group create` printed it.
+        code: String,
+        /// Leave the group this machine is already in, for this one.
+        #[arg(long)]
+        replace: bool,
+    },
+    /// Contact a machine discovery cannot find (SPEC §5.3).
+    ///
+    /// Becomes a peer if it is in this machine's group; otherwise it is listed
+    /// as seen. Nothing is confirmed by hand.
     Join {
         /// A hostname or address, with an optional `:port`.
         host: String,
-    },
-    /// Confirm a peer, after checking its fingerprint (SPEC §6.2).
-    Pair {
-        /// The peer's short id, or its full `hm1:` form.
-        ///
-        /// Omit it only with --trust-network.
-        id: Option<String>,
-        /// Skip the confirmation prompt. For scripts, and for tests.
-        #[arg(long, short = 'y')]
-        yes: bool,
-        /// Trust every node found on this LAN, without looking at any of them.
-        ///
-        /// For a network you fully control. Anyone who can reach it can then
-        /// send this machine mail.
-        #[arg(long, conflicts_with = "id")]
-        trust_network: bool,
     },
     /// Set this machine up end to end (SPEC §2).
     Init {
@@ -171,6 +172,18 @@ enum Command {
         /// Print JSON instead of prose.
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum GroupCommand {
+    /// Make a new group and print its code.
+    Create {
+        /// Replace the group this machine is in. This is how the key rotates:
+        /// the old code stops working, and every machine that should stay
+        /// needs the new one.
+        #[arg(long)]
+        replace: bool,
     },
 }
 
@@ -276,17 +289,11 @@ async fn main() -> Result<()> {
         },
         Command::Doctor { json } => doctor::run(cli.home.as_deref(), &cli.api, json).await,
         Command::Join { host } => peers::join(&cli.api, &host).await,
-        Command::Pair {
-            id,
-            yes,
-            trust_network,
-        } => match (trust_network, id) {
-            (true, _) => peers::trust_network(&cli.api, yes).await,
-            (false, Some(id)) => peers::pair(&cli.api, &id, yes).await,
-            (false, None) => {
-                anyhow::bail!("which peer? give a short id, or --trust-network to take them all")
-            }
+        Command::Group { action } => match action {
+            None => peers::group(&cli.api).await,
+            Some(GroupCommand::Create { replace }) => peers::create(&cli.api, replace).await,
         },
+        Command::Pair { code, replace } => peers::pair(&cli.api, &code, replace).await,
         Command::Peers { action, json } => match action {
             None => peers::list(&cli.api, json).await,
             Some(PeerCommand::Refresh) => peers::refresh(&cli.api).await,

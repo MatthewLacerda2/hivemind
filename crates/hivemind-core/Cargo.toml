@@ -16,6 +16,7 @@ ed25519-dalek.workspace = true
 getrandom.workspace = true
 hostname.workspace = true
 rcgen.workspace = true
+ring.workspace = true
 rusqlite.workspace = true
 rustls-pki-types.workspace = true
 serde.workspace = true

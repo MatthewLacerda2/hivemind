@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "hivemind local API",
-    "description": "The loopback API on 127.0.0.1:8401. No authentication: reachability is the authorization, and the listener refuses to bind anywhere else.\n\n## Problem types\n\nErrors are RFC 9457 `application/problem+json`. The `type` member is stable:\n\n- `/problems/message-not-found` — No such message (404)\n- `/problems/invalid-message` — Message is not acceptable (422)\n- `/problems/no-recipients` — Message has no recipients (422)\n- `/problems/not-paired` — Not paired (403)\n- `/problems/identity-mismatch` — Identity does not match the certificate (400)\n- `/problems/bad-signature` — Signature does not verify (400)\n- `/problems/peer-unreachable` — Peer could not be reached (502)\n- `/problems/blob-not-found` — No such attachment (404)\n- `/problems/blob-too-large` — Attachment is too large (413)\n- `/problems/unsafe-attachment-name` — Attachment name is not a file name (422)\n- `/problems/internal` — Internal error (500)",
+    "description": "The loopback API on 127.0.0.1:8401. No authentication: reachability is the authorization, and the listener refuses to bind anywhere else.\n\n## Problem types\n\nErrors are RFC 9457 `application/problem+json`. The `type` member is stable:\n\n- `/problems/message-not-found` — No such message (404)\n- `/problems/invalid-message` — Message is not acceptable (422)\n- `/problems/no-recipients` — Message has no recipients (422)\n- `/problems/not-paired` — Not paired (403)\n- `/problems/already-in-group` — Already in a group (409)\n- `/problems/invalid-group-code` — Not a group code (422)\n- `/problems/identity-mismatch` — Identity does not match the certificate (400)\n- `/problems/bad-signature` — Signature does not verify (400)\n- `/problems/peer-unreachable` — Peer could not be reached (502)\n- `/problems/blob-not-found` — No such attachment (404)\n- `/problems/blob-too-large` — Attachment is too large (413)\n- `/problems/unsafe-attachment-name` — Attachment name is not a file name (422)\n- `/problems/internal` — Internal error (500)",
     "contact": {
       "name": "The hivemind contributors"
     },
@@ -22,6 +22,136 @@
         "responses": {
           "200": {
             "description": "text/event-stream of message.* events"
+          }
+        }
+      }
+    },
+    "/api/v1/group": {
+      "get": {
+        "tags": [
+          "group"
+        ],
+        "operationId": "status",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupSummary"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/group/create": {
+      "post": {
+        "tags": [
+          "group"
+        ],
+        "operationId": "create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateGroup"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedGroup"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/group/join": {
+      "post": {
+        "tags": [
+          "group"
+        ],
+        "operationId": "join",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JoinGroup"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupSummary"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           }
         }
       }
@@ -509,39 +639,6 @@
         }
       }
     },
-    "/api/v1/peers/trust-network": {
-      "post": {
-        "tags": [
-          "peers"
-        ],
-        "operationId": "trust_network",
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/PeerSummary"
-                  }
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/v1/peers/{id}": {
       "delete": {
         "tags": [
@@ -562,47 +659,6 @@
         "responses": {
           "204": {
             "description": "Forgotten"
-          },
-          "403": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/peers/{id}/pair": {
-      "post": {
-        "tags": [
-          "peers"
-        ],
-        "operationId": "confirm_pair",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "The peer's full or short id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PeerSummary"
-                }
-              }
-            }
           },
           "403": {
             "description": "",
@@ -736,9 +792,77 @@
           }
         }
       },
+      "CreateGroup": {
+        "type": "object",
+        "description": "Make a new group.",
+        "properties": {
+          "replace": {
+            "type": "boolean",
+            "description": "Leave the group this node is in for a new one. This is how a group\nrotates its key; without it, a node already in a group is refused."
+          }
+        }
+      },
+      "CreatedGroup": {
+        "type": "object",
+        "description": "A new group's code, shown once.",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "What every other machine pastes into `hivemind pair`.",
+            "example": "hm-aaaq-eaye-auda-ocaj-bifq-ydio-b4"
+          }
+        }
+      },
+      "GroupSummary": {
+        "type": "object",
+        "description": "Which group this node is in. Never the key.",
+        "required": [
+          "in_group",
+          "members"
+        ],
+        "properties": {
+          "in_group": {
+            "type": "boolean",
+            "description": "Whether this node is in a group at all."
+          },
+          "joined_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When it joined or created it."
+          },
+          "members": {
+            "type": "integer",
+            "description": "How many other nodes have proved the key to this one.",
+            "minimum": 0
+          }
+        }
+      },
+      "JoinGroup": {
+        "type": "object",
+        "description": "Join the group a code belongs to.",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "The code, as pasted. Case, the `hm-` prefix and hyphens do not matter.",
+            "example": "hm-aaaq-eaye-auda-ocaj-bifq-ydio-b4"
+          },
+          "replace": {
+            "type": "boolean",
+            "description": "Leave a different group this node is already in."
+          }
+        }
+      },
       "JoinRequest": {
         "type": "object",
-        "description": "Where to look for a node to introduce ourselves to.",
+        "description": "Where to look for a node discovery cannot find.",
         "required": [
           "host"
         ],
@@ -761,7 +885,8 @@
           "name",
           "peer_port",
           "peers",
-          "pending_pairs",
+          "in_group",
+          "seen",
           "outbox"
         ],
         "properties": {
@@ -769,6 +894,10 @@
             "type": "string",
             "description": "This node's fingerprint, in its display form.",
             "example": "hm1:w2mq-xor2-seiv-lghq-ybqb-36iv-i24o-n5vk-dpww-736k-eici-imu3-bnwq"
+          },
+          "in_group": {
+            "type": "boolean",
+            "description": "Whether this node is in a group at all (SPEC §6.2). Without one it\ncan reach nobody."
           },
           "name": {
             "type": "string",
@@ -797,9 +926,9 @@
             "description": "How many peers are paired.",
             "minimum": 0
           },
-          "pending_pairs": {
+          "seen": {
             "type": "integer",
-            "description": "How many introductions are waiting for a confirmation (SPEC §6.2).",
+            "description": "How many nodes have been seen that are not in this node's group.",
             "minimum": 0
           },
           "short_id": {
@@ -1000,14 +1129,14 @@
           },
           "paired": {
             "type": "boolean",
-            "description": "Whether mail will actually flow, or it is still waiting on a\nconfirmation from one side or the other (SPEC §6.2)."
+            "description": "Whether it has proved the group key, so mail flows (SPEC §6.2), or was\nonly seen."
           },
           "paired_at": {
             "type": [
               "string",
               "null"
             ],
-            "description": "When this side confirmed. `null` while still pending."
+            "description": "When it proved the key to this node. `null` for a node only seen."
           },
           "short_id": {
             "type": "string",
@@ -1055,7 +1184,7 @@
         "properties": {
           "found": {
             "type": "integer",
-            "description": "How many nodes answered and were greeted.",
+            "description": "How many nodes answered, members or not.",
             "minimum": 0
           }
         }
@@ -1138,7 +1267,11 @@
     },
     {
       "name": "peers",
-      "description": "Pairing and the address book"
+      "description": "Members, nodes seen, and where they are"
+    },
+    {
+      "name": "group",
+      "description": "The group this node is in (SPEC §6.2)"
     },
     {
       "name": "node",

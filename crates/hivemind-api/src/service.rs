@@ -25,7 +25,7 @@ use hivemind_core::message::{
 };
 use hivemind_core::peer::NodeId;
 use hivemind_core::peerbook::{
-    AddrSource, CertificateDer, Peer, PeerAddr, PeerBook, PeerBookError, PendingPair,
+    AddrSource, CertificateDer, Peer, PeerAddr, PeerBook, PeerBookError,
 };
 use hivemind_core::store::{MailStore, Mailbox, Outbound, RecipientState, StoreError};
 use tokio::sync::broadcast;
@@ -73,8 +73,8 @@ pub enum Event {
         /// Which one.
         id: Ulid,
     },
-    /// A node offered to pair and is waiting on a confirmation.
-    PairPending {
+    /// A node outside the group was seen for the first time (SPEC §5.4).
+    PeerSeen {
         /// Which node.
         id: NodeId,
     },
@@ -88,7 +88,7 @@ impl Event {
             Self::MessageReceived { .. } => "message.received",
             Self::MessageDelivered { .. } => "message.delivered",
             Self::MessageRead { .. } => "message.read",
-            Self::PairPending { .. } => "pair.pending",
+            Self::PeerSeen { .. } => "peer.seen",
         }
     }
 
@@ -99,8 +99,8 @@ impl Event {
             Self::MessageReceived { id }
             | Self::MessageDelivered { id }
             | Self::MessageRead { id } => *id,
-            // A pairing event is not about a message.
-            Self::PairPending { .. } => Ulid::nil(),
+            // A peer event is not about a message.
+            Self::PeerSeen { .. } => Ulid::nil(),
         }
     }
 }
@@ -150,12 +150,27 @@ pub enum ServiceError {
     /// The host answered, but not as the node it claims to be.
     #[error("{0}")]
     IdentityMismatch(String),
+    /// The other node could not prove the group key, or this node has none
+    /// (SPEC §6.2). Says which.
+    #[error("{0}")]
+    NotInGroup(String),
+    /// This node is already in a group, and the caller did not ask to replace
+    /// it (SPEC §6.2).
+    #[error("this node is already in a group; pass `replace` to leave it for this one")]
+    AlreadyInGroup,
+    /// The group code or `group.toml` said no.
+    #[error(transparent)]
+    Group(hivemind_core::group::GroupError),
     /// The index lock was poisoned by a panic in another thread.
     #[error("the index is unavailable after an earlier failure")]
     Unavailable,
 }
 
+mod group;
 mod peering;
+
+pub use group::{GroupStatus, MAX_SEEN, SeenNode};
+pub use peering::Met;
 
 /// Everything the local API and the MCP adapter can do.
 #[derive(Debug)]
@@ -164,6 +179,12 @@ pub struct MailService {
     blobs: BlobStore,
     index: Mutex<Index>,
     peers: Mutex<PeerBook>,
+    /// The group key, if this node is in a group (ADR 0013).
+    group: Mutex<Option<hivemind_core::group::Group>>,
+    /// Nodes outside the group, for `hivemind peers`. In memory only.
+    seen: Mutex<std::collections::BTreeMap<NodeId, SeenNode>>,
+    /// Where `group.toml` lives.
+    home: std::path::PathBuf,
     identity: NodeId,
     certificate: Vec<u8>,
     tls: hivemind_net::tls::LocalIdentity,
@@ -224,6 +245,7 @@ impl MailService {
         // files that exist; correct when it was not.
         index.rebuild_from(&store)?;
         let peers = PeerBook::load(root)?;
+        let group = hivemind_core::group::Group::load(root)?;
 
         let (events, _) = broadcast::channel(EVENT_BUFFER);
         Ok(Self {
@@ -231,6 +253,9 @@ impl MailService {
             blobs,
             index: Mutex::new(index),
             peers: Mutex::new(peers),
+            group: Mutex::new(group),
+            seen: Mutex::new(std::collections::BTreeMap::new()),
+            home: root.to_path_buf(),
             identity: node.id,
             tls: hivemind_net::tls::LocalIdentity::new(node.certificate.clone(), node.private_key),
             certificate: node.certificate,
@@ -1088,7 +1113,7 @@ mod tests {
     }
 
     /// The bits of a node description the store tests do not care about.
-    fn describe(id: NodeId) -> NodeDescription {
+    pub(super) fn describe(id: NodeId) -> NodeDescription {
         NodeDescription {
             id,
             certificate: b"this node".to_vec(),
@@ -1103,7 +1128,7 @@ mod tests {
         }
     }
 
-    fn service() -> (tempfile::TempDir, MailService) {
+    pub(super) fn service() -> (tempfile::TempDir, MailService) {
         let dir = tempfile::tempdir().expect("temp dir");
         let key = SigningKey::from_bytes(&[11u8; 32]);
         let identity = NodeId::from_certificate_der(b"this node");
@@ -1365,7 +1390,7 @@ mod tests {
     ) -> (tempfile::TempDir, MailService) {
         let (dir, service) = service();
         service
-            .record_pairing_offer(
+            .admit(
                 friend.node_id(),
                 &crate::peer::Handshake {
                     id: friend.node_id().to_string(),
@@ -1374,85 +1399,14 @@ mod tests {
                     version: "0.1.0".to_owned(),
                     callback_host: "10.0.0.2".to_owned(),
                     callback_port: 8400,
+                    proof: None,
                     gossip: None,
                 },
                 friend.certificate_der().to_vec(),
                 PeerAddr::manual("10.0.0.2", 8400),
             )
-            .expect("offer");
-        service.confirm_pair(friend.node_id()).expect("confirm");
+            .expect("admit");
         (dir, service)
-    }
-
-    /// Record an offer as if it had arrived from `source`.
-    fn offer_from(
-        service: &MailService,
-        friend: &hivemind_core::identity::Identity,
-        source: AddrSource,
-    ) {
-        service
-            .record_pairing_offer(
-                friend.node_id(),
-                &crate::peer::Handshake {
-                    id: friend.node_id().to_string(),
-                    name: "theirs".to_owned(),
-                    owner: None,
-                    version: "0.1.0".to_owned(),
-                    callback_host: "10.0.0.2".to_owned(),
-                    callback_port: 8400,
-                    gossip: None,
-                },
-                friend.certificate_der().to_vec(),
-                PeerAddr {
-                    host: "10.0.0.2".to_owned(),
-                    port: 8400,
-                    source,
-                    last_ok: None,
-                },
-            )
-            .expect("offer");
-    }
-
-    #[test]
-    fn trust_network_covers_tailscale_as_well_as_mdns() {
-        // #21. A tailnet is a stronger boundary than a LAN segment, not a
-        // weaker one — only what was authenticated gets in — and it was
-        // excluded because Tailscale's discovery went through `join` and
-        // inherited its `Manual` source.
-        let (_dir, service) = service();
-        let lan = hivemind_core::identity::Identity::from_seed([60u8; 32]).expect("identity");
-        let tailnet = hivemind_core::identity::Identity::from_seed([61u8; 32]).expect("identity");
-
-        offer_from(&service, &lan, AddrSource::Mdns);
-        offer_from(&service, &tailnet, AddrSource::Tailscale);
-
-        let paired = service.confirm_all_discovered().expect("confirm");
-        let ids: std::collections::HashSet<_> = paired.iter().map(|p| p.id).collect();
-
-        assert!(ids.contains(&lan.node_id()), "mDNS was always covered");
-        assert!(
-            ids.contains(&tailnet.node_id()),
-            "and a tailnet is the network somebody is most likely to control"
-        );
-    }
-
-    #[test]
-    fn trust_network_leaves_alone_what_somebody_typed() {
-        // Somebody who typed a host made a choice. Erasing it with a blanket
-        // flag would be a surprise, and the flag is about a *network* being
-        // trusted rather than about one address.
-        let (_dir, service) = service();
-        let typed = hivemind_core::identity::Identity::from_seed([62u8; 32]).expect("identity");
-        offer_from(&service, &typed, AddrSource::Manual);
-
-        assert!(
-            service
-                .confirm_all_discovered()
-                .expect("confirm")
-                .is_empty(),
-            "a manually joined peer still needs its own confirmation"
-        );
-        assert!(!service.is_paired(typed.node_id()).expect("is_paired"));
     }
 
     #[test]
@@ -1509,7 +1463,7 @@ mod tests {
         let short = friend.node_id().short();
         let (_dir, service) = service();
         service
-            .record_pairing_offer(
+            .admit(
                 friend.node_id(),
                 &crate::peer::Handshake {
                     id: friend.node_id().to_string(),
@@ -1518,13 +1472,13 @@ mod tests {
                     version: "0.1.0".to_owned(),
                     callback_host: "10.0.0.3".to_owned(),
                     callback_port: 8400,
+                    proof: None,
                     gossip: None,
                 },
                 friend.certificate_der().to_vec(),
                 PeerAddr::manual("10.0.0.3", 8400),
             )
-            .expect("offer");
-        service.confirm_pair(friend.node_id()).expect("confirm");
+            .expect("admit");
 
         assert_eq!(
             service.parse_recipient(&short).expect("resolves"),
