@@ -17,7 +17,6 @@ use hivemind_core::index::{Query, Summary};
 use hivemind_core::message::{Kind, Message, SenderKind};
 use hivemind_core::store::Mailbox;
 use serde::{Deserialize, Serialize};
-use ulid::Ulid;
 use utoipa::{IntoParams, ToSchema};
 
 use crate::problem::Problem;
@@ -441,7 +440,7 @@ pub(crate) async fn get_attachment(
     State(service): State<AppState>,
     Path((id, sha)): Path<(String, String)>,
 ) -> Result<axum::response::Response, Problem> {
-    let id = parse_id(&id)?;
+    let id = service.resolve_message(&id)?;
     let digest: hivemind_core::crypto::Sha256Digest = sha.parse().map_err(|_| {
         Problem::new(
             crate::problem::ProblemType::BlobNotFound,
@@ -614,7 +613,7 @@ pub(crate) async fn get_message(
     State(service): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<MessageBody>, Problem> {
-    let id = parse_id(&id)?;
+    let id = service.resolve_message(&id)?;
     let (mailbox, message) = service.get(id)?;
     Ok(Json(MessageBody::new(mailbox, message, service.blobs())))
 }
@@ -668,7 +667,7 @@ pub(crate) async fn reply_to_message(
     Path(id): Path<String>,
     Json(request): Json<ReplyRequest>,
 ) -> Result<(StatusCode, Json<Accepted>), Problem> {
-    let id = parse_id(&id)?;
+    let id = service.resolve_message(&id)?;
     let message = service.reply(
         id,
         request.body,
@@ -693,7 +692,7 @@ pub(crate) async fn mark_read(
     State(service): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, Problem> {
-    service.mark_read(parse_id(&id)?)?;
+    service.mark_read(service.resolve_message(&id)?)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -706,7 +705,7 @@ pub(crate) async fn get_thread(
     State(service): State<AppState>,
     Path(thread_id): Path<String>,
 ) -> Result<Json<Vec<MessageSummary>>, Problem> {
-    let thread_id = parse_id(&thread_id)?;
+    let thread_id = service.resolve_message(&thread_id)?;
     Ok(Json(
         service
             .thread(thread_id)?
@@ -765,15 +764,6 @@ where
         .await
 }
 
-fn parse_id(raw: &str) -> Result<Ulid, Problem> {
-    raw.parse().map_err(|_| {
-        Problem::new(
-            crate::problem::ProblemType::MessageNotFound,
-            format!("`{raw}` is not a message id"),
-        )
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -783,6 +773,7 @@ mod tests {
     use hivemind_core::peer::NodeId;
     use http_body_util::BodyExt as _;
     use tower::ServiceExt as _;
+    use ulid::Ulid;
 
     fn app() -> (tempfile::TempDir, Router, NodeId) {
         let dir = tempfile::tempdir().expect("temp dir");

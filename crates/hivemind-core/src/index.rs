@@ -410,6 +410,59 @@ impl Index {
         Ok(u64::try_from(count).unwrap_or(0))
     }
 
+    /// Every message whose id ends with `suffix`, newest first.
+    ///
+    /// What lets somebody type back the short id the inbox printed (#27). The
+    /// tail rather than the head because a ULID begins with its timestamp:
+    /// two messages sent in the same second share a prefix and differ only at
+    /// the end.
+    ///
+    /// Bounded at `limit`, because the caller only needs to know "one, or more
+    /// than one" and a suffix of `A` on a large mailbox would otherwise drag
+    /// every row back to answer that.
+    ///
+    /// # Errors
+    /// Returns [`IndexError::Sqlite`] on failure, or [`IndexError::CorruptRow`]
+    /// if a stored id cannot be read back.
+    pub fn ids_ending_with(&self, suffix: &str, limit: usize) -> Result<Vec<Ulid>, IndexError> {
+        // A ULID is Crockford base32 and upper case, so anything outside that
+        // matches nothing — and refusing here is what keeps `%` and `_` out of
+        // a LIKE pattern built from something a person typed.
+        if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Ok(Vec::new());
+        }
+
+        let pattern = format!("%{}", suffix.to_ascii_uppercase());
+        let mut statement = sqlite(
+            "could not prepare the id lookup",
+            self.conn.prepare(
+                // DISTINCT, because the index has one row per *mailbox*: a
+                // message sent to `everyone` is in `sent` and in the inbox
+                // at once, and without this a perfectly unambiguous tail
+                // came back as "matches 2 messages", both the same id.
+                "SELECT DISTINCT id FROM messages WHERE id LIKE ?1 \
+                 ORDER BY id DESC LIMIT ?2",
+            ),
+        )?;
+        let rows = sqlite(
+            "could not look up an id by its tail",
+            statement.query_map(
+                rusqlite::params![pattern, i64::try_from(limit).unwrap_or(i64::MAX)],
+                |row| row.get::<_, String>(0),
+            ),
+        )?;
+
+        let mut found = Vec::new();
+        for row in rows {
+            let raw = sqlite("could not read an id", row)?;
+            found.push(raw.parse::<Ulid>().map_err(|_| IndexError::CorruptRow {
+                id: raw.clone(),
+                detail: "not a ULID".to_owned(),
+            })?);
+        }
+        Ok(found)
+    }
+
     /// Run a query, newest first.
     ///
     /// # Errors

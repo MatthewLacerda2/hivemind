@@ -143,6 +143,20 @@ pub enum ServiceError {
         /// The id that was asked for.
         id: Ulid,
     },
+    /// Nothing here has an id ending that way (SPEC §10, #27).
+    #[error("no message whose id ends with `{typed}`")]
+    NoSuchMessageTail {
+        /// What the caller typed.
+        typed: String,
+    },
+    /// More than one message ends that way, and guessing is not an option.
+    #[error("`{typed}` matches {} messages: {}", .candidates.len(), .candidates.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "))]
+    AmbiguousMessage {
+        /// What the caller typed.
+        typed: String,
+        /// Every message it could have meant.
+        candidates: Vec<Ulid>,
+    },
     /// The draft was not acceptable.
     #[error(transparent)]
     Invalid(#[from] MessageError),
@@ -540,6 +554,51 @@ impl MailService {
         // A conversation reads forwards.
         found.reverse();
         Ok(found)
+    }
+
+    /// Turn what somebody typed into a message id (SPEC §10).
+    ///
+    /// Accepts the whole ULID, or **any tail of one that names exactly one
+    /// message** — which is what makes the short id the inbox prints usable.
+    /// It was not: `hivemind inbox` showed `03VYRM`, `hivemind read 03VYRM`
+    /// answered "not a message id", and only the 26-character form worked,
+    /// which the CLI never showed anywhere (#27). A short form a program
+    /// prints and then refuses is not informing anybody; it is misleading
+    /// them, and copying what is on the screen is the obvious gesture.
+    ///
+    /// The same shape `resolve_peer` has had since #19, for the same reason.
+    ///
+    /// An ambiguous tail is an **error naming the candidates**, never a
+    /// guess: reading the wrong message is worse than being asked again.
+    ///
+    /// # Errors
+    /// [`ServiceError::NoSuchMessageTail`] if nothing matches,
+    /// [`ServiceError::AmbiguousMessage`] if more than one does, or
+    /// [`ServiceError::Unavailable`] if the index lock is poisoned.
+    pub fn resolve_message(&self, typed: &str) -> Result<Ulid, ServiceError> {
+        let typed = typed.trim();
+        if let Ok(id) = typed.parse::<Ulid>() {
+            return Ok(id);
+        }
+
+        // Two is all the caller needs: "one" or "more than one". Fetching the
+        // rest to count them would be work nobody reads.
+        let found = self
+            .index
+            .lock()
+            .map_err(|_| ServiceError::Unavailable)?
+            .ids_ending_with(typed, 2)?;
+
+        match found.as_slice() {
+            [id] => Ok(*id),
+            [] => Err(ServiceError::NoSuchMessageTail {
+                typed: typed.to_owned(),
+            }),
+            _ => Err(ServiceError::AmbiguousMessage {
+                typed: typed.to_owned(),
+                candidates: found,
+            }),
+        }
     }
 
     /// Move a message from `new` to `cur` (SPEC §7.1).

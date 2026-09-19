@@ -25,6 +25,9 @@ use crate::service::ServiceError;
 pub enum ProblemType {
     /// No message with that id.
     MessageNotFound,
+    /// What was typed names more than one message, and guessing which is
+    /// worse than asking again (SPEC §10).
+    AmbiguousId,
     /// The message broke a limit in SPEC §4.1.
     InvalidMessage,
     /// The message was not addressed to anybody.
@@ -58,6 +61,7 @@ impl ProblemType {
     pub fn slug(self) -> &'static str {
         match self {
             Self::MessageNotFound => "message-not-found",
+            Self::AmbiguousId => "ambiguous-id",
             Self::InvalidMessage => "invalid-message",
             Self::NoRecipients => "no-recipients",
             Self::NotPaired => "not-paired",
@@ -78,6 +82,7 @@ impl ProblemType {
     pub fn title(self) -> &'static str {
         match self {
             Self::MessageNotFound => "No such message",
+            Self::AmbiguousId => "Id matches more than one message",
             Self::InvalidMessage => "Message is not acceptable",
             Self::NoRecipients => "Message has no recipients",
             Self::NotPaired => "Not paired",
@@ -104,7 +109,10 @@ impl ProblemType {
             Self::UnsafeAttachmentName
             | Self::InvalidMessage
             | Self::NoRecipients
-            | Self::InvalidGroupCode => StatusCode::UNPROCESSABLE_ENTITY,
+            | Self::InvalidGroupCode
+            // Understood perfectly; it just names several things. The caller
+            // has to choose, which is why the detail lists what it matched.
+            | Self::AmbiguousId => StatusCode::UNPROCESSABLE_ENTITY,
             // The request is fine; it conflicts with the group already held.
             Self::AlreadyInGroup => StatusCode::CONFLICT,
             // SPEC §6.2 names this status explicitly.
@@ -118,8 +126,9 @@ impl ProblemType {
     }
 
     /// Every slug, for the generated documentation.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::MessageNotFound,
+        Self::AmbiguousId,
         Self::InvalidMessage,
         Self::NoRecipients,
         Self::NotPaired,
@@ -180,7 +189,10 @@ impl From<ServiceError> for Problem {
         // The mapping lives here rather than at each call site so that a new
         // service error cannot reach a client as an unlabelled 500.
         let kind = match &error {
-            ServiceError::NoSuchMessage { .. } => ProblemType::MessageNotFound,
+            ServiceError::NoSuchMessage { .. } | ServiceError::NoSuchMessageTail { .. } => {
+                ProblemType::MessageNotFound
+            }
+            ServiceError::AmbiguousMessage { .. } => ProblemType::AmbiguousId,
             ServiceError::Invalid(_) => ProblemType::InvalidMessage,
             ServiceError::NoRecipients => ProblemType::NoRecipients,
             ServiceError::BadSignature => ProblemType::BadSignature,
