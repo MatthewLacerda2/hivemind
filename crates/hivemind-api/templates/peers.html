@@ -26,12 +26,15 @@
     <ul class="peers">
     {% for peer in paired %}
       <li>
-        <h3>{{ peer.name }}</h3>
+        <h3>{{ peer.name }}{% if peer.online %} <span class="online">online</span>{% endif %}</h3>
         <p class="meta">
           {% if let Some(owner) = peer.owner %}<span class="who">{{ owner }}</span>{% endif %}
           <span class="addr">{{ peer.addr }}</span>
           {% if let Some(seen) = peer.last_seen %}<time>last seen {{ seen }}</time>{% endif %}
         </p>
+        {% if !peer.sessions.is_empty() %}
+        <p class="sessions">working in {{ peer.sessions|join(", ") }}</p>
+        {% endif %}
         <p class="fingerprint"><code>{{ peer.id }}</code></p>
         <form method="post" action="/peers/{{ peer.id }}/remove">
           <button type="submit" class="danger">Forget {{ peer.short_id }}</button>

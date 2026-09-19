@@ -1095,7 +1095,9 @@
           "short_id",
           "name",
           "addrs",
-          "paired"
+          "paired",
+          "online",
+          "sessions"
         ],
         "properties": {
           "addrs": {
@@ -1120,6 +1122,10 @@
             "type": "string",
             "description": "What it calls itself. Unverified (ADR 0003)."
           },
+          "online": {
+            "type": "boolean",
+            "description": "Whether it said hello within the last two presence intervals\n(SPEC §5.5). Always `false` for a node only seen."
+          },
           "owner": {
             "type": [
               "string",
@@ -1137,6 +1143,13 @@
               "null"
             ],
             "description": "When it proved the key to this node. `null` for a node only seen."
+          },
+          "sessions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What it is working on: one label per open Claude Code session\n(SPEC §9.3). Empty until #52 fills the register."
           },
           "short_id": {
             "type": "string",

@@ -205,6 +205,9 @@ pub struct PeerInfo {
     pub online: bool,
     /// When it was last seen, RFC 3339.
     pub last_seen: Option<String>,
+    /// What each open Claude Code session on that machine is working on
+    /// (SPEC §9.3). Empty when there are none, or none reported.
+    pub sessions: Vec<String>,
 }
 
 /// What `download_attachment` returns.
@@ -417,9 +420,27 @@ impl HivemindMcp {
                        nothing is paired yet, so `send` can only reach this machine."
     )]
     async fn list_peers(&self) -> Result<Json<Vec<PeerInfo>>, McpError> {
-        // Pairing and the peer book arrive in M3 (SPEC §14). Until then this is
-        // truthfully empty rather than absent: the tool surface is the contract.
-        Ok(Json(Vec::new()))
+        // Only members, not nodes merely seen: this answers "who can I write
+        // to", and a node outside the group is not one of them (SPEC §6.2).
+        let peers = self.service.paired_peers().map_err(|e| mcp_error(&e))?;
+        Ok(Json(
+            peers
+                .into_iter()
+                .map(|peer| {
+                    let presence = self.service.presence_of(peer.id);
+                    PeerInfo {
+                        id: peer.id.short(),
+                        name: peer.name,
+                        owner: peer.owner,
+                        online: presence.is_some(),
+                        last_seen: peer.last_seen.map(|at| at.to_rfc3339()),
+                        sessions: presence
+                            .map(|p| p.sessions.into_iter().map(|s| s.label).collect())
+                            .unwrap_or_default(),
+                    }
+                })
+                .collect(),
+        ))
     }
 
     #[tool(

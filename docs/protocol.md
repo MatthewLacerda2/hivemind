@@ -14,6 +14,7 @@ frozen**.
 
 ```
 POST /peer/v1/handshake        exchange name/owner/version/id + proof of the group key
+POST /peer/v1/hello            presence: fresh proof, addresses, peer list, sessions; answered in kind
 POST /peer/v1/messages         deliver one signed message (+ inline blobs as multipart); idempotent on id
 HEAD /peer/v1/blobs/{sha}      does the sender still have it
 GET  /peer/v1/blobs/{sha}      range requests supported (resume)
@@ -56,13 +57,79 @@ presented:
   not_paired`, with a `detail` saying which. The receiver remembers the sender
   as *seen*, in memory, so `hivemind peers` can show it.
 
-A `gossip` field is reserved for the peer list, which rides on the hello (#51);
-it is never sent today and is ignored on receipt.
+`gossip` carries the sender's peer list, in the same shape the hello's `peers`
+field uses. It is here as well as on the hello so that a node admitted this
+second has the group now rather than at the next presence round.
 
 The endpoint is open to anyone who completes a TLS handshake — see
 `decisions/0010-tls-admits-strangers-the-application-rejects-them.md`. It
 reveals nothing about the mailbox. Everything else requires a peer that has
 proved the key, and answers `403 not_paired` otherwise.
+
+### `POST /peer/v1/hello`
+
+Presence (SPEC §5.5). Sent to every known peer on start, on wake, on a change
+of network, and every `presence_interval` — sixty seconds by default. One
+request each, none held open. The answer is a hello of the same shape, so a
+single request tells both sides about the other.
+
+```json
+{
+  "id": "hm1:w2mq-xor2-…",
+  "name": "laptop",
+  "owner": "matheus",
+  "version": "0.1.0",
+  "callback_host": "10.0.0.5",
+  "callback_port": 8400,
+  "proof": { "sent_at": 1750000000000, "mac": "9631…781f" },
+  "peers": [
+    {
+      "id": "hm1:k4tp-9nc1-…",
+      "name": "desktop",
+      "owner": "ana",
+      "addrs": ["10.0.0.7:8400", "desktop.tail1234.ts.net:8400"]
+    }
+  ],
+  "sessions": [{ "id": "01JXT…", "label": "hivemind" }],
+  "up": ["hm1:k4tp-9nc1-…"]
+}
+```
+
+Unlike the handshake this is **not** open to strangers. `proof` is checked
+afresh on every hello, against the current group key:
+
+- **It verifies** → the sender is marked online, its addresses are recorded,
+  its peer list is taken in, and its queued mail is sent now rather than at
+  the end of its backoff.
+- **It is missing or does not verify** → `403 not_paired`, *and the sender is
+  removed from* `peers.toml`. This is what gives `hivemind group create
+  --replace` an effect on a node that is already pinned: a proof offered once
+  at pairing time can never be withdrawn. SPEC §6.2.4 says a member whose key
+  was rotated away stops receiving mail; it is listed as seen, and returns by
+  the ordinary path if it pastes the new code.
+
+`peers` is the gossip SPEC §5.4 describes. Addresses learned from it are
+recorded with `source: "gossip"` and tried like any other. **Nothing in it is
+believed beyond "try this address":** the certificate is what gets pinned and
+the group key is what admits, so a member that lies here costs one connection
+attempt. A node named in it that is not yet a peer is greeted like one seen by
+mDNS — with a handshake, which the key decides.
+
+`sessions` is what each open Claude Code session on the sending machine is
+working on (SPEC §9.3). Presence, not address: mail goes to the node and any
+session may read it.
+
+`up` is a hint — nodes the sender has just heard from. It is **never
+believed**: the receiver sends its own hello to each and marks it online on
+the answer, or not at all. A hint costs one request and saves a peer an
+interval of looking absent to everyone but the one node it happened to reach
+first. Hints expire after one interval rather than being passed on forever,
+and are never sent back to the node they are about.
+
+A peer counts as online while its last hello is younger than **two** intervals
+— one missed round is a dropped packet, two is a machine that has gone. A
+failed delivery marks it offline at once, which is better evidence and more
+recent than any hello. There is no ping.
 
 ### `POST /peer/v1/messages`
 

@@ -78,6 +78,12 @@ pub struct PeerSummary {
     pub paired_at: Option<String>,
     /// When we last heard from it.
     pub last_seen: Option<String>,
+    /// Whether it said hello within the last two presence intervals
+    /// (SPEC §5.5). Always `false` for a node only seen.
+    pub online: bool,
+    /// What it is working on: one label per open Claude Code session
+    /// (SPEC §9.3). Empty until #52 fills the register.
+    pub sessions: Vec<String>,
 }
 
 impl From<hivemind_core::peerbook::Peer> for PeerSummary {
@@ -95,6 +101,11 @@ impl From<hivemind_core::peerbook::Peer> for PeerSummary {
             last_seen: peer.last_seen.map(|t| t.to_rfc3339()),
             name: peer.name,
             owner: peer.owner,
+            // Presence is not a property of the address book, so a summary
+            // built from a `Peer` alone cannot know it. `list_peers` fills
+            // this in; everywhere else answers about pairing, not presence.
+            online: false,
+            sessions: Vec::new(),
         }
     }
 }
@@ -112,6 +123,10 @@ impl From<crate::service::SeenNode> for PeerSummary {
             paired_at: None,
             last_seen: Some(seen.last_seen.to_rfc3339()),
             owner: seen.owner,
+            // A node that is not in the group does not say hello, so there is
+            // nothing that could make this true.
+            online: false,
+            sessions: Vec::new(),
         }
     }
 }
@@ -486,7 +501,21 @@ pub(crate) async fn list_peers(
     let mut peers: Vec<PeerSummary> = service
         .paired_peers()?
         .into_iter()
-        .map(PeerSummary::from)
+        .map(|peer| {
+            // SPEC §5.5: online and the session labels come from presence,
+            // which the address book knows nothing about.
+            let presence = service.presence_of(peer.id);
+            let mut summary = PeerSummary::from(peer);
+            if let Some(presence) = presence {
+                summary.online = true;
+                summary.sessions = presence
+                    .sessions
+                    .into_iter()
+                    .map(|session| session.label)
+                    .collect();
+            }
+            summary
+        })
         .collect();
     peers.extend(service.seen_nodes()?.into_iter().map(PeerSummary::from));
 
