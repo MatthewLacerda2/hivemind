@@ -39,7 +39,7 @@ YAML. The tell: an actually-invalid workflow *does* produce a run, a
 
 Run it against a live pull request:
 
-    just mergeable PR=12
+    just mergeable 12
 
 [`judge`] is the whole decision. It is pure and takes plain dictionaries, so
 the tests beside this file need no network.
@@ -194,6 +194,19 @@ def gh(*args: str) -> object:
 
 
 def main(argv: list[str]) -> int:
+    # `just mergeable PR=12` was documented in five places from the first
+    # commit and never ran: `PR` is a recipe parameter, so `just` hands the
+    # whole string over as its value rather than binding a variable. The
+    # generic usage line below leaves a reader looking for a broken script
+    # instead of a wrong argument, which is the expensive half (#48).
+    if len(argv) == 2 and argv[1].startswith("PR="):
+        number = argv[1][len("PR=") :] or "12"
+        print(
+            f"mergeable: the number goes positionally — `just mergeable {number}`.",
+            file=sys.stderr,
+        )
+        return 2
+
     if len(argv) != 2 or not argv[1].isdigit():
         print("usage: mergeable.py <pull-request-number>", file=sys.stderr)
         return 2
