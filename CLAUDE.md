@@ -253,7 +253,7 @@ knows works.
 
 **They only ever come down.** Lower them as files are split; never raise them
 to admit growth. `just size --report` lists what to split next, largest first —
-`service.rs` at 788 source lines is the standing answer.
+`service.rs` at 667 source lines is the standing answer.
 
 Split by concern and **group into a subfolder rather than adding a filename
 prefix**. A shared prefix on sibling files is a subfolder waiting to happen.
