@@ -30,6 +30,11 @@ hyper = { version = "1", features = ["client", "server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["server", "server-auto", "tokio", "service"] }
 axum = { version = "0.8", features = ["multipart"] }
 futures-core = "0.3"
+# Only for `join_all`, so a presence round costs the slowest peer rather than
+# the sum of them. axum already compiles this crate, so declaring it adds no
+# crates to the build; `default-features = false` keeps it that way by not
+# switching anything on that axum had not.
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 ciborium = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
 clap = { version = "4", features = ["derive", "env"] }

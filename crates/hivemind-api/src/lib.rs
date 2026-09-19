@@ -11,6 +11,7 @@ pub mod local;
 pub mod openapi;
 pub mod outbox;
 pub mod peer;
+pub mod presence;
 pub mod problem;
 pub mod service;
 pub mod web;

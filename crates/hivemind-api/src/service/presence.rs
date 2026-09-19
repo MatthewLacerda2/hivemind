@@ -102,6 +102,112 @@ impl MailService {
         self.own_hello(certificate)
     }
 
+    /// Say hello to everybody, and chase anything worth chasing (SPEC §5.5).
+    ///
+    /// One request per peer, none of them held open, all of them at once: a
+    /// round takes as long as the slowest peer rather than the sum, which
+    /// matters on a tailnet where most of the machines are asleep and each
+    /// costs a full connection timeout.
+    ///
+    /// Nothing here returns an error. A peer that did not answer is offline,
+    /// which is an outcome rather than a failure, and one unreachable machine
+    /// must not stop the round reaching the rest.
+    pub async fn presence_round(&self) {
+        let peers = match self.paired_peers() {
+            Ok(peers) => peers,
+            Err(error) => {
+                tracing::warn!(%error, "could not read the address book for a presence round");
+                return;
+            }
+        };
+
+        let greetings = peers.iter().map(|peer| self.say_hello_to(peer));
+        futures_util::future::join_all(greetings).await;
+
+        // Gossip about a node we do not peer with, and another member's
+        // "X is up". Both are claims, and this is the attempt they buy.
+        for authority in self.take_candidates() {
+            if let Err(error) = self.greet(&authority, AddrSource::Gossip).await {
+                tracing::debug!(%authority, %error, "could not greet a node we were told about");
+            }
+        }
+    }
+
+    /// Say hello to one peer, at the first address that answers.
+    ///
+    /// Marks it online on an answer and offline on running out of addresses.
+    /// An answer that cannot prove the key to *us* is refused by the ordinary
+    /// path — we are the ones checking — so what is handled here is only
+    /// whether anybody was there.
+    async fn say_hello_to(&self, peer: &Peer) {
+        let trusted = hivemind_net::tls::TrustedPeers::new(vec![(
+            peer.id,
+            peer.certificate.as_bytes().to_vec(),
+        )]);
+        let client = match hivemind_net::client::PeerClient::pinned(&self.tls, trusted) {
+            Ok(client) => client,
+            Err(error) => {
+                tracing::warn!(%error, peer = %peer.id.short(), "could not build a client");
+                return;
+            }
+        };
+
+        let hello = match self.own_hello(peer.certificate.as_bytes()) {
+            Ok(hello) => hello,
+            Err(error) => {
+                tracing::warn!(%error, "could not compose a hello");
+                return;
+            }
+        };
+
+        for addr in peer.addrs_by_preference() {
+            let authority = addr.authority();
+            match client
+                .post::<_, Hello>(&authority, "/peer/v1/hello", &hello)
+                .await
+            {
+                Ok(answer) => {
+                    self.take_in(peer.id, &answer.body);
+                    // The address worked, so the next message tries it first.
+                    if let Err(error) = self.record_reached(peer.id, &authority, Utc::now()) {
+                        tracing::debug!(%error, %authority, "could not record a working address");
+                    }
+                    return;
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        peer = %peer.id.short(),
+                        %authority,
+                        %error,
+                        "no answer to a hello"
+                    );
+                }
+            }
+        }
+
+        // Every address tried and none answered. That is the same evidence a
+        // failed delivery gives, and SPEC §5.5 says it wins over any hello.
+        self.mark_offline(peer.id);
+    }
+
+    /// Take what a peer said in answer to our hello.
+    ///
+    /// The same work `answer_hello` does on the inbound side, minus the proof:
+    /// the answer reached us over a connection pinned to that peer's
+    /// certificate, and it is *our* key that decides what we accept, which we
+    /// have already checked by being willing to talk to it.
+    fn take_in(&self, id: NodeId, theirs: &Hello) {
+        self.mark_online(id, theirs.sessions.clone());
+        self.hint(id);
+        if let Err(error) = self.absorb(&theirs.peers) {
+            tracing::debug!(%error, "could not take in a peer list");
+        }
+        for hinted in &theirs.up {
+            self.follow_up(hinted);
+        }
+        self.wake_delivery(id);
+    }
+
     /// Note that `id` was heard from, with the sessions it reported.
     ///
     /// Announces `peer.online` only on the edge, so a peer saying hello every

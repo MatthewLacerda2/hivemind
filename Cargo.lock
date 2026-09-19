@@ -1026,6 +1026,7 @@ dependencies = [
  "chrono",
  "data-encoding",
  "futures-core",
+ "futures-util",
  "hivemind-core",
  "hivemind-net",
  "http-body-util",

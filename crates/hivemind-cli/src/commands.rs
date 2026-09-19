@@ -137,7 +137,7 @@ pub(crate) async fn daemon(home: Option<&Path>, port: u16) -> Result<()> {
     Ok(())
 }
 
-/// Start the peer listener, the delivery worker and mDNS.
+/// Start the peer listener, the delivery worker, mDNS and presence.
 ///
 /// Returns their handles so the caller can wait for them on the way out.
 async fn spawn_background<F, S>(
@@ -204,7 +204,17 @@ where
         }
     });
 
-    Ok(vec![peer_listener, courier, mdns, prefetch])
+    // SPEC §5.5: say hello to everybody on start, on wake, and every
+    // `presence_interval`. This is what makes a node that comes online
+    // visible without anyone running a command, and it is the only thing
+    // that carries the peer list between members.
+    let presence = tokio::spawn(hivemind_api::presence::say_hello(
+        Arc::clone(service),
+        std::time::Duration::from_secs(config.presence_interval),
+        stop(),
+    ));
+
+    Ok(vec![peer_listener, courier, mdns, prefetch, presence])
 }
 
 /// Log prettily to the terminal and as JSON to `~/.hivemind/daemon.log`.
