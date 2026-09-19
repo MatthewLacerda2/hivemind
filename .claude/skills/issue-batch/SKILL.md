@@ -98,10 +98,11 @@ argument and is not one: `PR` is a recipe parameter, so `just` hands the whole
 string over as its value. It is refused by name rather than by a generic usage
 line (#48).
 
-The waiting is minutes per branch and no recipe does the sequence unattended —
-**#25 is exactly that gap** (`mergeable.py` needs a `--wait`). Until it lands, a
-batch pays the wait once per merge, which is the whole argument for having a
-second branch being written while the first waits.
+The waiting is minutes per branch, and `just mergeable N --wait` is what does
+it: it stops on a red run rather than sitting on it, and gives up after half an
+hour rather than never. A batch still pays the wait once per merge, which is
+the whole argument for having a second branch being written while the first
+waits.
 
 **Never hand-roll a wait loop to fill the gap.** The `ci-merge` skill has the
 one that read an empty check list as green, and why absent and passing are

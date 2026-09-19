@@ -20,7 +20,7 @@ formatting only.
 
 1. `git fetch origin && git rebase origin/main`.
 2. Push with `--force-with-lease`.
-3. Wait for CI **on the rebased head**.
+3. Wait for CI **on the rebased head** — `just mergeable N --wait` does it.
 4. **`just mergeable N`.** Not optional, and the number goes positionally
    — `PR=N` is refused with the form that works. See below.
 5. `gh pr merge N --merge`. Never `--squash`.

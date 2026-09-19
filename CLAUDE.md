@@ -174,6 +174,10 @@ CI genuinely ran on the head commit, which is a different question from whether
 the checks look green. `gh pr checks` is not a substitute — it blends runs, so a
 skipped one hides behind a real one.
 
+**To wait, `just mergeable N --wait`.** It stops on a red run rather than
+sitting on it, gives up after half an hour rather than never, and separates
+"not yet" (exit 3) from "no" (exit 1) so a caller can tell them apart.
+
 **Never hand-roll a "wait for CI" loop.** The one used for M3 through M6 was:
 
     until [ "$(gh pr view N --json statusCheckRollup --jq
