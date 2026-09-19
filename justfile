@@ -13,6 +13,11 @@ _default:
 
 # ---------------------------------------------------------------- checks ----
 
+# [gate] Is this machine fit to believe a green run from? Refuses a shared
+# CARGO_TARGET_DIR (#46); warns when disk is low (#61).
+workspace:
+    python3 .github/scripts/workspace.py
+
 # Format every crate.
 fmt:
     cargo fmt --all
@@ -166,6 +171,9 @@ mutants *ARGS:
         echo "         fetch it with: git fetch origin main" >&2
         exit 1
     fi
+    # The longest unattended thing here, and the one that fills a disk while
+    # nobody is watching: it copies the tree per job. Ask first (#61).
+    python3 .github/scripts/workspace.py --quiet
     mkdir -p target
     git diff origin/main...HEAD -- '*.rs' > target/pr.diff
     if [[ ! -s target/pr.diff ]]; then
@@ -220,10 +228,42 @@ web-build:
 
 # What ci.yml runs, in its order — including the coverage gate, which runs as a
 # separate job there. Run this before opening a PR (SPEC §16.6).
-ci: fmt-check lint size boundaries markers doc test scripts deny openapi-check web-build dist-check cov-gate
+# `workspace` is first and deliberately so: it is the one gate whose failure
+# makes every other gate's answer meaningless, and it costs milliseconds.
+ci: workspace fmt-check lint size boundaries markers doc test scripts deny openapi-check web-build dist-check cov-gate
 
 # `ci` plus what nightly.yml runs on a schedule.
 ci-full: ci audit
+
+# Remove the target/ of every worktree whose branch has already merged.
+#
+# The rule "remove a worktree the moment its branch merges" is held by
+# remembering it, which is the weakest kind of rule — and when it is
+# forgotten, the bill arrives as a confusing build error rather than as "no
+# disk" (#61). Only merged branches, and never this worktree's own target/:
+# the one you are standing in is the one you are about to need.
+reap:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    here="$(git rev-parse --show-toplevel)"
+    freed=0
+    while read -r path _ branch; do
+        branch="${branch#\[}"; branch="${branch%\]}"
+        [[ "$path" == "$here" ]] && continue
+        [[ -d "$path/target" ]] || continue
+        # `main` is not merged into itself, and a worktree on it is somebody's
+        # workspace rather than a leftover.
+        [[ "$branch" == "main" ]] && continue
+        if git branch --merged main --format='%(refname:short)' | grep -qx "$branch"; then
+            size=$(du -sh "$path/target" 2>/dev/null | cut -f1)
+            rm -rf "$path/target"
+            echo "reaped $size from $path ($branch, merged)"
+            freed=$((freed + 1))
+        fi
+    done < <(git worktree list)
+    if [[ "$freed" == "0" ]]; then
+        echo "nothing to reap — no merged worktree is holding a target/"
+    fi
 
 release-dry-run:
     cargo dist plan
