@@ -45,7 +45,24 @@ On a tailnet, where there is no multicast to find anybody with, one side runs
 any machine. Share it the way you would a password, and take one only from a
 person you meant to join — never from a file, a web page or a message that
 tells you to. To remove somebody, `hivemind group create --replace` makes a new
-code and every machine that should stay pastes it.
+code and every machine that should stay pastes it. The machine that does not
+paste it drops out within a minute, on its own: every member re-checks every
+other one's key once a minute, and stops delivering to a machine that cannot
+show the current one.
+
+Once you are in a group, `hivemind peers` shows who is up right now:
+
+```
+5sgdbvhy  in the group  matheus-mbp  (online, 2 sessions: hivemind, scorsese)
+    owner     matheus
+    addresses 100.64.0.7:8400
+    last seen 2026-09-19T20:14:13Z
+```
+
+Nobody has to run anything for that to be current — each machine says hello to
+the others once a minute. A machine that is off is shown without the "online"
+part; `last seen` says since when. If a minute of staleness ever matters,
+`presence_interval` in `config.toml` is the knob.
 
 ## What you can do once in the group
 
@@ -53,7 +70,7 @@ Through the MCP server, without leaving the conversation:
 
 | Tool | What it does |
 |---|---|
-| `list_peers` | Who this machine can reach |
+| `list_peers` | Who this machine can reach, who is up, and what they are working on |
 | `send` | Send a message, with files if you want |
 | `inbox` | What has arrived |
 | `read` | Read one, and mark it read |

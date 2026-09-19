@@ -713,7 +713,7 @@ pub(crate) async fn get_thread(
 /// The SSE stream (SPEC §7.1).
 #[utoipa::path(
     get, path = "/api/v1/events",
-    responses((status = 200, description = "text/event-stream of message.* events"))
+    responses((status = 200, description = "text/event-stream of message.* and peer.* events; the data is the id the event is about"))
 )]
 pub(crate) async fn events(
     State(service): State<AppState>,
@@ -726,7 +726,7 @@ pub(crate) async fn events(
                 Ok(event) => {
                     yield Ok(SseEvent::default()
                         .event(event.name())
-                        .data(event.id().to_string()));
+                        .data(event.data()));
                 }
                 // A subscriber that fell behind has missed events it can never
                 // get back. Keep the stream open: the client re-reads the

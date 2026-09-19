@@ -104,16 +104,31 @@ impl Event {
         }
     }
 
-    /// The id the event is about.
+    /// The message this event is about, if it is about one.
     #[must_use]
-    pub fn id(&self) -> Ulid {
+    pub fn message(&self) -> Option<Ulid> {
         match self {
             Self::MessageReceived { id }
             | Self::MessageDelivered { id }
-            | Self::MessageRead { id } => *id,
-            // A peer event is not about a message.
-            Self::PeerSeen { .. } | Self::PeerOnline { .. } | Self::PeerOffline { .. } => {
-                Ulid::nil()
+            | Self::MessageRead { id } => Some(*id),
+            Self::PeerSeen { .. } | Self::PeerOnline { .. } | Self::PeerOffline { .. } => None,
+        }
+    }
+
+    /// What the SSE stream carries as this event's data (SPEC §7.1).
+    ///
+    /// The thing the event is about, whatever kind of thing that is: a message
+    /// id, or a node id. A peer event used to send a nil ULID, which told a
+    /// client that *somebody* had come online and left it to re-read the whole
+    /// peer list to find out who.
+    #[must_use]
+    pub fn data(&self) -> String {
+        match self {
+            Self::MessageReceived { id }
+            | Self::MessageDelivered { id }
+            | Self::MessageRead { id } => id.to_string(),
+            Self::PeerSeen { id } | Self::PeerOnline { id } | Self::PeerOffline { id } => {
+                id.to_string()
             }
         }
     }
@@ -1391,6 +1406,31 @@ mod tests {
         assert_eq!(first, Event::MessageReceived { id: sent.id });
         assert_eq!(second, Event::MessageDelivered { id: sent.id });
         assert_eq!(first.name(), "message.received");
+        assert_eq!(first.data(), sent.id.to_string());
+    }
+
+    #[test]
+    fn a_peer_event_carries_the_node_it_is_about() {
+        // It used to carry a nil ULID, which told a client that *somebody*
+        // had come online and left it to re-read the whole peer list to find
+        // out who. SPEC §7.1 names these events; a name with no subject is
+        // half an event.
+        let id = NodeId::from_certificate_der(b"somebody");
+
+        for event in [
+            Event::PeerSeen { id },
+            Event::PeerOnline { id },
+            Event::PeerOffline { id },
+        ] {
+            assert_eq!(event.data(), id.to_string(), "{}", event.name());
+            assert!(
+                event.message().is_none(),
+                "a peer event is not about a message"
+            );
+        }
+
+        assert_eq!(Event::PeerOnline { id }.name(), "peer.online");
+        assert_eq!(Event::PeerOffline { id }.name(), "peer.offline");
     }
 
     /// A service whose limits are small enough to test the boundaries of.

@@ -21,7 +21,7 @@
         "operationId": "events",
         "responses": {
           "200": {
-            "description": "text/event-stream of message.* events"
+            "description": "text/event-stream of message.* and peer.* events; the data is the id the event is about"
           }
         }
       }
