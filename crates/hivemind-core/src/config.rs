@@ -335,9 +335,11 @@ mod tests {
         // is a typo away from a minute on the keyboard, and a tailnet of
         // twenty machines would then carry twelve hundred handshakes a minute
         // for an answer nobody reads that often.
-        let mut config = Config::default();
+        let mut config = Config {
+            presence_interval: 1,
+            ..Config::default()
+        };
 
-        config.presence_interval = 1;
         let error = config.validate().expect_err("one second is not polite");
         assert!(
             error.to_string().contains("presence_interval"),

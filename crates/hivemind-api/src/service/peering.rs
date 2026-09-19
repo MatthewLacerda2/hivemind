@@ -40,9 +40,7 @@ impl MailService {
             callback_host: self.callback_host.clone(),
             callback_port: self.peer_port,
             proof: self.prove_to(receiver_cert)?,
-            // Reserved for the peer list (SPEC §5.4), which rides on the hello
-            // (#51). Sending nothing today keeps the field's meaning open.
-            gossip: None,
+            gossip: self.peer_notes()?,
         })
     }
 
@@ -65,7 +63,13 @@ impl MailService {
             self.record_seen(id, Some(theirs.name.clone()), theirs.owner.clone(), addr);
             return Err(refusal);
         }
-        self.admit(id, theirs, certificate.to_vec(), addr)?;
+        self.admit(
+            id,
+            &theirs.name,
+            theirs.owner.as_deref(),
+            certificate.to_vec(),
+            addr,
+        )?;
         self.own_handshake(certificate)
     }
 
@@ -130,7 +134,13 @@ impl MailService {
                     .check_proof(&answer.certificate, theirs.proof.as_ref())
                     .is_ok()
                 {
-                    let peer = self.admit(id, &theirs, answer.certificate, addr)?;
+                    let peer = self.admit(
+                        id,
+                        &theirs.name,
+                        theirs.owner.as_deref(),
+                        answer.certificate,
+                        addr,
+                    )?;
                     return Ok(Met::Member(peer));
                 }
                 self.record_seen(id, Some(theirs.name), theirs.owner, addr.clone());
@@ -163,7 +173,8 @@ impl MailService {
     pub fn admit(
         &self,
         id: NodeId,
-        theirs: &crate::peer::Handshake,
+        name: &str,
+        owner: Option<&str>,
         certificate: Vec<u8>,
         addr: PeerAddr,
     ) -> Result<Peer, ServiceError> {
@@ -178,8 +189,8 @@ impl MailService {
 
         let peer = Peer {
             id,
-            name: theirs.name.clone(),
-            owner: theirs.owner.clone(),
+            name: name.to_owned(),
+            owner: owner.map(str::to_owned),
             certificate: CertificateDer::new(certificate),
             addrs: vec![addr],
             paired_at: Utc::now(),

@@ -292,6 +292,7 @@ mod tests {
             max_attachment_bytes: hivemind_core::config::DEFAULT_MAX_ATTACHMENT_BYTES,
             inline_max_bytes: hivemind_core::config::DEFAULT_INLINE_MAX_BYTES,
             prefetch: false,
+            presence_interval: hivemind_core::config::DEFAULT_PRESENCE_INTERVAL,
         };
         let service = MailService::open(dir.path(), node, SigningKey::from_bytes(&[11u8; 32]))
             .expect("service");
@@ -379,16 +380,8 @@ mod tests {
         service
             .admit(
                 id,
-                &crate::peer::Handshake {
-                    id: id.to_string(),
-                    name: "friend".to_owned(),
-                    owner: None,
-                    version: "0.1.0".to_owned(),
-                    callback_host: "10.0.0.1".to_owned(),
-                    callback_port: 8400,
-                    proof: None,
-                    gossip: None,
-                },
+                "friend",
+                None,
                 friend.certificate_der().to_vec(),
                 hivemind_core::peerbook::PeerAddr::manual("10.0.0.1", 8400),
             )

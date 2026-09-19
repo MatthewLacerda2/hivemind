@@ -412,16 +412,8 @@ mod tests {
         service
             .admit(
                 friend.node_id(),
-                &crate::peer::Handshake {
-                    id: friend.node_id().to_string(),
-                    name: "friend".to_owned(),
-                    owner: None,
-                    version: "0.1.0".to_owned(),
-                    callback_host: "10.0.0.1".to_owned(),
-                    callback_port: 8400,
-                    proof: None,
-                    gossip: None,
-                },
+                "friend",
+                None,
                 friend.certificate_der().to_vec(),
                 addr("10.0.0.1"),
             )

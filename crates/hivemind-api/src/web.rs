@@ -773,6 +773,7 @@ mod tests {
             max_attachment_bytes: hivemind_core::config::DEFAULT_MAX_ATTACHMENT_BYTES,
             inline_max_bytes: hivemind_core::config::DEFAULT_INLINE_MAX_BYTES,
             prefetch: false,
+            presence_interval: hivemind_core::config::DEFAULT_PRESENCE_INTERVAL,
         };
         let service = Arc::new(
             MailService::open(dir.path(), node, SigningKey::from_bytes(&[11u8; 32]))

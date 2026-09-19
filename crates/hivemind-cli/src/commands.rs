@@ -60,6 +60,7 @@ pub(crate) async fn daemon(home: Option<&Path>, port: u16) -> Result<()> {
                 max_attachment_bytes: config.max_attachment_bytes,
                 inline_max_bytes: config.inline_max_bytes,
                 prefetch: config.prefetch,
+                presence_interval: config.presence_interval,
             },
             identity.signing_key().clone(),
         )

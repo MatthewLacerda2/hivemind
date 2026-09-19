@@ -25,6 +25,11 @@ pub enum AddrSource {
     Tailscale,
     /// Typed in by a human with `hivemind join`.
     Manual,
+    /// Told to us by another member, in its hello (SPEC §5.4).
+    ///
+    /// Believed no further than "try this": what admits a node is the group
+    /// key, and what identifies it is the certificate it presents (ADR 0013).
+    Gossip,
 }
 
 /// One way to reach a peer.
