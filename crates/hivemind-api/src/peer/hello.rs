@@ -52,11 +52,16 @@ pub struct PeerNote {
 /// A Claude Code session open on the sending machine (SPEC §9.3).
 ///
 /// Presence, not address: mail is delivered to the node and any session may
-/// read it (ADR 0003). This says only how many and in what.
+/// read it (ADR 0003). This says only how many there are and what each is
+/// working on.
+///
+/// **No id.** The session id is what the hooks on *that* machine use to renew
+/// and close a registration; another node has nothing it could do with one,
+/// and a field that travels is a field that has to keep meaning something.
+/// A struct rather than a bare string because "what is it working on" is
+/// unlikely to stay the only thing worth saying about a session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionNote {
-    /// The session's id, as Claude Code passes it to the hooks.
-    pub id: String,
     /// What it is working on — the basename of its working directory.
     pub label: String,
 }

@@ -800,6 +800,109 @@ mod tests {
         (dir, router, identity)
     }
 
+    /// The same, keeping the service so a test can arrange state the HTTP
+    /// surface has no way to reach — presence, for one: it is set by a hello
+    /// arriving on the *peer* listener, which is not this router.
+    fn app_with_service() -> (tempfile::TempDir, Router, Arc<MailService>) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let identity = NodeId::from_certificate_der(b"this node");
+        let node = crate::service::NodeDescription {
+            id: identity,
+            certificate: b"this node".to_vec(),
+            private_key: Vec::new(),
+            name: "test".to_owned(),
+            owner: None,
+            callback_host: "127.0.0.1".to_owned(),
+            peer_port: 8400,
+            max_attachment_bytes: hivemind_core::config::DEFAULT_MAX_ATTACHMENT_BYTES,
+            inline_max_bytes: hivemind_core::config::DEFAULT_INLINE_MAX_BYTES,
+            prefetch: false,
+            presence_interval: hivemind_core::config::DEFAULT_PRESENCE_INTERVAL,
+        };
+        let service = Arc::new(
+            MailService::open(dir.path(), node, SigningKey::from_bytes(&[11u8; 32]))
+                .expect("service"),
+        );
+        let router = router(Arc::clone(&service));
+        (dir, router, service)
+    }
+
+    /// Put `friend` in the address book as a member.
+    fn admit(service: &Arc<MailService>, seed: u8) -> NodeId {
+        let friend = hivemind_core::identity::Identity::from_seed([seed; 32]).expect("identity");
+        let id = friend.node_id();
+        service
+            .admit(
+                id,
+                "friend",
+                Some("ana"),
+                friend.certificate_der().to_vec(),
+                hivemind_core::peerbook::PeerAddr::manual("10.0.0.9", 8400),
+            )
+            .expect("admit");
+        id
+    }
+
+    #[tokio::test]
+    async fn the_peer_list_says_who_is_online_and_what_they_are_working_on() {
+        // SPEC §5.5 and §9.1. The address book knows nothing about presence,
+        // so `list_peers` is where the two are put together — and a mutation
+        // replacing the whole handler with an empty list survived until this
+        // existed, which is the same finding in a different shape.
+        let (_dir, router, service) = app_with_service();
+        let id = admit(&service, 51);
+
+        let (status, peers) = call(&router, get("/api/v1/peers")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(peers.as_array().expect("array").len(), 1);
+        assert_eq!(peers[0]["id"], id.to_string());
+        assert_eq!(
+            peers[0]["online"], false,
+            "a peer is not online for being in peers.toml"
+        );
+        assert_eq!(peers[0]["sessions"], serde_json::json!([]));
+
+        service.mark_online(
+            id,
+            vec![crate::peer::SessionNote {
+                label: "hivemind".to_owned(),
+            }],
+        );
+
+        let (_, peers) = call(&router, get("/api/v1/peers")).await;
+        assert_eq!(peers[0]["online"], true);
+        assert_eq!(peers[0]["sessions"], serde_json::json!(["hivemind"]));
+        assert_eq!(peers[0]["paired"], true);
+        assert_eq!(peers[0]["owner"], "ana");
+    }
+
+    #[tokio::test]
+    async fn a_node_only_seen_is_listed_beside_the_members_and_is_never_online() {
+        // "Who can I mail?" and "why can I not mail that machine?" are the
+        // same question at different moments, so both are in one list.
+        let (_dir, router, service) = app_with_service();
+        let member = admit(&service, 52);
+        let stranger = NodeId::from_certificate_der(b"a stranger");
+        service.record_seen(
+            stranger,
+            Some("outsider".to_owned()),
+            None,
+            hivemind_core::peerbook::PeerAddr::manual("10.0.0.8", 8400),
+        );
+
+        let (_, peers) = call(&router, get("/api/v1/peers")).await;
+        let rows = peers.as_array().expect("array");
+        assert_eq!(rows.len(), 2);
+
+        let seen = rows
+            .iter()
+            .find(|row| row["id"] == stranger.to_string())
+            .expect("the stranger is listed");
+        assert_eq!(seen["paired"], false);
+        assert_eq!(seen["online"], false);
+        assert!(rows.iter().any(|row| row["id"] == member.to_string()));
+    }
+
     async fn call(router: &Router, request: Request<Body>) -> (StatusCode, serde_json::Value) {
         let response = router
             .clone()
