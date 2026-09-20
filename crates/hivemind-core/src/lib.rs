@@ -18,9 +18,11 @@
 //! - [`crypto`] — Ed25519 key handling, fingerprints and signing.
 //! - [`identity`] — this node's keypair and self-signed certificate.
 //! - [`config`] — `config.toml` parsing and validation.
+//! - [`binary`] — when the file a process was started from was last written.
 
 #![doc(html_root_url = "https://docs.rs/hivemind-core/0.1.0")]
 
+pub mod binary;
 pub mod blobs;
 pub mod config;
 pub mod crypto;

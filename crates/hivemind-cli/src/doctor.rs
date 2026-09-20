@@ -11,6 +11,8 @@
 use std::fmt;
 use std::path::Path;
 
+use chrono::{DateTime, Utc};
+
 use crate::colour::Paint as _;
 use hivemind_core::config::{Config, Tailscale};
 
@@ -109,6 +111,7 @@ pub(crate) fn checks(
 ) -> Vec<Check> {
     vec![
         daemon_check(api, daemon),
+        binary_check(daemon, hivemind_core::binary::ours()),
         peer_port_check(daemon),
         home_check(home),
         identity_check(home),
@@ -125,6 +128,9 @@ pub(crate) fn checks(
 pub(crate) struct DaemonFacts {
     pub(crate) short_id: String,
     pub(crate) version: String,
+    /// When the binary it started from was written, if it said. `None` from a
+    /// daemon older than #36, which did not report it at all.
+    pub(crate) binary_modified_at: Option<DateTime<Utc>>,
     pub(crate) peer_port: u16,
     pub(crate) peers: usize,
     pub(crate) discovery: bool,
@@ -148,6 +154,59 @@ fn daemon_check(api: &str, daemon: Option<&DaemonFacts>) -> Check {
             "start it with `hivemind daemon`, or `hivemind service install` to keep it running",
         ),
     }
+}
+
+/// Is the daemon running the binary that is installed? (#36)
+///
+/// `on_disk` is passed in rather than read here for the reason `judge_tailscale`
+/// takes a status string: on every machine this will be written on, nothing has
+/// been reinstalled, so a check that looked it up itself could only ever reach
+/// the half that says "fine".
+///
+/// Broken rather than a note, though nothing is on fire. The cost of this one
+/// is not a slow daemon — it is somebody testing the code they were trying to
+/// replace and reporting the result with confidence, and a non-zero exit is
+/// what stops a script believing the report.
+fn binary_check(daemon: Option<&DaemonFacts>, on_disk: Option<DateTime<Utc>>) -> Check {
+    let Some(facts) = daemon else {
+        return Check::absent("binary", "not checked — the daemon is not running");
+    };
+    let Some(running) = facts.binary_modified_at else {
+        // A daemon from before this shipped. Unknown, not broken: red here
+        // would send somebody to fix a thing that may be perfectly current.
+        return Check::absent(
+            "binary",
+            "this daemon does not say which binary it is running",
+        );
+    };
+    let Some(installed) = on_disk else {
+        return Check::absent(
+            "binary",
+            "cannot tell — this command's own binary is not readable on disk",
+        );
+    };
+
+    if crate::freshness::is_stale(Some(running), Some(installed)) {
+        Check::bad(
+            "binary",
+            format!(
+                "started {} from a binary that has since been replaced; the one on disk is from {}",
+                stamp(running),
+                stamp(installed)
+            ),
+            crate::freshness::RESTART,
+        )
+    } else {
+        Check::good(
+            "binary",
+            format!("running the binary on disk, written {}", stamp(running)),
+        )
+    }
+}
+
+/// The same shape `hivemind inbox` prints times in.
+fn stamp(when: DateTime<Utc>) -> String {
+    when.format("%Y-%m-%d %H:%M").to_string()
 }
 
 fn peer_port_check(daemon: Option<&DaemonFacts>) -> Check {
@@ -453,12 +512,24 @@ pub(crate) async fn run(home: Option<&Path>, api: &str, json: bool) -> anyhow::R
 
     let broken = checks.iter().filter(|c| c.health == Health::Bad).count();
     if broken > 0 {
-        anyhow::bail!(
-            "{broken} {} need attention",
-            if broken == 1 { "check" } else { "checks" }
-        );
+        anyhow::bail!("{}", attention(broken));
     }
     Ok(())
+}
+
+/// The sentence `doctor` exits with.
+///
+/// Its own function so the agreement can be asserted: it read "1 check need
+/// attention" for as long as the noun was the only half that was inflected.
+fn attention(broken: usize) -> String {
+    format!(
+        "{broken} {} attention",
+        if broken == 1 {
+            "check needs"
+        } else {
+            "checks need"
+        }
+    )
 }
 
 /// What the daemon says about itself, if it is up.
@@ -469,6 +540,10 @@ async fn ask_the_daemon(api: &str) -> Option<DaemonFacts> {
         version: String,
         peer_port: u16,
         peers: usize,
+        // Absent from a daemon older than #36, which is the case this whole
+        // check exists for — so it defaults rather than failing to decode.
+        #[serde(default)]
+        binary_modified_at: Option<String>,
     }
 
     let me: Me = crate::client::Client::new(api)
@@ -480,6 +555,7 @@ async fn ask_the_daemon(api: &str) -> Option<DaemonFacts> {
         version: me.version,
         peer_port: me.peer_port,
         peers: me.peers,
+        binary_modified_at: crate::freshness::from_header(me.binary_modified_at.as_deref()),
         // Read from config rather than asked over the wire: the daemon does
         // not report it, and `doctor` runs beside it on the same machine.
         discovery: hivemind_core::config::Config::load(
@@ -497,6 +573,7 @@ mod tests {
         DaemonFacts {
             short_id: "abcd1234".to_owned(),
             version: "0.1.0".to_owned(),
+            binary_modified_at: None,
             peer_port: 8400,
             peers: 2,
             discovery: true,
@@ -565,6 +642,63 @@ mod tests {
     fn a_machine_with_no_address_book_yet_has_nothing_wrong_with_it() {
         let dir = tempfile::tempdir().expect("temp dir");
         assert_eq!(addresses_check(dir.path(), 8400).health, Health::Good);
+    }
+
+    /// An instant, `seconds` after a fixed one. The absolute value means
+    /// nothing; the gap between two of them is the whole of what is tested.
+    fn at(seconds: i64) -> Option<DateTime<Utc>> {
+        DateTime::from_timestamp(1_700_000_000 + seconds, 0)
+    }
+
+    #[test]
+    fn a_daemon_running_a_binary_that_has_been_replaced_is_reported_with_the_way_out() {
+        // #36: the whole point. The version is the same on both sides — it
+        // does not move between two builds of one release — so this is driven
+        // through the only thing that differs.
+        let mut facts = facts();
+        facts.binary_modified_at = at(0);
+
+        let check = binary_check(Some(&facts), at(60 * 60));
+
+        assert_eq!(check.health, Health::Bad);
+        assert!(
+            check.detail.contains("replaced"),
+            "it has to say what happened: {check:?}"
+        );
+        let fix = check.fix.as_deref().unwrap_or_default();
+        assert!(
+            fix.contains("restart"),
+            "and the one thing that fixes it: {fix}"
+        );
+    }
+
+    #[test]
+    fn a_daemon_running_the_binary_that_is_on_disk_is_fine() {
+        // The ordinary case. A check that fired here would be ignored within
+        // a week, and then so would the one above.
+        let mut facts = facts();
+        facts.binary_modified_at = at(0);
+
+        assert_eq!(binary_check(Some(&facts), at(0)).health, Health::Good);
+    }
+
+    #[test]
+    fn a_daemon_that_never_says_which_binary_it_runs_is_absent_not_broken() {
+        // One upgraded from a version before this shipped. The answer is
+        // unknown, and unknown in red sends somebody to fix nothing.
+        assert_eq!(
+            binary_check(Some(&facts()), at(60)).health,
+            Health::Absent,
+            "the fixture reports no binary time, which is what an old daemon does"
+        );
+        assert_eq!(binary_check(None, at(60)).health, Health::Absent);
+    }
+
+    #[test]
+    fn the_summary_line_agrees_with_itself() {
+        // It read "1 check need attention" until somebody looked.
+        assert_eq!(attention(1), "1 check needs attention");
+        assert_eq!(attention(3), "3 checks need attention");
     }
 
     #[test]

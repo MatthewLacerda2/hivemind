@@ -1065,6 +1065,13 @@
           "outbox"
         ],
         "properties": {
+          "binary_modified_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When the binary this daemon is running was last written, RFC 3339.\n\n`null` when it could not be read. The version cannot answer \"is this\ndaemon the code that is installed\" — it does not move between two builds\nof one release — and this can (#36)."
+          },
           "id": {
             "type": "string",
             "description": "This node's fingerprint, in its display form.",

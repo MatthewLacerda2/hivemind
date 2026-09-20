@@ -9,8 +9,10 @@
 //! copy.
 //!
 //! The entry points are [`Daemon::start`], [`Daemon::start_with`] for a test
-//! that has to bend a setting, and [`Daemon::start_with_first_ports`], which
-//! exists so the retry can be exercised rather than presumed.
+//! that has to bend a setting, [`Daemon::start_with_first_ports`], which
+//! exists so the retry can be exercised rather than presumed, and
+//! [`Daemon::start_from`], for the one test that has to replace the binary
+//! underneath a running daemon and so cannot use the one cargo built.
 //!
 //! Starting, stopping, restarting and [`Daemon::run`] are safe inside a
 //! `#[tokio::test]`, which is what `mcp_tools.rs` needs. [`Daemon::post`],
@@ -47,6 +49,15 @@ pub(crate) struct Daemon {
     // SIGPIPE on the next one if this were dropped. Replaced on restart,
     // which is why it is not underscore-prefixed.
     stdout: BufReader<std::process::ChildStdout>,
+    // Which `hivemind` this daemon is, and the one its CLI calls go through.
+    // Almost always the binary cargo built; a copy only for the test that
+    // replaces it while the daemon runs.
+    binary: PathBuf,
+}
+
+/// The binary cargo built for this test run.
+fn built() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_hivemind"))
 }
 
 impl Daemon {
@@ -56,7 +67,16 @@ impl Daemon {
 
     /// Start with extra environment, for the settings a test needs to bend.
     pub(crate) fn start_with(name: &str, extra: &[(&str, &str)]) -> Self {
-        Self::start_retrying(name, extra, None)
+        Self::start_retrying(name, extra, None, &built())
+    }
+
+    /// Start from a particular `hivemind`, which its CLI calls also go through.
+    ///
+    /// For #36 and nothing else: the only way to watch a daemon go stale is to
+    /// replace the file it started from, and the file cargo built is shared
+    /// with every other test in this run.
+    pub(crate) fn start_from(name: &str, binary: &Path) -> Self {
+        Self::start_retrying(name, &[], None, binary)
     }
 
     /// Start with the first attempt forced onto these ports.
@@ -67,7 +87,7 @@ impl Daemon {
     /// should want it: a test that picks its own ports is reintroducing the
     /// race this harness exists to absorb.
     pub(crate) fn start_with_first_ports(name: &str, port: u16, peer_port: u16) -> Self {
-        Self::start_retrying(name, &[], Some((port, peer_port)))
+        Self::start_retrying(name, &[], Some((port, peer_port)), &built())
     }
 
     /// Start, retrying on a port collision.
@@ -77,7 +97,12 @@ impl Daemon {
     /// same number, and the loser exits during startup. Retrying with fresh
     /// numbers turns that from a flake in whichever test drew second into two
     /// seconds of nothing.
-    fn start_retrying(name: &str, extra: &[(&str, &str)], first: Option<(u16, u16)>) -> Self {
+    fn start_retrying(
+        name: &str,
+        extra: &[(&str, &str)],
+        first: Option<(u16, u16)>,
+        binary: &Path,
+    ) -> Self {
         // Three, because a collision is already unlikely and three in a row
         // is not a race any more — it is something else, and it should say so
         // rather than spin.
@@ -85,7 +110,7 @@ impl Daemon {
             let ports = first
                 .filter(|_| attempt == 1)
                 .unwrap_or_else(|| (free_port(), free_port()));
-            match Self::try_start(name, extra, ports) {
+            match Self::try_start(name, extra, ports, binary) {
                 Ok(daemon) => return daemon,
                 Err(why) => eprintln!("daemon start attempt {attempt} failed: {why}"),
             }
@@ -98,11 +123,12 @@ impl Daemon {
         name: &str,
         extra: &[(&str, &str)],
         (port, peer_port): (u16, u16),
+        binary: &Path,
     ) -> Result<Self, String> {
         let home = tempfile::tempdir().expect("temp home");
         let errors = home.path().join("daemon.stderr");
 
-        let mut process = Command::new(env!("CARGO_BIN_EXE_hivemind"))
+        let mut process = Command::new(binary)
             .args(["daemon", "--port", &port.to_string()])
             .env("HIVEMIND_HOME", home.path())
             .env("HIVEMIND_PEER_PORT", peer_port.to_string())
@@ -139,6 +165,7 @@ impl Daemon {
             home,
             errors,
             stdout: reader,
+            binary: binary.to_path_buf(),
         };
         daemon.wait_until_ready()?;
         Ok(daemon)
@@ -247,7 +274,7 @@ impl Daemon {
     /// stderr together, because which stream a complaint came out of is not
     /// what any test here is about.
     pub(crate) fn try_run(&self, args: &[&str]) -> (bool, String) {
-        let output = Command::new(env!("CARGO_BIN_EXE_hivemind"))
+        let output = Command::new(&self.binary)
             .args(args)
             .env("HIVEMIND_HOME", self.home())
             .env("HIVEMIND_API", self.api())
@@ -442,7 +469,7 @@ impl Daemon {
     /// node when they paired, and a peer that comes back on a different port
     /// is a different machine as far as the address book is concerned.
     pub(crate) fn restart(&mut self, name: &str) {
-        let mut process = Command::new(env!("CARGO_BIN_EXE_hivemind"))
+        let mut process = Command::new(&self.binary)
             .args(["daemon", "--port", &self.port.to_string()])
             .env("HIVEMIND_HOME", self.home())
             .env("HIVEMIND_PEER_PORT", self.peer_port.to_string())
