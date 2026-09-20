@@ -70,18 +70,33 @@ pub fn backoff(attempts: u32, jitter: f64) -> Duration {
 /// message.
 #[must_use]
 pub fn is_due(state: &RecipientState, now: DateTime<Utc>, jitter: f64) -> bool {
-    let Some(last) = state.last_attempt else {
+    due_after(state.attempts, state.last_attempt, now, jitter)
+}
+
+/// [`is_due`] for anything that retries on the same schedule.
+///
+/// Read receipts are the second such thing (ADR 0016): they are retried until
+/// the node they are for takes them, and one backoff written twice is one no
+/// test can tell from one.
+#[must_use]
+pub fn due_after(
+    attempts: u32,
+    last_attempt: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+    jitter: f64,
+) -> bool {
+    let Some(last) = last_attempt else {
         return true;
     };
     let waited = now.signed_duration_since(last).to_std().unwrap_or_default();
-    waited >= backoff(state.attempts, jitter)
+    waited >= backoff(attempts, jitter)
 }
 
 /// A jitter value in `[0, 1)`.
 ///
 /// Drawn from the same source as everything else random here (SPEC §6.1) so
 /// there is one place to look when asking where randomness comes from.
-fn jitter() -> f64 {
+pub(crate) fn jitter() -> f64 {
     let mut bytes = [0u8; 4];
     // A failure here is not worth taking delivery down for; the midpoint is a
     // sound delay, just an unjittered one.

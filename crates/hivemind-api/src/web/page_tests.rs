@@ -35,6 +35,7 @@ pub(super) fn app() -> (tempfile::TempDir, Router, Arc<MailService>) {
         max_attachment_bytes: hivemind_core::config::DEFAULT_MAX_ATTACHMENT_BYTES,
         inline_max_bytes: hivemind_core::config::DEFAULT_INLINE_MAX_BYTES,
         prefetch: false,
+        read_receipts: false,
         presence_interval: hivemind_core::config::DEFAULT_PRESENCE_INTERVAL,
         // Off, not `Auto`: "look for peers now" runs the real `tailscale`
         // binary under `Auto`, so what the page does next would depend on

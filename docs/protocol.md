@@ -7,7 +7,7 @@ frozen**.
 
 | Listener | Bind | Auth | Purpose |
 |---|---|---|---|
-| peer | `0.0.0.0:8400` | mutual TLS, peer must have proved the group key | daemon ↔ daemon delivery, blob transfer, handshake |
+| peer | `0.0.0.0:8400` | mutual TLS, peer must have proved the group key | daemon ↔ daemon delivery, read receipts, blob transfer, handshake |
 | local | `127.0.0.1:8401` | none (loopback only) | humans, CLI, web UI, MCP |
 
 ## Peer endpoints
@@ -16,6 +16,7 @@ frozen**.
 POST /peer/v1/handshake        exchange name/owner/version/id + proof of the group key
 POST /peer/v1/hello            presence: fresh proof, addresses, peer list, sessions; answered in kind
 POST /peer/v1/messages         deliver one signed message (+ inline blobs as multipart); idempotent on id
+POST /peer/v1/receipts         "I have read these messages of yours"; members only, idempotent
 HEAD /peer/v1/blobs/{sha}      does the sender still have it
 GET  /peer/v1/blobs/{sha}      range requests supported (resume)
 ```
@@ -167,6 +168,43 @@ state.
 
 The recipient bounds the request at its own inline budget plus the message. A
 sender configured more generously gets `413`.
+
+### `POST /peer/v1/receipts`
+
+`application/json`. A batch, because reads come in bursts — opening a
+conversation marks every unread message in it — and a handshake per message for
+a fact this size is the wrong trade:
+
+```json
+{
+  "read": [
+    { "id": "01JXT21Q00041061050R3GG28A", "read_at": "2026-09-20T10:14:00Z" }
+  ]
+}
+```
+
+`id` is the **sender's** id for the message, which is the only id either side
+has for it. `read_at` is the reader's clock, as `sent_at` is the sender's
+(SPEC §4.1); nothing is compared against it.
+
+Answers `202 Accepted` with `{"recorded": <n>}`, counting the notes that named a
+message the receiver had sent **to this caller**. Fewer than were offered is not
+an error: the sender may have deleted the message, and a receipt for one it no
+longer holds is a fact with nowhere to go rather than a failure to report.
+Refusing it would make the sender's courier retry it for ever.
+
+**The reader is the connection, never the body.** A note marks the delivery
+entry for the authenticated caller and no other, so a member can only report on
+its own reading. A caller that has not proved the group key gets `403
+not_paired`, as delivery does — a receipt writes to the mailbox.
+
+Idempotent: a note for something already recorded is a success and changes
+nothing, and the time kept is the first one. Nothing runs because a receipt
+arrived (SPEC §12).
+
+Read receipts are **off by default** and sent only when the sending node has
+`read_receipts = true` (ADR 0016). A node with them off never posts here;
+receiving is not configurable.
 
 ### `HEAD /peer/v1/blobs/{sha}`
 

@@ -55,6 +55,7 @@ pub(crate) async fn daemon(home: Option<&Path>, port: u16) -> Result<()> {
                 max_attachment_bytes: config.max_attachment_bytes,
                 inline_max_bytes: config.inline_max_bytes,
                 prefetch: config.prefetch,
+                read_receipts: config.read_receipts,
                 presence_interval: config.presence_interval,
                 tailscale: config.tailscale,
             },
@@ -185,12 +186,26 @@ where
     ));
 
     // SPEC §8: sending writes to out/ and returns; this is what empties it.
-    let courier = tokio::spawn({
+    let deliveries = tokio::spawn({
         let outbox = hivemind_api::ServiceOutbox::new(Arc::clone(service));
-        let transport = hivemind_api::outbox::PeerTransport::new(Arc::clone(service), local);
+        let transport =
+            hivemind_api::outbox::PeerTransport::new(Arc::clone(service), local.clone());
         let stop = stop();
         async move {
             hivemind_net::delivery::run(&outbox, &transport, chrono::Utc::now, stop).await;
+        }
+    });
+
+    // ADR 0016: the same arrangement for read receipts, which are owed until
+    // the node they are for takes them. A separate loop because what it carries
+    // is not mail — and it has nothing to do while `read_receipts` is off,
+    // which is the default, so nothing is queued for it to find.
+    let receipts = tokio::spawn({
+        let courier = hivemind_api::ServiceCourier::new(Arc::clone(service));
+        let transport = hivemind_api::outbox::PeerTransport::new(Arc::clone(service), local);
+        let stop = stop();
+        async move {
+            hivemind_net::receipts::run(&courier, &transport, chrono::Utc::now, stop).await;
         }
     });
 
@@ -224,7 +239,14 @@ where
         stop(),
     ));
 
-    Ok(vec![peer_listener, courier, mdns, prefetch, presence])
+    Ok(vec![
+        peer_listener,
+        deliveries,
+        receipts,
+        mdns,
+        prefetch,
+        presence,
+    ])
 }
 
 /// Log prettily to the terminal and as JSON to `~/.hivemind/daemon.log`.

@@ -88,6 +88,10 @@ pub fn router(state: Arc<MailService>) -> Router {
                 // it is raised to exactly what this node is willing to hold.
                 .layer(axum::extract::DefaultBodyLimit::max(limit)),
         )
+        // SPEC §8: a read receipt is mail carrying a fact. Members only, like
+        // delivery — and what it says is only ever about the caller's own
+        // reading, because the caller is the connection rather than the body.
+        .route("/peer/v1/receipts", post(receive_receipts))
         .route(
             "/peer/v1/blobs/{sha}",
             axum::routing::get(serve_blob).head(have_blob),
@@ -170,6 +174,35 @@ async fn receive_message(
 
     let id = service.receive(caller.node_id, message)?;
     Ok((StatusCode::ACCEPTED, Json(Delivered { id: id.to_string() })))
+}
+
+/// Record that a paired peer has read messages this node sent them.
+///
+/// Idempotent, as delivery is: a receipt for something already recorded is a
+/// success and changes nothing. A receipt naming a message this node does not
+/// hold, or one that was never addressed to the caller, is counted out rather
+/// than refused — the sender may have deleted it, and a fact with nowhere to
+/// go is not a failure to report.
+async fn receive_receipts(
+    State(service): State<Arc<MailService>>,
+    Extension(caller): Extension<CallerIdentity>,
+    Json(request): Json<hivemind_core::receipts::ReadReceipts>,
+) -> Result<(StatusCode, Json<hivemind_core::receipts::Recorded>), Problem> {
+    let span = tracing::info_span!("receipts", peer = %caller.node_id.short());
+    let _entered = span.enter();
+
+    if !service.is_paired(caller.node_id)? {
+        return Err(Problem::new(
+            ProblemType::NotPaired,
+            "this node has not admitted you; are both machines in the same group?",
+        ));
+    }
+
+    let recorded = service.record_read_receipts(caller.node_id, &request.read)?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(hivemind_core::receipts::Recorded { recorded }),
+    ))
 }
 
 /// Pull the message and its inline blobs out of a delivery.
@@ -392,6 +425,8 @@ mod blob_tests;
 mod handshake_tests;
 #[cfg(test)]
 mod hello_tests;
+#[cfg(test)]
+mod receipt_tests;
 
 #[cfg(test)]
 mod tests {
@@ -424,6 +459,7 @@ mod tests {
             max_attachment_bytes: hivemind_core::config::DEFAULT_MAX_ATTACHMENT_BYTES,
             inline_max_bytes: hivemind_core::config::DEFAULT_INLINE_MAX_BYTES,
             prefetch: false,
+            read_receipts: false,
             presence_interval: hivemind_core::config::DEFAULT_PRESENCE_INTERVAL,
             tailscale: hivemind_core::config::Tailscale::Auto,
         };

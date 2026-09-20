@@ -13,4 +13,5 @@ pub mod client;
 pub mod delivery;
 pub mod discovery;
 pub mod listener;
+pub mod receipts;
 pub mod tls;

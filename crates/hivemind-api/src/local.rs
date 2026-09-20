@@ -654,6 +654,7 @@ mod tests {
             max_attachment_bytes: hivemind_core::config::DEFAULT_MAX_ATTACHMENT_BYTES,
             inline_max_bytes: hivemind_core::config::DEFAULT_INLINE_MAX_BYTES,
             prefetch: false,
+            read_receipts: false,
             presence_interval: hivemind_core::config::DEFAULT_PRESENCE_INTERVAL,
             tailscale: hivemind_core::config::Tailscale::Auto,
         };
@@ -680,6 +681,7 @@ mod tests {
             max_attachment_bytes: hivemind_core::config::DEFAULT_MAX_ATTACHMENT_BYTES,
             inline_max_bytes: hivemind_core::config::DEFAULT_INLINE_MAX_BYTES,
             prefetch: false,
+            read_receipts: false,
             presence_interval: hivemind_core::config::DEFAULT_PRESENCE_INTERVAL,
             tailscale: hivemind_core::config::Tailscale::Auto,
         };

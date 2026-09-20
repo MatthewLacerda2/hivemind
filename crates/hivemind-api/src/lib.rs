@@ -20,5 +20,5 @@ pub mod web;
 
 pub use local::router;
 pub use openapi::ApiDoc;
-pub use outbox::{ServiceOutbox, ServiceSink};
+pub use outbox::{ServiceCourier, ServiceOutbox, ServiceSink};
 pub use service::{Draft, Event, MailService, NodeDescription, ServiceError};

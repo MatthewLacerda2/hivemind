@@ -155,6 +155,11 @@ impl MailService {
         match self.store.move_to(Mailbox::New, Mailbox::Cur, id) {
             Ok(()) => {
                 self.index()?.set_mailbox(id, Mailbox::New, Mailbox::Cur)?;
+                // Only on the transition: a second click is not a second read,
+                // and the sender is owed the moment it was first opened.
+                if let Ok(message) = self.store.get(Mailbox::Cur, id) {
+                    self.owe_read_receipt(&message);
+                }
                 let _ = self.events.send(Event::MessageRead { id });
                 Ok(())
             }

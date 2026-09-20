@@ -290,6 +290,39 @@ impl RecipientState {
     }
 }
 
+/// Write a JSON body to `path` by writing a temporary file and renaming it.
+///
+/// The rename is the only step visible to a reader, and it is atomic: the file
+/// is either absent or complete, never half-written (ADR 0002). The temporary
+/// file is in the same directory so the rename cannot cross a filesystem
+/// boundary and stop being atomic, and its suffix keeps it out of every
+/// listing here, which only accept `.json`.
+///
+/// Shared with the receipt queue, which is a directory of small JSON files
+/// with the same durability requirement and no reason to write them a second
+/// way.
+pub(crate) fn write_atomic<T: serde::Serialize>(
+    path: &std::path::Path,
+    body: &T,
+) -> Result<(), StoreError> {
+    let temp_path = path.with_extension("json.tmp");
+
+    let json = serde_json::to_vec_pretty(body).map_err(|source| StoreError::Io {
+        context: format!("could not encode {}", path.display()),
+        source: std::io::Error::other(source),
+    })?;
+
+    fs::write(&temp_path, &json).map_err(|source| StoreError::Io {
+        context: format!("could not write {}", temp_path.display()),
+        source,
+    })?;
+
+    fs::rename(&temp_path, path).map_err(|source| StoreError::Io {
+        context: format!("could not move {} into place", temp_path.display()),
+        source,
+    })
+}
+
 /// The on-disk mail store.
 #[derive(Debug, Clone)]
 pub struct MailStore {
@@ -366,28 +399,7 @@ impl MailStore {
         id: Ulid,
         body: &T,
     ) -> Result<(), StoreError> {
-        let final_path = self.path_of(mailbox, id);
-        // Same directory as the destination, so the rename below cannot cross a
-        // filesystem boundary and stop being atomic. The suffix keeps it out of
-        // `list`, which only accepts `.json`.
-        let temp_path = final_path.with_extension("json.tmp");
-
-        let json = serde_json::to_vec_pretty(body).map_err(|source| StoreError::Io {
-            context: format!("could not encode {id}"),
-            source: std::io::Error::other(source),
-        })?;
-
-        fs::write(&temp_path, &json).map_err(|source| StoreError::Io {
-            context: format!("could not write {}", temp_path.display()),
-            source,
-        })?;
-
-        // The only step that is visible to a reader, and it is atomic: the
-        // message is either absent or complete, never half-written (ADR 0002).
-        fs::rename(&temp_path, &final_path).map_err(|source| StoreError::Io {
-            context: format!("could not move {} into place", temp_path.display()),
-            source,
-        })
+        write_atomic(&self.path_of(mailbox, id), body)
     }
 
     /// Read a message out of a mailbox.

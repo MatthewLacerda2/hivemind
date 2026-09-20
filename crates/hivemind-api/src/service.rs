@@ -27,6 +27,7 @@ use hivemind_core::peer::NodeId;
 use hivemind_core::peerbook::{
     AddrSource, CertificateDer, Peer, PeerAddr, PeerBook, PeerBookError,
 };
+use hivemind_core::receipts::ReceiptBook;
 use hivemind_core::store::{MailStore, Mailbox, Outbound, RecipientState, StoreError};
 use tokio::sync::{broadcast, watch};
 use ulid::Ulid;
@@ -223,6 +224,7 @@ mod group;
 mod peering;
 mod presence;
 mod query;
+mod receipts;
 mod receive;
 mod recipients;
 mod send;
@@ -239,6 +241,9 @@ pub use sessions::{SESSION_TTL, Session};
 pub struct MailService {
     store: MailStore,
     blobs: BlobStore,
+    /// Read receipts this node owes other nodes (ADR 0016). A queue of files
+    /// beside `mail/`, retried until the node each is for takes it.
+    receipts: ReceiptBook,
     index: Mutex<Index>,
     peers: Mutex<PeerBook>,
     /// The group key, if this node is in a group (ADR 0013).
@@ -284,6 +289,9 @@ pub struct MailService {
     max_attachment_bytes: u64,
     inline_max_bytes: u64,
     prefetch: bool,
+    /// Whether to tell a sender when their message has been read here
+    /// (SPEC §8). Off unless the person whose reading it describes said so.
+    read_receipts: bool,
     signing_key: SigningKey,
     events: broadcast::Sender<Event>,
     closing: watch::Sender<bool>,
@@ -314,6 +322,8 @@ pub struct NodeDescription {
     /// Fetch lazy attachments as soon as a message arrives, rather than on
     /// first access (SPEC §8).
     pub prefetch: bool,
+    /// Tell a sender when their message has been read here (SPEC §8).
+    pub read_receipts: bool,
     /// Seconds between presence rounds (SPEC §5.5), and half the window a
     /// hello keeps a peer looking online for.
     pub presence_interval: u64,
@@ -335,6 +345,7 @@ impl MailService {
     ) -> Result<Self, ServiceError> {
         let store = MailStore::open(root.join("mail"))?;
         let blobs = BlobStore::open(root.join("blobs"))?;
+        let receipts = ReceiptBook::open(root.join("receipts"))?;
         let mut index = Index::open(&root.join("index.db"))?;
         // Cheap when the index was already current, because it is only the
         // files that exist; correct when it was not.
@@ -358,6 +369,7 @@ impl MailService {
         Ok(Self {
             store,
             blobs,
+            receipts,
             index: Mutex::new(index),
             peers: Mutex::new(peers),
             group: Mutex::new(group),
@@ -381,6 +393,7 @@ impl MailService {
             max_attachment_bytes: node.max_attachment_bytes,
             inline_max_bytes: node.inline_max_bytes,
             prefetch: node.prefetch,
+            read_receipts: node.read_receipts,
             signing_key,
             events,
             closing,
@@ -536,7 +549,7 @@ pub(crate) mod tests {
     }
 
     /// The bits of a node description the store tests do not care about.
-    pub(super) fn describe(id: NodeId) -> NodeDescription {
+    pub(crate) fn describe(id: NodeId) -> NodeDescription {
         NodeDescription {
             id,
             certificate: b"this node".to_vec(),
@@ -548,6 +561,7 @@ pub(crate) mod tests {
             max_attachment_bytes: hivemind_core::config::DEFAULT_MAX_ATTACHMENT_BYTES,
             inline_max_bytes: hivemind_core::config::DEFAULT_INLINE_MAX_BYTES,
             prefetch: false,
+            read_receipts: false,
             presence_interval: hivemind_core::config::DEFAULT_PRESENCE_INTERVAL,
             tailscale: hivemind_core::config::Tailscale::Auto,
         }
@@ -580,7 +594,7 @@ pub(crate) mod tests {
         (dir, service)
     }
 
-    pub(super) fn draft_to_self(service: &MailService, subject: &str, body: &str) -> Draft {
+    pub(crate) fn draft_to_self(service: &MailService, subject: &str, body: &str) -> Draft {
         Draft {
             to: vec![Recipient::Node(service.identity())],
             subject: subject.to_owned(),

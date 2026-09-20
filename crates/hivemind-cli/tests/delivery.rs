@@ -52,18 +52,18 @@ fn a_message_says_which_recipient_has_it_and_which_is_still_owed_one() {
     // proves very little: "the right one's state" has to be distinguishable
     // from "all of them".
     let sender = Daemon::start("sender");
-    let here = Daemon::start("here");
+    let reader = Daemon::start("reader");
     let mut away = Daemon::start("away");
-    pair(&sender, &here);
+    pair(&sender, &reader);
     pair(&sender, &away);
 
-    let here_id = here.node_id();
+    let reader_id = reader.node_id();
     let away_id = away.node_id();
     away.stop();
 
     sender.run(&[
         "send",
-        &here_id,
+        &reader_id,
         &away_id,
         "-s",
         "two machines",
@@ -96,7 +96,7 @@ fn a_message_says_which_recipient_has_it_and_which_is_still_owed_one() {
 
     let took_it = lines
         .iter()
-        .find(|line| line["node"] == here_id)
+        .find(|line| line["node"] == reader_id)
         .expect("the machine that is up");
     assert_eq!(took_it["state"], "delivered");
     assert!(took_it["delivered_at"].is_string());
@@ -147,4 +147,127 @@ fn the_listing_marks_a_message_nobody_has_taken_yet() {
         );
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
+}
+
+#[test]
+fn a_read_receipt_travels_back_and_only_for_the_machine_that_read_it() {
+    // The test #31's roadmap asks for, with a second recipient so that "the
+    // right machine's state" is distinguishable from "all of them": send to a
+    // peer that is off, see `queued`, bring the peer up, see `delivered`, read
+    // at the far end and see `read`.
+    let sender = Daemon::start("sender");
+    let reader = Daemon::start_with("reader", &[("HIVEMIND_READ_RECEIPTS", "true")]);
+    let mut away = Daemon::start_with("away", &[("HIVEMIND_READ_RECEIPTS", "true")]);
+    pair(&sender, &reader);
+    pair(&sender, &away);
+
+    let reader_id = reader.node_id();
+    let away_id = away.node_id();
+    away.stop();
+
+    sender.run(&[
+        "send",
+        &reader_id,
+        &away_id,
+        "-s",
+        "tell me when you read it",
+        "--",
+        "no hurry",
+    ]);
+
+    // One machine has it and the other cannot, so nothing is read yet.
+    let waiting = until(
+        &sender,
+        "tell me when you read it",
+        "delivered to exactly one of the two",
+        |state| state["delivered"] == 1,
+    );
+    assert_eq!(waiting["read"], 0);
+
+    // She opens it. The receipt comes back over the same mutual TLS the
+    // message went out on, and marks her entry and nobody else's.
+    let arrived = reader.wait_for("tell me when you read it");
+    reader.run(&["read", arrived["id"].as_str().expect("an id")]);
+
+    let one_read = until(
+        &sender,
+        "tell me when you read it",
+        "read by one of the two",
+        |state| state["read"] == 1,
+    );
+    assert_eq!(
+        one_read["state"], "queued",
+        "the machine that is off still has not had it: {one_read}"
+    );
+
+    let id = json(&sender.run(&["sent", "--json"]))[0]["id"]
+        .as_str()
+        .expect("an id")
+        .to_owned();
+    let opened = json(&sender.run(&["read", &id, "--json"]));
+    let lines = opened["recipients"].as_array().expect("a line each");
+    let hers = lines
+        .iter()
+        .find(|line| line["node"] == reader_id)
+        .expect("the machine that read it");
+    assert_eq!(hers["state"], "read");
+    assert!(hers["read_at"].is_string(), "with the time she read it");
+    assert_eq!(
+        lines
+            .iter()
+            .find(|line| line["node"] == away_id)
+            .expect("the machine that is off")["state"],
+        "queued"
+    );
+
+    // Monday morning: the other laptop comes back, takes the message and is
+    // read too. Only then is the message as a whole read.
+    away.restart("away");
+    let arrived = away.wait_for("tell me when you read it");
+    away.run(&["read", arrived["id"].as_str().expect("an id")]);
+
+    let both = until(
+        &sender,
+        "tell me when you read it",
+        "read by both",
+        |state| state["state"] == "read",
+    );
+    assert_eq!(both["read"], 2, "{both}");
+    assert_eq!(both["delivered"], 2);
+}
+
+#[test]
+fn nothing_comes_back_from_a_machine_that_has_not_turned_receipts_on() {
+    // The default, and ADR 0016's whole argument: that a machine took a
+    // message is a fact about a daemon, and that somebody opened it is a fact
+    // about a person. The message is still reported delivered.
+    let sender = Daemon::start("sender");
+    let quiet = Daemon::start("quiet");
+    pair(&sender, &quiet);
+
+    sender.run(&[
+        "send",
+        &quiet.node_id(),
+        "-s",
+        "no receipt for this",
+        "--",
+        "hello",
+    ]);
+
+    let arrived = quiet.wait_for("no receipt for this");
+    quiet.run(&["read", arrived["id"].as_str().expect("an id")]);
+
+    let delivered = until(&sender, "no receipt for this", "delivered", |state| {
+        state["state"] == "delivered"
+    });
+    assert_eq!(delivered["read"], 0, "{delivered}");
+
+    // Long enough for a receipt to have been carried if one had been queued:
+    // the courier ticks every second and the peer is up and reachable.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    assert_eq!(
+        state_of(&sender, "no receipt for this")["read"],
+        0,
+        "reading it must not have been reported"
+    );
 }

@@ -56,6 +56,12 @@ pub(crate) struct Daemon {
     // Almost always the binary cargo built; a copy only for the test that
     // replaces it while the daemon runs.
     binary: PathBuf,
+    // The settings this daemon was started with beyond the defaults above.
+    // Kept so `restart` starts the same daemon rather than a differently
+    // configured one: a test that bent a setting and then restarted used to
+    // lose it silently, and what it then observed was the default behaving
+    // correctly (#31).
+    extra: Vec<(String, String)>,
 }
 
 /// The binary cargo built for this test run.
@@ -169,6 +175,10 @@ impl Daemon {
             errors,
             stdout: reader,
             binary: binary.to_path_buf(),
+            extra: extra
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect(),
         };
         daemon.wait_until_ready()?;
         Ok(daemon)
@@ -485,6 +495,7 @@ impl Daemon {
             .env("HIVEMIND_NOTIFICATIONS", "false")
             .env("HIVEMIND_DISCOVERY", "false")
             .env("HIVEMIND_LOG", "warn")
+            .envs(self.extra.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .stdout(Stdio::piped())
             .stderr(Stdio::from(
                 std::fs::File::create(&self.errors).expect("a file for the daemon stderr"),
