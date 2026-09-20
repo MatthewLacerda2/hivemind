@@ -20,7 +20,7 @@ use crate::store::{MailStore, Mailbox};
 /// Bumping this throws the index away and rebuilds it. That is the whole
 /// migration story, and it is why the index must never hold anything the mail
 /// files do not (SPEC §4.3).
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// What a listing shows without opening the message (SPEC §9.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +70,48 @@ pub struct Query {
     pub limit: Option<usize>,
     /// Where to continue from (SPEC §7.1). `None` starts at the newest.
     pub cursor: Option<Cursor>,
+}
+
+/// One conversation, as a list of them shows it (SPEC §7.1, #43).
+///
+/// A conversation **is** a thread. There is no second concept beside it: this
+/// is an aggregate over the messages carrying one `thread_id`, and everything
+/// in it is derived rather than stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conversation {
+    /// The thread every message in it carries, which is also the id of the
+    /// message that opened it.
+    pub thread_id: Ulid,
+    /// The subject the conversation opened with. The replies are all `Re:` it,
+    /// so the newest message's subject would show the prefix rather than the
+    /// subject.
+    pub subject: String,
+    /// Every machine that has spoken in it, or that a message in it was
+    /// addressed to by node id. Sorted, so two reads of one conversation agree.
+    pub participants: Vec<NodeId>,
+    /// How many messages are in it, counted **once each** however many boxes
+    /// hold them.
+    pub messages: u64,
+    /// How many of those are still unread.
+    pub unread: u64,
+    /// The most recent message's id.
+    pub last_id: Ulid,
+    /// Who sent the most recent message.
+    pub last_from: NodeId,
+    /// Whether a person or an agent wrote the most recent message.
+    pub last_sender_kind: SenderKind,
+    /// When it was sent. This is what the list is ordered by, newest first.
+    pub last_at: DateTime<Utc>,
+}
+
+/// Which conversations to list (SPEC §7.1).
+#[derive(Debug, Clone, Default)]
+pub struct ConversationQuery {
+    /// Only conversations one machine is in: it has spoken in them, or a
+    /// message in them was addressed to it.
+    pub with: Option<NodeId>,
+    /// How many to return. `None` means every one.
+    pub limit: Option<usize>,
 }
 
 /// A position in a result set, for continuing a listing.
@@ -176,6 +218,17 @@ CREATE TABLE messages (
     sent_at          INTEGER NOT NULL,
     mailbox          TEXT NOT NULL,
     attachment_names TEXT NOT NULL,
+    -- The node ids in `to`, as a JSON array of upper-case hex, so that a
+    -- conversation can name the machine it is with before that machine has
+    -- answered (#43). Hex because the only other side of that question is
+    -- `hex(from_node)`, and the two have to be comparable in one query.
+    --
+    -- Node recipients only. `everyone` and an owner name are expanded at send
+    -- time into the outbox envelope (SPEC §8), and `sent/` keeps the signed
+    -- message alone — so a rebuild from the files could not recover an
+    -- expansion, and an index that cannot be rebuilt is not a cache
+    -- (ADR 0002).
+    to_nodes         TEXT NOT NULL,
     -- A message addressed to its own sender genuinely exists twice: once in
     -- `sent` as our copy, once in `new` as the one we received. The pair is
     -- the identity, not the id alone.
@@ -192,6 +245,55 @@ CREATE INDEX messages_by_mailbox ON messages(mailbox);
 -- table needs would buy nothing.
 CREATE VIRTUAL TABLE messages_fts USING fts5(id UNINDEXED, subject, body);
 ";
+
+/// The conversation list (#43), up to its `WHERE`, which the caller extends.
+///
+/// Three things happen here that are easy to get wrong one layer up:
+///
+/// - **`msg` groups by id.** The table is keyed `(id, mailbox)`, so a message
+///   addressed to its own sender is two rows — and a count over the rows would
+///   say a conversation with oneself has twice the messages it has (#34). The
+///   bare columns are safe because every copy of one message agrees on all of
+///   them; `mailbox` is the only thing that differs, and it is aggregated.
+/// - **`party` unions senders with node recipients**, so a subject nobody has
+///   answered yet still names the machine it was sent to.
+/// - **the subject is the oldest message's**, because the replies are all
+///   `Re:` it.
+const CONVERSATIONS: &str = "
+WITH msg AS (
+    SELECT id, thread_id, subject, from_node, sender_kind, sent_at, to_nodes,
+           MAX(mailbox = 'new') AS unread
+    FROM messages
+    GROUP BY id
+),
+party AS (
+    SELECT DISTINCT thread_id, node FROM (
+        SELECT thread_id, hex(from_node) AS node FROM msg
+        UNION
+        SELECT msg.thread_id, recipient.value FROM msg, json_each(msg.to_nodes) AS recipient
+    )
+),
+conversation AS (
+    SELECT thread_id,
+           FIRST_VALUE(subject) OVER oldest AS subject,
+           COUNT(*) OVER whole AS messages,
+           SUM(unread) OVER whole AS unread,
+           id AS last_id,
+           hex(from_node) AS last_from,
+           sender_kind AS last_sender_kind,
+           sent_at AS last_at,
+           ROW_NUMBER() OVER newest AS recency
+    FROM msg
+    WINDOW newest AS (PARTITION BY thread_id ORDER BY sent_at DESC, id DESC),
+           oldest AS (PARTITION BY thread_id ORDER BY sent_at ASC, id ASC),
+           whole  AS (PARTITION BY thread_id)
+)
+SELECT thread_id, subject, messages, unread, last_id, last_from,
+       last_sender_kind, last_at,
+       (SELECT group_concat(node) FROM party WHERE party.thread_id = conversation.thread_id)
+           AS participants
+FROM conversation
+WHERE recency = 1";
 
 fn sqlite<T>(context: &str, r: Result<T, rusqlite::Error>) -> Result<T, IndexError> {
     r.map_err(|source| IndexError::Sqlite {
@@ -297,8 +399,8 @@ impl Index {
             self.conn.execute(
                 "INSERT INTO messages
                      (id, thread_id, in_reply_to, from_node, subject, kind,
-                      sender_kind, sent_at, mailbox, attachment_names)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                      sender_kind, sent_at, mailbox, attachment_names, to_nodes)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                  ON CONFLICT(id, mailbox) DO UPDATE SET
                      thread_id = excluded.thread_id,
                      in_reply_to = excluded.in_reply_to,
@@ -308,7 +410,8 @@ impl Index {
                      sender_kind = excluded.sender_kind,
                      sent_at = excluded.sent_at,
                      mailbox = excluded.mailbox,
-                     attachment_names = excluded.attachment_names",
+                     attachment_names = excluded.attachment_names,
+                     to_nodes = excluded.to_nodes",
                 rusqlite::params![
                     &id,
                     message.thread_id.to_string(),
@@ -320,6 +423,7 @@ impl Index {
                     message.sent_at.timestamp_millis(),
                     mailbox.as_str(),
                     &names,
+                    &addressed_nodes(message),
                 ],
             ),
         )?;
@@ -546,6 +650,67 @@ impl Index {
         Ok(out)
     }
 
+    /// Every conversation, the one that moved last first (#43).
+    ///
+    /// One query, however many conversations there are: a chat list that asked
+    /// per thread would be a query per row, and the list is what the inbox
+    /// opens with.
+    ///
+    /// # Errors
+    /// Returns [`IndexError::Sqlite`] on failure, or [`IndexError::CorruptRow`]
+    /// if a stored id or node cannot be read back.
+    pub fn conversations(
+        &self,
+        query: &ConversationQuery,
+    ) -> Result<Vec<Conversation>, IndexError> {
+        let mut sql = String::from(CONVERSATIONS);
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(with) = query.with {
+            params.push(Box::new(hex_upper(with.as_bytes())));
+            let _ = write!(
+                sql,
+                " AND thread_id IN (SELECT thread_id FROM party WHERE node = ?{})",
+                params.len()
+            );
+        }
+        sql.push_str(" ORDER BY last_at DESC, last_id DESC");
+        if let Some(limit) = query.limit {
+            let _ = write!(sql, " LIMIT {limit}");
+        }
+
+        let mut statement = sqlite(
+            "could not prepare the conversation list",
+            self.conn.prepare(&sql),
+        )?;
+        let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(AsRef::as_ref).collect();
+        let rows = sqlite(
+            "could not list conversations",
+            statement.query_map(refs.as_slice(), |row| {
+                Ok(ConversationRow {
+                    thread_id: row.get(0)?,
+                    subject: row.get(1)?,
+                    messages: row.get(2)?,
+                    unread: row.get(3)?,
+                    last_id: row.get(4)?,
+                    last_from: row.get(5)?,
+                    last_sender_kind: row.get(6)?,
+                    last_at: row.get(7)?,
+                    participants: row.get(8)?,
+                })
+            }),
+        )?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(conversation_from_row(sqlite(
+                "could not read a conversation",
+                row,
+            )?)?);
+        }
+        Ok(out)
+    }
+
     /// Throw away everything and rebuild from the mail files.
     ///
     /// # Errors
@@ -639,6 +804,109 @@ fn summary_from_row(row: Row) -> Result<Summary, IndexError> {
             .map_err(|_| corrupt("attachment_names is not a JSON array"))?,
     })
 }
+
+/// One row of [`CONVERSATIONS`], before it is a [`Conversation`].
+///
+/// Named fields rather than the tuple [`Row`] is: there are nine of them and
+/// three are ids that would be indistinguishable by position.
+struct ConversationRow {
+    thread_id: String,
+    subject: String,
+    messages: i64,
+    unread: i64,
+    last_id: String,
+    last_from: String,
+    last_sender_kind: String,
+    last_at: i64,
+    /// `group_concat` returns NULL for no rows, which cannot happen — the
+    /// sender of the last message is always one of them — but the type says so.
+    participants: Option<String>,
+}
+
+fn conversation_from_row(row: ConversationRow) -> Result<Conversation, IndexError> {
+    let corrupt = |detail: &str| IndexError::CorruptRow {
+        id: row.thread_id.clone(),
+        detail: detail.to_owned(),
+    };
+
+    let mut participants: Vec<NodeId> = row
+        .participants
+        .as_deref()
+        .unwrap_or_default()
+        .split(',')
+        .filter(|node| !node.is_empty())
+        .map(|node| node_from_hex(node).ok_or_else(|| corrupt("a participant is not a node id")))
+        .collect::<Result<_, _>>()?;
+    // `group_concat` has no defined order, and a list of machines that changes
+    // between two reads of the same conversation is a list nobody can test.
+    participants.sort_unstable();
+    participants.dedup();
+
+    Ok(Conversation {
+        thread_id: row
+            .thread_id
+            .parse()
+            .map_err(|_| corrupt("thread_id is not a ULID"))?,
+        subject: row.subject,
+        participants,
+        // A count from SQLite is signed and these cannot be negative, so
+        // saturating is the honest conversion.
+        messages: u64::try_from(row.messages).unwrap_or(0),
+        unread: u64::try_from(row.unread).unwrap_or(0),
+        last_id: row
+            .last_id
+            .parse()
+            .map_err(|_| corrupt("the last message's id is not a ULID"))?,
+        last_from: node_from_hex(&row.last_from)
+            .ok_or_else(|| corrupt("the last sender is not a node id"))?,
+        last_sender_kind: SenderKind::from_str_opt(&row.last_sender_kind)
+            .ok_or_else(|| corrupt("unknown sender_kind"))?,
+        last_at: DateTime::from_timestamp_millis(row.last_at)
+            .ok_or_else(|| corrupt("sent_at is out of range"))?,
+    })
+}
+
+/// The node ids a message names in `to`, as the column stores them.
+///
+/// Only [`Recipient::Node`]: see the schema's note on `to_nodes`.
+fn addressed_nodes(message: &Message) -> String {
+    let nodes: Vec<String> = message
+        .to
+        .iter()
+        .filter_map(|recipient| match recipient {
+            crate::message::Recipient::Node(id) => Some(hex_upper(id.as_bytes())),
+            crate::message::Recipient::Owner(_) | crate::message::Recipient::Everyone => None,
+        })
+        .collect();
+    serde_json::to_string(&nodes).unwrap_or_else(|_| "[]".to_owned())
+}
+
+/// Upper case, because that is what `SQLite`'s own `hex()` produces and the two
+/// are compared to each other.
+fn hex_upper(bytes: &[u8; 32]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        // INVARIANT: writing to a String cannot fail and the width is fixed.
+        let _ = write!(out, "{byte:02X}");
+    }
+    out
+}
+
+fn node_from_hex(hex: &str) -> Option<NodeId> {
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut bytes = [0u8; 32];
+    for (index, slot) in bytes.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(hex.get(index * 2..index * 2 + 2)?, 16).ok()?;
+    }
+    Some(NodeId::from_bytes(bytes))
+}
+
+/// The conversation list has its tests in its own file: this one is at its
+/// limit, and `just size` counts source and test lines separately.
+#[cfg(test)]
+mod conversation_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1261,6 +1529,13 @@ mod tests {
             proptest::prop_assert_eq!(
                 rebuilt.unread_count().expect("count"),
                 live.unread_count().expect("count")
+            );
+            // The conversation list reads a column of its own (#43), and a
+            // column only the live path fills is a cache that cannot be
+            // rebuilt — which is the one thing ADR 0002 does not allow.
+            proptest::prop_assert_eq!(
+                rebuilt.conversations(&ConversationQuery::default()).expect("list"),
+                live.conversations(&ConversationQuery::default()).expect("list")
             );
         }
     }
