@@ -19,6 +19,10 @@ just ci     # should be green before you change anything
 `just ci` runs exactly what GitHub Actions runs, in the same order. If CI fails
 on something `just ci` passes, that gap is itself a bug worth reporting.
 
+It prints one line per gate while everything passes, and the whole output of
+whatever fails. `just ci --verbose` streams all of it instead, and so does
+`--verbose` on `just test`, `just lint` and `just cov-gate`.
+
 ## The rules that are not negotiable
 
 These come from [SPEC.md](SPEC.md) §13, which is worth reading in full before
