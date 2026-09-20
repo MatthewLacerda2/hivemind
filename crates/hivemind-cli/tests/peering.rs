@@ -441,6 +441,14 @@ fn a_message_to_a_machine_that_is_off_waits_in_out_and_then_shows_as_sent() {
         "a message still going out should say so: {prose}"
     );
 
+    // `status` is the shorter question, and the depth of `out/` is the part of
+    // it somebody is looking for when mail seems stuck.
+    let standing = alice.run(&["status"]);
+    assert!(
+        standing.contains("1 message still going out"),
+        "status should account for what is owed: {standing}"
+    );
+
     // And it is not mail that arrived here, which is the other half of having
     // four boxes at all.
     assert_eq!(
