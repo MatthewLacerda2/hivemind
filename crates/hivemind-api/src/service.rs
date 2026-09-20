@@ -406,7 +406,8 @@ impl MailService {
     ///
     /// The message is written to `out/` before this returns, so sending never
     /// blocks on the network (SPEC §8). Recipients that are this node are
-    /// delivered immediately; remote delivery arrives with peers in M3.
+    /// delivered immediately; every other recipient goes through the outbox,
+    /// which retries until it lands.
     ///
     /// # Errors
     /// [`ServiceError::NoRecipients`] for an unaddressed draft,
