@@ -323,7 +323,18 @@ impl MailService {
         // Cheap when the index was already current, because it is only the
         // files that exist; correct when it was not.
         index.rebuild_from(&store)?;
-        let peers = PeerBook::load(root)?;
+        let peers = PeerBook::load(root, node.peer_port)?;
+        // Said out loud, once, at start: a peers.toml written before #23 holds
+        // this node's own loopback as the way to reach somebody else, and an
+        // address quietly vanishing is worse than the address.
+        for discarded in peers.discarded() {
+            tracing::warn!(
+                peer = %discarded.peer.short(),
+                addr = %discarded.authority,
+                "ignoring an address in peers.toml that points at this node; \
+                 `hivemind peers forget-addr` takes it out of the file"
+            );
+        }
         let group = hivemind_core::group::Group::load(root)?;
 
         let (events, _) = broadcast::channel(EVENT_BUFFER);
