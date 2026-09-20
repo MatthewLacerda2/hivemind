@@ -457,16 +457,95 @@ struct Summary {
     sender_kind: String,
     sent_at: chrono::DateTime<chrono::Utc>,
     unread: bool,
+    mailbox: String,
     attachment_names: Vec<String>,
 }
 
+/// Which of the four boxes to list (SPEC §4.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum BoxArg {
+    /// Arrived here and not read yet.
+    New,
+    /// Arrived here and already read.
+    Cur,
+    /// Written here and still waiting for a recipient to take it.
+    Out,
+    /// Written here and delivered to every recipient.
+    Sent,
+}
+
+impl BoxArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Cur => "cur",
+            Self::Out => "out",
+            Self::Sent => "sent",
+        }
+    }
+}
+
 /// List mail (SPEC §10).
-pub(crate) async fn inbox(api: &str, unread_only: bool, limit: usize, json: bool) -> Result<()> {
-    let path = format!(
-        "/api/v1/messages?box=new&limit={limit}{}",
-        if unread_only { "&unread=true" } else { "" }
-    );
-    let summaries: Vec<Summary> = Client::new(api).get(&path).await?;
+///
+/// No `--box` means both boxes of what arrived, which is what the web UI calls
+/// the inbox and what somebody asking for theirs means.
+pub(crate) async fn inbox(
+    api: &str,
+    chosen: Option<BoxArg>,
+    unread_only: bool,
+    limit: usize,
+    json: bool,
+) -> Result<()> {
+    // Only `new/` holds unread mail, so `--unread --box sent` asks for mail
+    // that is read and unread at once. Refusing beats answering nothing: an
+    // empty list looks like an empty box, and that is precisely how a query
+    // that made no sense was read as `out/` being broken (#28).
+    if let Some(chosen) = chosen.filter(|_| unread_only) {
+        anyhow::ensure!(
+            chosen == BoxArg::New,
+            "nothing in `{}` is unread — drop `--unread`, or drop `--box`",
+            chosen.as_str()
+        );
+    }
+
+    let boxes = chosen.map_or_else(|| vec![BoxArg::New, BoxArg::Cur], |one| vec![one]);
+    listing(api, &boxes, unread_only, limit, json).await
+}
+
+/// List what this machine sent, still going out or gone (SPEC §10).
+///
+/// `out/` with `sent/`, the pair the web UI's Sent view shows: a message still
+/// being delivered is one you sent, and hiding it until the last recipient
+/// takes it would make a peer being off look like the message vanishing.
+pub(crate) async fn sent(api: &str, limit: usize, json: bool) -> Result<()> {
+    listing(api, &[BoxArg::Out, BoxArg::Sent], false, limit, json).await
+}
+
+/// Print one page of the boxes asked for, newest first across all of them.
+async fn listing(
+    api: &str,
+    boxes: &[BoxArg],
+    unread_only: bool,
+    limit: usize,
+    json: bool,
+) -> Result<()> {
+    let client = Client::new(api);
+    let mut summaries: Vec<Summary> = Vec::new();
+    // One request per box, because the API filters one at a time (SPEC §7.1)
+    // and a message somebody sent to themselves genuinely sits in two of them
+    // — once as something that arrived, once as something they sent.
+    for chosen in boxes {
+        let path = format!(
+            "/api/v1/messages?box={}&limit={limit}{}",
+            chosen.as_str(),
+            if unread_only { "&unread=true" } else { "" }
+        );
+        summaries.extend(client.get::<Vec<Summary>>(&path).await?);
+    }
+    // Newest first across the boxes, then capped again: a page of each merged
+    // is more than a page.
+    summaries.sort_by_key(|s| std::cmp::Reverse(s.sent_at));
+    summaries.truncate(limit);
 
     if json {
         println!(
@@ -478,7 +557,8 @@ pub(crate) async fn inbox(api: &str, unread_only: bool, limit: usize, json: bool
                         serde_json::json!({
                             "id": s.id, "from": s.from, "subject": s.subject,
                             "sender_kind": s.sender_kind, "sent_at": s.sent_at,
-                            "unread": s.unread, "attachment_names": s.attachment_names,
+                            "unread": s.unread, "mailbox": s.mailbox,
+                            "attachment_names": s.attachment_names,
                         })
                     })
                     .collect::<Vec<_>>()
@@ -506,13 +586,21 @@ pub(crate) async fn inbox(api: &str, unread_only: bool, limit: usize, json: bool
             format!(" 📎{}", summary.attachment_names.len())
         };
 
+        // A row in `out/` is the answer to "I sent it, did it arrive?", and
+        // printing it like any other would answer yes (#26).
+        let waiting = if summary.mailbox == "out" {
+            " waiting to be delivered".yellow()
+        } else {
+            String::new()
+        };
+
         println!(
             "{marker} {} {badge} {}{attachments}",
             short_id(&summary.id).dimmed(),
             summary.subject.bold(),
         );
         println!(
-            "    {} {}",
+            "    {} {}{waiting}",
             summary.sent_at.format("%Y-%m-%d %H:%M").dimmed(),
             short_node(&summary.from).dimmed()
         );

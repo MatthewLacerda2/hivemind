@@ -409,3 +409,66 @@ fn a_reply_to_another_machine_stays_in_the_same_thread() {
     );
     assert_eq!(answer["from"], bob.node_id());
 }
+
+#[test]
+fn a_message_to_a_machine_that_is_off_waits_in_out_and_then_shows_as_sent() {
+    // The question #26 was filed for: "I sent it, did it arrive?". The answer
+    // lives in `out/` while the other machine is off, and until now the only
+    // way to look at it was `curl`.
+    let alice = Daemon::start("alice");
+    let mut bob = Daemon::start("bob");
+    pair(&alice, &bob);
+
+    let bobs_id = bob.node_id();
+    bob.stop();
+
+    alice.run(&[
+        "send",
+        &bobs_id,
+        "-s",
+        "did it arrive",
+        "--",
+        "asking for a friend",
+    ]);
+
+    // Waiting: in `out`, and said to be waiting rather than listed as if it
+    // had landed.
+    let waiting = alice.wait_for_sent("did it arrive", "out");
+    assert_eq!(waiting["mailbox"], "out");
+    let prose = alice.run(&["sent"]);
+    assert!(
+        prose.contains("waiting"),
+        "a message still going out should say so: {prose}"
+    );
+
+    // `status` is the shorter question, and the depth of `out/` is the part of
+    // it somebody is looking for when mail seems stuck.
+    let standing = alice.run(&["status"]);
+    assert!(
+        standing.contains("1 message still going out"),
+        "status should account for what is owed: {standing}"
+    );
+
+    // And it is not mail that arrived here, which is the other half of having
+    // four boxes at all.
+    assert_eq!(
+        alice.inbox().as_array().expect("an array").len(),
+        0,
+        "what we sent is not what arrived"
+    );
+    assert_eq!(
+        json(&alice.run(&["inbox", "--box", "out", "--json"]))[0]["subject"],
+        "did it arrive",
+        "`--box out` is the same message the shorthand shows"
+    );
+
+    // Monday.
+    bob.restart("bob");
+    bob.wait_for("did it arrive");
+
+    let delivered = alice.wait_for_sent("did it arrive", "sent");
+    assert_eq!(
+        delivered["mailbox"], "sent",
+        "delivered to everyone means it has left `out`"
+    );
+}

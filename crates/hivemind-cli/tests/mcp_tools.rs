@@ -441,3 +441,117 @@ async fn an_attachment_name_that_is_a_path_is_refused() {
 
     client.cancel().await.ok();
 }
+
+#[tokio::test]
+async fn the_inbox_tool_can_look_at_what_this_machine_sent() {
+    // The half of the mail a Claude could not see (#26): it sends a message,
+    // the other machine is closed, and nothing it could call would say so.
+    let daemon = Daemon::start(NAME);
+    let client = connect(&daemon).await;
+
+    call(
+        &client,
+        "send",
+        serde_json::json!({ "to": ["everyone"], "subject": "did it arrive", "body": "x" }),
+    )
+    .await;
+
+    // Delivery is asynchronous by design (SPEC §8), so `out` is a state this
+    // passes through rather than one to assert on with a stopwatch. `sent` is
+    // where it ends up, and getting there is what makes `out` meaningful.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
+    loop {
+        let sent = call(&client, "inbox", serde_json::json!({ "box": "sent" })).await;
+        if let Some(found) = sent
+            .as_array()
+            .expect("an array")
+            .iter()
+            .find(|m| m["subject"] == "did it arrive")
+        {
+            assert_eq!(found["unread"], false, "mail we sent is not unread mail");
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "it never reached `sent`: {sent}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    // And `out` is a box the tool will answer for, empty or not.
+    let out = call(&client, "inbox", serde_json::json!({ "box": "out" })).await;
+    assert!(out.is_array(), "`out` should answer with a list: {out}");
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn a_box_the_inbox_tool_does_not_have_is_refused_rather_than_ignored() {
+    // #28 again, one door along: a box name that is not one used to mean "no
+    // filter", so a Claude asking the wrong question got a plausible answer.
+    let daemon = Daemon::start(NAME);
+    let client = connect(&daemon).await;
+
+    call(
+        &client,
+        "send",
+        serde_json::json!({ "to": ["everyone"], "subject": "something to find", "body": "x" }),
+    )
+    .await;
+
+    let result = client
+        .call_tool(with_args(
+            CallToolRequestParams::new("inbox"),
+            &serde_json::json!({ "box": "outbox" }),
+        ))
+        .await;
+
+    // With a message in the store, so that "refused" cannot be confused with
+    // "filtered to nothing" — which is the mistake the test this replaces
+    // made.
+    match result {
+        Err(rmcp_client::ServiceError::McpError(error)) => {
+            assert_eq!(error.code, rmcp_client::model::ErrorCode::INVALID_PARAMS);
+            assert!(
+                error.message.contains("out"),
+                "it should name the boxes there are: {}",
+                error.message
+            );
+        }
+        Err(other) => panic!("expected an MCP error, got {other}"),
+        Ok(result) => panic!("`outbox` is not a box, and it answered: {result:?}"),
+    }
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn the_inbox_tool_says_what_out_is_for() {
+    // The description is what a Claude reads to decide whether to call this at
+    // all, and `out` is the box it would never think to ask for.
+    let daemon = Daemon::start(NAME);
+    let client = connect(&daemon).await;
+
+    let tools = client.list_tools(None).await.expect("list_tools");
+    let inbox = tools
+        .tools
+        .iter()
+        .find(|t| t.name == "inbox")
+        .expect("an inbox tool");
+    let schema = serde_json::to_string(&inbox.input_schema).expect("a schema");
+    let said = format!(
+        "{}{schema}",
+        inbox.description.as_deref().unwrap_or_default()
+    );
+
+    assert!(
+        said.contains("box"),
+        "the parameter should be named: {said}"
+    );
+    for word in ["out", "sent", "delivered"] {
+        assert!(
+            said.contains(word),
+            "a Claude should learn what {word:?} means from this: {said}"
+        );
+    }
+    client.cancel().await.ok();
+}

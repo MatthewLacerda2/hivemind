@@ -373,6 +373,36 @@ impl Daemon {
         }
         panic!("{subject:?} never arrived; inbox is {}", self.inbox());
     }
+
+    /// The rows `hivemind sent` prints: `out/` and `sent/` together.
+    pub(crate) fn sent(&self) -> serde_json::Value {
+        json(&self.run(&["sent", "--json"]))
+    }
+
+    /// Poll what we sent until `subject` is sitting in `mailbox`.
+    ///
+    /// Two states rather than one: a message is in `out` until every
+    /// recipient has it and in `sent` afterwards, and a test that only waited
+    /// for the second could not tell "still going" from "gone missing".
+    pub(crate) fn wait_for_sent(&self, subject: &str, mailbox: &str) -> serde_json::Value {
+        let deadline = Instant::now() + Duration::from_mins(1);
+        while Instant::now() < deadline {
+            let sent = self.sent();
+            if let Some(found) = sent
+                .as_array()
+                .expect("an array")
+                .iter()
+                .find(|m| m["subject"] == subject && m["mailbox"] == mailbox)
+            {
+                return found.clone();
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!(
+            "{subject:?} never reached {mailbox:?}; what we sent is {}",
+            self.sent()
+        );
+    }
 }
 
 impl Daemon {

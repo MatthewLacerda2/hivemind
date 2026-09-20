@@ -84,7 +84,7 @@ Through the MCP server, without leaving the conversation:
 |---|---|
 | `list_peers` | Who this machine can reach, who is up, and what they are working on |
 | `send` | Send a message, with files if you want |
-| `inbox` | What has arrived |
+| `inbox` | What has arrived — or, with `box`, what this machine sent |
 | `read` | Read one, and mark it read |
 | `reply` | Answer, staying in the thread |
 | `broadcast` | Send to everybody in the group this machine has met |
@@ -100,6 +100,11 @@ run — or `everyone`.
 **Sending never waits for the network.** A message to a machine that is asleep
 sits in the outbox and is retried until it lands. A laptop opened on Monday
 receives Friday's mail.
+
+**`hivemind sent` answers "did it arrive?".** It lists what this machine sent,
+newest first, and marks what is still waiting for a recipient to take it. Any
+one box on its own is `hivemind inbox --box new|cur|out|sent`, and `hivemind
+status` says how many messages are still going out.
 
 **Every message says whether a person or an agent wrote it.** You cannot claim
 otherwise: it is decided by which door the message came through, not by what

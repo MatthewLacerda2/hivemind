@@ -73,9 +73,21 @@ enum Command {
     },
     /// List your mail.
     Inbox {
+        /// One box only. Omit for everything that arrived, read or not.
+        #[arg(long = "box", value_enum)]
+        r#box: Option<commands::BoxArg>,
         /// Only unread messages.
         #[arg(long)]
         unread: bool,
+        /// How many to show.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Print JSON instead of prose.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List what you sent, including what is still on its way.
+    Sent {
         /// How many to show.
         #[arg(long, default_value_t = 20)]
         limit: usize,
@@ -265,10 +277,12 @@ async fn main() -> Result<()> {
             body,
         } => commands::send(&cli.api, &to, &subject, &attach, body.as_deref()).await,
         Command::Inbox {
+            r#box,
             unread,
             limit,
             json,
-        } => commands::inbox(&cli.api, unread, limit, json).await,
+        } => commands::inbox(&cli.api, r#box, unread, limit, json).await,
+        Command::Sent { limit, json } => commands::sent(&cli.api, limit, json).await,
         Command::Read { id, json } => commands::read(&cli.api, &id, json).await,
         Command::Reply { id, body } => commands::reply(&cli.api, &id, body.as_deref()).await,
         Command::Reindex => commands::reindex(cli.home.as_deref()),
