@@ -813,17 +813,20 @@ pub(crate) async fn mark_read(
 
 #[utoipa::path(
     get, path = "/api/v1/threads/{thread_id}",
-    params(("thread_id" = String, Path, description = "Thread id")),
+    params((
+        "thread_id" = String, Path,
+        description = "The thread id, or the id of any message in it, whole or the tail the inbox prints"
+    )),
     responses((status = 200, body = Vec<MessageSummary>), (status = 404, body = Problem))
 )]
 pub(crate) async fn get_thread(
     State(service): State<AppState>,
     Path(thread_id): Path<String>,
 ) -> Result<Json<Vec<MessageSummary>>, Problem> {
-    let thread_id = service.resolve_message(&thread_id)?;
+    let id = service.resolve_message(&thread_id)?;
     Ok(Json(
         service
-            .thread(thread_id)?
+            .thread_of(id)?
             .into_iter()
             .map(MessageSummary::from)
             .collect(),

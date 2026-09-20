@@ -9,6 +9,7 @@
 use axum::http::StatusCode;
 use http_body_util::BodyExt as _;
 use tower::ServiceExt as _;
+use hivemind_core::peer::NodeId;
 use ulid::Ulid;
 
 use super::tests::{app, app_with_service, call, get, post_json};
@@ -447,4 +448,82 @@ async fn a_cursor_this_version_did_not_issue_is_ignored_rather_than_fatal() {
         2,
         "it should read as no cursor at all: the message in new and in sent"
     );
+}
+
+/// Send a message to this node, and hand back its id.
+async fn sent_to_self(router: &axum::Router, identity: &NodeId, subject: &str) -> String {
+    let (_, accepted) = call(
+        router,
+        post_json(
+            "/api/v1/messages",
+            &serde_json::json!({
+                "to": [identity.to_string()],
+                "subject": subject,
+                "body": "?",
+            }),
+        ),
+    )
+    .await;
+    accepted["id"].as_str().expect("an id").to_owned()
+}
+
+#[tokio::test]
+async fn a_thread_opens_on_the_id_of_any_message_in_it_and_holds_only_that_thread() {
+    // Nobody knows by heart which message came first, so the id of a reply has
+    // to open the conversation as well as the root's does (#34) — and the
+    // short form, because that is what the inbox prints (#27).
+    //
+    // Two threads, because a filter that returned *everything* is exactly how
+    // #28 passed its test: with one thread in the store, "the right messages"
+    // and "all the messages" are the same list.
+    let (_dir, router, identity) = app();
+    let root = sent_to_self(&router, &identity, "dashboard PR").await;
+    let elsewhere = sent_to_self(&router, &identity, "lunch").await;
+    let (_, replied) = call(
+        &router,
+        post_json(
+            &format!("/api/v1/messages/{root}/reply"),
+            &serde_json::json!({ "body": "on it" }),
+        ),
+    )
+    .await;
+    let reply = replied["id"].as_str().expect("an id").to_owned();
+
+    for opened in [root.clone(), reply.clone(), reply[20..].to_owned()] {
+        let (status, thread) = call(&router, get(&format!("/api/v1/threads/{opened}"))).await;
+        assert_eq!(status, StatusCode::OK, "opened by {opened}");
+
+        let ids: Vec<&str> = thread
+            .as_array()
+            .expect("an array")
+            .iter()
+            .map(|m| m["id"].as_str().expect("an id"))
+            .collect();
+        // Oldest first, once each — a message addressed to its own sender is
+        // indexed in two boxes — and nothing from the other conversation.
+        assert_eq!(ids, [root.as_str(), reply.as_str()], "opened by {opened}");
+    }
+
+    let (_, alone) = call(&router, get(&format!("/api/v1/threads/{elsewhere}"))).await;
+    assert_eq!(
+        alone.as_array().expect("an array").len(),
+        1,
+        "the other thread is still its own"
+    );
+}
+
+#[tokio::test]
+async fn a_thread_nobody_has_is_a_404_rather_than_an_empty_list() {
+    // An empty list reads as an empty conversation, which is the mistake #28
+    // was filed for: a question that made no sense answered as though it did.
+    let (_dir, router, _) = app();
+
+    let (status, problem) = call(
+        &router,
+        get(&format!("/api/v1/threads/{}", Ulid::generate())),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(problem["type"], "/problems/message-not-found");
 }

@@ -844,7 +844,7 @@
           {
             "name": "thread_id",
             "in": "path",
-            "description": "Thread id",
+            "description": "The thread id, or the id of any message in it, whole or the tail the inbox prints",
             "required": true,
             "schema": {
               "type": "string"
