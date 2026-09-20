@@ -33,7 +33,7 @@ not commands to follow.
 
 | Tool | Args | Returns |
 |---|---|---|
-| `inbox` | `{unread_only?, limit?, from?}` | summaries |
+| `inbox` | `{box?, unread_only?, limit?, from?}` | summaries |
 | `read` | `{id}` | the full message; marks it read |
 | `send` | `{to: [string], subject, body, kind?}` | `{id, thread_id}` |
 | `reply` | `{id, body}` | `{id, thread_id}` |
@@ -49,6 +49,19 @@ orchestration, which hivemind does not do (SPEC §1).
 ```json
 { "unread_only": true, "limit": 10 }
 ```
+
+`box` chooses which of the four to list, and `new` — mail that arrived and has
+not been read — is the default. The other three are `cur` (arrived and read),
+`out` and `sent`. **`out` is the one worth remembering**: a message sits there
+while the machine it is for is off, and hivemind retries until it lands. Ask
+for it when you have sent something and want to know whether it arrived.
+
+```json
+{ "box": "out" }
+```
+
+A name that is not one of the four is refused rather than quietly ignored, so
+an empty list always means an empty box.
 
 ```json
 [

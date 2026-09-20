@@ -7,6 +7,7 @@
 use hivemind_api::service::{Draft, ServiceError};
 use hivemind_core::index::Query;
 use hivemind_core::message::{Kind, Recipient, SenderKind};
+use hivemind_core::store::Mailbox;
 use rmcp::ErrorData as McpError;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::{tool, tool_router};
@@ -95,6 +96,40 @@ pub struct InboxParams {
     pub limit: Option<usize>,
     /// Only show mail from this node id.
     pub from: Option<String>,
+    /// Which box to list, `new` by default. `new` is mail that arrived here
+    /// and has not been read, `cur` mail that arrived and has been read,
+    /// `out` mail sent from this machine that has **not been delivered yet**
+    /// — the recipient's machine is off, and hivemind keeps retrying until it
+    /// is not — and `sent` mail that reached every recipient.
+    pub r#box: Option<String>,
+}
+
+impl InboxParams {
+    /// Which box to list, and `new` when the caller did not say.
+    ///
+    /// `new` rather than everything that arrived, because `read` marks a
+    /// message read precisely so that a Claude does not meet it again on the
+    /// next turn.
+    ///
+    /// A name that is not one of the four is refused rather than ignored. It
+    /// used to be neither: `box` was not a parameter at all, so asking for one
+    /// got the default listing back and nothing said the question had not been
+    /// answered (#26, and #28 one door along).
+    fn mailbox(&self) -> Result<Mailbox, McpError> {
+        let Some(raw) = self.r#box.as_deref() else {
+            return Ok(Mailbox::New);
+        };
+        Mailbox::from_str_opt(raw).ok_or_else(|| {
+            McpError::invalid_params(
+                format!(
+                    "`{raw}` is not a box. There are four: new (arrived, unread), \
+                     cur (arrived, read), out (sent from here, not delivered yet) \
+                     and sent (delivered to everyone)."
+                ),
+                None,
+            )
+        })
+    }
 }
 
 /// Arguments for a tool that takes only a message id.
@@ -236,18 +271,23 @@ pub struct Downloaded {
 impl HivemindMcp {
     #[tool(
         name = "inbox",
-        description = "List mail that has arrived on this machine, newest first. \
-                       Check this when the user asks about messages, or when you want to \
-                       know whether a teammate or another Claude has sent anything. \
-                       `sender_kind` is `human` when a person typed the message directly \
-                       and `agent` when another Claude sent it."
+        description = "List mail on this machine, newest first: by default what has \
+                       arrived and not been read yet. Check this when the user asks about \
+                       messages, or when you want to know whether a teammate or another \
+                       Claude has sent anything. `sender_kind` is `human` when a person \
+                       typed the message directly and `agent` when another Claude sent it. \
+                       Pass `box` to look at the other three: `out` is what this machine \
+                       has sent that has not been delivered yet, because the recipient's \
+                       machine is off — ask for it when you have sent something and want \
+                       to know whether it arrived — and `sent` is what reached every \
+                       recipient. `cur` is mail that arrived here and has been read."
     )]
     async fn inbox(
         &self,
         Parameters(params): Parameters<InboxParams>,
     ) -> Result<Json<Vec<InboxItem>>, McpError> {
         let query = Query {
-            mailbox: Some(hivemind_core::store::Mailbox::New),
+            mailbox: Some(params.mailbox()?),
             unread_only: params.unread_only.unwrap_or(false),
             from: params.from.as_deref().and_then(|f| f.parse().ok()),
             limit: Some(params.limit.unwrap_or(20)),
