@@ -63,7 +63,14 @@ for it when you have sent something and want to know whether it arrived.
 ```
 
 A name that is not one of the four is refused rather than quietly ignored, so
-an empty list always means an empty box.
+an empty list always means an empty box. `unread_only` alongside any box but
+`new` is refused for the same reason: only `new` holds unread mail, so the two
+together ask for mail that is read and unread at once.
+
+`from` narrows the list to one machine, and takes the id `list_peers` gives you
+in either form — the whole `hm1:` fingerprint or the short one. A name that
+matches no machine is refused rather than ignored; it used to mean "no filter",
+so asking for one machine's mail was answered with everybody's.
 
 ```json
 [

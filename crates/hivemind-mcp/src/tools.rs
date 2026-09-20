@@ -7,6 +7,7 @@
 use hivemind_api::service::{Draft, Queued, ServiceError};
 use hivemind_core::index::Query;
 use hivemind_core::message::{Kind, Recipient, SenderKind};
+use hivemind_core::peer::NodeId;
 use hivemind_core::store::Mailbox;
 use rmcp::ErrorData as McpError;
 use rmcp::handler::server::wrapper::{Json, Parameters};
@@ -30,9 +31,13 @@ fn mcp_error(error: &ServiceError) -> McpError {
         // nothing matched, one that several did and which. Falling through to
         // `internal_error` would tell an agent the node was broken, which is
         // the one thing it cannot recover from (#27).
-        ServiceError::NoSuchMessageTail { .. } | ServiceError::AmbiguousMessage { .. } => {
-            McpError::invalid_params(error.to_string(), None)
-        }
+        //
+        // `NoSuchPeer` is the same judgement one door along: an agent handed a
+        // node it does not know can pick another, and an agent told the node is
+        // broken can only give up.
+        ServiceError::NoSuchMessageTail { .. }
+        | ServiceError::AmbiguousMessage { .. }
+        | ServiceError::NoSuchPeer { .. } => McpError::invalid_params(error.to_string(), None),
         ServiceError::NoRecipients => McpError::invalid_params(
             "a message needs at least one recipient: a node id, an owner name, or `everyone`",
             None,
@@ -93,7 +98,55 @@ impl HivemindMcp {
     fn resolve(&self, raw: &str) -> Result<Ulid, McpError> {
         self.service.resolve_message(raw).map_err(|e| mcp_error(&e))
     }
+
+    /// The index query one MCP listing asks for.
+    ///
+    /// One construction for the `inbox` tool and for the `hivemind://inbox`
+    /// resource, which asked the same question in two places until #102 — and
+    /// every filter in both of them could be deleted with the suite still
+    /// green. Two spellings of one question is one place for a filter to be
+    /// forgotten.
+    ///
+    /// `unread_only` is not a field here. `new/` **is** the unread box, so once
+    /// [`InboxParams::mailbox`] has refused every other box beside the flag,
+    /// what is left would add the predicate the box has already added — and a
+    /// filter written twice is one no test can tell from one.
+    pub(crate) fn inbox_query(&self, params: &InboxParams) -> Result<Query, McpError> {
+        Ok(Query {
+            mailbox: Some(params.mailbox()?),
+            from: self.sender(params.from.as_deref())?,
+            limit: Some(params.limit.unwrap_or(DEFAULT_LIMIT)),
+            ..Query::default()
+        })
+    }
+
+    /// The one machine a listing is restricted to, if the caller named one.
+    ///
+    /// Through the service, so the short id `list_peers` hands an agent works
+    /// here as it does in `send` (#19). And a name that matches nothing is an
+    /// error: it used to be parsed with `.ok()`, so anything that was not a
+    /// whole `hm1:` fingerprint — the short form included — meant "no filter
+    /// at all", and a Claude asking for one machine's mail was handed
+    /// everybody's without being told (#102).
+    fn sender(&self, typed: Option<&str>) -> Result<Option<NodeId>, McpError> {
+        typed
+            .map(|typed| {
+                self.service.resolve_peer(typed.trim()).map_err(|_| {
+                    McpError::invalid_params(
+                        format!(
+                            "`{typed}` is not a machine this node knows. `from` takes a node \
+                             id, whole or in the short form `list_peers` shows."
+                        ),
+                        None,
+                    )
+                })
+            })
+            .transpose()
+    }
 }
+
+/// How many messages a listing returns when the caller does not say.
+pub(crate) const DEFAULT_LIMIT: usize = 20;
 
 // ------------------------------------------------------------ parameters ---
 
@@ -157,11 +210,16 @@ impl InboxParams {
     /// used to be neither: `box` was not a parameter at all, so asking for one
     /// got the default listing back and nothing said the question had not been
     /// answered (#26, and #28 one door along).
+    ///
+    /// Only `new/` holds unread mail, so `unread_only` with any other box asks
+    /// for mail that is read and unread at once, and the answer was an empty
+    /// list — which reads as an empty box. Refused, as `hivemind inbox
+    /// --unread --box sent` has been since #79.
     fn mailbox(&self) -> Result<Mailbox, McpError> {
         let Some(raw) = self.r#box.as_deref() else {
             return Ok(Mailbox::New);
         };
-        Mailbox::from_str_opt(raw).ok_or_else(|| {
+        let chosen = Mailbox::from_str_opt(raw).ok_or_else(|| {
             McpError::invalid_params(
                 format!(
                     "`{raw}` is not a box. There are four: new (arrived, unread), \
@@ -170,7 +228,15 @@ impl InboxParams {
                 ),
                 None,
             )
-        })
+        })?;
+
+        if self.unread_only == Some(true) && chosen != Mailbox::New {
+            return Err(McpError::invalid_params(
+                format!("nothing in `{raw}` is unread — drop `unread_only`, or drop `box`"),
+                None,
+            ));
+        }
+        Ok(chosen)
     }
 }
 
@@ -349,20 +415,15 @@ impl HivemindMcp {
                        has sent that has not been delivered yet, because the recipient's \
                        machine is off — ask for it when you have sent something and want \
                        to know whether it arrived — and `sent` is what reached every \
-                       recipient. `cur` is mail that arrived here and has been read."
+                       recipient. `cur` is mail that arrived here and has been read. \
+                       `from` narrows the list to one machine: pass the id `list_peers` \
+                       gives you, short or whole."
     )]
     async fn inbox(
         &self,
         Parameters(params): Parameters<InboxParams>,
     ) -> Result<Json<Vec<InboxItem>>, McpError> {
-        let query = Query {
-            mailbox: Some(params.mailbox()?),
-            unread_only: params.unread_only.unwrap_or(false),
-            from: params.from.as_deref().and_then(|f| f.parse().ok()),
-            limit: Some(params.limit.unwrap_or(20)),
-            ..Query::default()
-        };
-
+        let query = self.inbox_query(&params)?;
         let summaries = self.service.list(&query).map_err(|e| mcp_error(&e))?;
         Ok(Json(
             summaries
@@ -625,6 +686,162 @@ impl HivemindMcp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::tests::{deliver, member, server};
+
+    /// The subjects a listing came back with, newest first.
+    async fn subjects(server: &HivemindMcp, params: InboxParams) -> Vec<String> {
+        server
+            .inbox(Parameters(params))
+            .await
+            .expect("a listing")
+            .0
+            .into_iter()
+            .map(|item| item.subject)
+            .collect()
+    }
+
+    /// The error a listing was refused with.
+    ///
+    /// Panics naming what came back instead, because "refused" and "filtered to
+    /// nothing" are the two answers this whole file is about telling apart.
+    async fn refusal(server: &HivemindMcp, params: InboxParams, asked: &str) -> McpError {
+        match server.inbox(Parameters(params)).await {
+            Err(error) => error,
+            Ok(listed) => panic!(
+                "{asked} should be refused, and it answered with {:?}",
+                listed.0
+            ),
+        }
+    }
+
+    /// Two messages from one machine, the older of them read.
+    ///
+    /// Every test below starts from a box with something in it that the filter
+    /// under test has to leave out. An empty list proves nothing: it is what
+    /// `an_unknown_mailbox_filter_returns_nothing` asserted while the code
+    /// returned everything (#28).
+    fn one_read_one_unread(server: &HivemindMcp) -> hivemind_core::identity::Identity {
+        let friend = member(server, 91, "ana-mbp");
+        let read = deliver(server, &friend, 100, "already read");
+        deliver(server, &friend, 200, "still waiting");
+        server.service.mark_read(read).expect("mark read");
+        friend
+    }
+
+    #[tokio::test]
+    async fn the_inbox_lists_the_box_it_was_asked_for_and_no_other() {
+        let (_dir, server) = server();
+        one_read_one_unread(&server);
+
+        assert_eq!(
+            subjects(&server, InboxParams::default()).await,
+            ["still waiting"],
+            "`new` is the default, and it is the unread half"
+        );
+        assert_eq!(
+            subjects(
+                &server,
+                InboxParams {
+                    r#box: Some("cur".to_owned()),
+                    ..InboxParams::default()
+                }
+            )
+            .await,
+            ["already read"],
+            "and `cur` is the other half, not both halves"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_inbox_can_be_narrowed_to_one_machine_by_the_id_list_peers_shows() {
+        // A Claude reading `list_peers` is handed short ids. `from` used to
+        // parse with `.ok()`, so a short one became no filter at all and the
+        // answer was everybody's mail — the narrow question, the broad answer
+        // (#102, and #19 for the same mistake in `send`).
+        let (_dir, server) = server();
+        let ana = member(&server, 92, "ana-mbp");
+        let beto = member(&server, 93, "beto-air");
+        deliver(&server, &ana, 100, "from ana");
+        deliver(&server, &beto, 200, "from beto");
+
+        let only_ana = InboxParams {
+            from: Some(ana.node_id().short()),
+            ..InboxParams::default()
+        };
+        assert_eq!(
+            subjects(&server, only_ana).await,
+            ["from ana"],
+            "one machine's mail, not the whole box"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_from_that_names_no_machine_is_refused_rather_than_ignored() {
+        let (_dir, server) = server();
+        one_read_one_unread(&server);
+
+        let error = refusal(
+            &server,
+            InboxParams {
+                from: Some("nobody-here".to_owned()),
+                ..InboxParams::default()
+            },
+            "a sender this node has never met",
+        )
+        .await;
+
+        assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert!(error.message.contains("nobody-here"), "{}", error.message);
+    }
+
+    #[tokio::test]
+    async fn the_inbox_stops_at_the_limit_it_was_given() {
+        let (_dir, server) = server();
+        let ana = member(&server, 94, "ana-mbp");
+        for (millis, subject) in [(100, "oldest"), (200, "middle"), (300, "newest")] {
+            deliver(&server, &ana, millis, subject);
+        }
+
+        assert_eq!(
+            subjects(
+                &server,
+                InboxParams {
+                    limit: Some(2),
+                    ..InboxParams::default()
+                }
+            )
+            .await,
+            ["newest", "middle"],
+            "two of the three, newest first"
+        );
+    }
+
+    #[tokio::test]
+    async fn unread_only_in_a_box_that_holds_no_unread_mail_is_refused() {
+        // Only `new/` holds unread mail, so this asks for mail that is read and
+        // unread at once. It answered with an empty list, which reads as an
+        // empty box — #28 exactly. The CLI has refused it since #79.
+        let (_dir, server) = server();
+        one_read_one_unread(&server);
+
+        let error = refusal(
+            &server,
+            InboxParams {
+                r#box: Some("cur".to_owned()),
+                unread_only: Some(true),
+                ..InboxParams::default()
+            },
+            "mail that is read and unread at once",
+        )
+        .await;
+
+        assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert!(
+            error.message.contains("unread_only") && error.message.contains("box"),
+            "it should say which one to drop: {}",
+            error.message
+        );
+    }
 
     #[test]
     fn a_bad_message_id_is_the_callers_fault_not_an_internal_error() {
@@ -656,6 +873,17 @@ mod tests {
     fn a_missing_message_is_the_callers_fault_too() {
         let error = mcp_error(&ServiceError::NoSuchMessage { id: Ulid::nil() });
         assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn a_machine_this_node_does_not_know_is_the_callers_fault_too() {
+        // An agent handed "there is no such machine" can look at `list_peers`
+        // and try another. An agent handed "internal error" can only give up.
+        let error = mcp_error(&ServiceError::NoSuchPeer {
+            id: "ana-mbp".to_owned(),
+        });
+        assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert!(error.message.contains("ana-mbp"), "{}", error.message);
     }
 
     #[test]

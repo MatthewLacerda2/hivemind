@@ -22,6 +22,9 @@ tracing.workspace = true
 ulid.workspace = true
 
 [dev-dependencies]
+# Only to date a test message, so a test can say which of two is the newest
+# rather than race `Utc::now()` twice inside one millisecond.
+chrono.workspace = true
 tempfile.workspace = true
 
 [lints]
