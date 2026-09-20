@@ -544,7 +544,8 @@ mod tests {
                 },
                 SenderKind::Human,
             )
-            .expect("send");
+            .expect("send")
+            .message;
         serde_json::to_value(message).expect("serialise")
     }
 
@@ -640,7 +641,8 @@ mod tests {
                 },
                 SenderKind::Human,
             )
-            .expect("send");
+            .expect("send")
+            .message;
 
         let parts = message
             .attachments

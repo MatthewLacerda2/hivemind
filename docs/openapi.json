@@ -903,6 +903,13 @@
           "thread_id"
         ],
         "properties": {
+          "duplicate_of": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An identical message sent in the last two minutes, if there was one\n(#33). Absent when there was not. The message was still queued: this is\na notice for whoever pressed send, not a refusal."
+          },
           "id": {
             "type": "string",
             "description": "The new message's id."

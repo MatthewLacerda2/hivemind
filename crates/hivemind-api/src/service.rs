@@ -217,11 +217,13 @@ pub enum ServiceError {
     Unavailable,
 }
 
+mod duplicate;
 mod group;
 mod peering;
 mod presence;
 mod sessions;
 
+pub use duplicate::{Queued, REPEAT_WINDOW};
 pub use group::{GroupStatus, MAX_SEEN, SeenNode};
 pub use peering::Met;
 pub use presence::Presence;
@@ -431,10 +433,15 @@ impl MailService {
     /// # Errors
     /// [`ServiceError::NoRecipients`] for an unaddressed draft,
     /// [`ServiceError::Invalid`] if it breaks the limits in SPEC §4.1.
-    pub fn send(&self, draft: Draft, sender_kind: SenderKind) -> Result<Message, ServiceError> {
+    pub fn send(&self, draft: Draft, sender_kind: SenderKind) -> Result<Queued, ServiceError> {
         if draft.to.is_empty() {
             return Err(ServiceError::NoRecipients);
         }
+
+        // Asked before the draft is taken apart, and answered by the files
+        // rather than by memory of this process: two presses can land in two
+        // daemons' lifetimes (#33).
+        let duplicate_of = self.recent_duplicate(&draft);
 
         let id = Ulid::generate();
         let mut message = Message {
@@ -503,7 +510,20 @@ impl MailService {
             self.complete_delivery(&outbound)?;
         }
 
-        Ok(message)
+        if let Some(previous) = duplicate_of {
+            // Both ids, because the question a person asks next is which of the
+            // two the other end got, and the answer is both.
+            tracing::warn!(
+                id = %message.id,
+                %previous,
+                "this is the same message as one sent moments ago"
+            );
+        }
+
+        Ok(Queued {
+            message,
+            duplicate_of,
+        })
     }
 
     /// Reply to a message, inheriting its thread.
@@ -516,7 +536,7 @@ impl MailService {
         body: String,
         attachments: Vec<std::path::PathBuf>,
         sender_kind: SenderKind,
-    ) -> Result<Message, ServiceError> {
+    ) -> Result<Queued, ServiceError> {
         let (_, original) = self.get(parent)?;
         let subject = if original.subject.starts_with("Re: ") {
             original.subject.clone()
@@ -1329,7 +1349,8 @@ pub(crate) mod tests {
                 draft_to_self(&service, "dashboard PR", "take a look"),
                 SenderKind::Human,
             )
-            .expect("send");
+            .expect("send")
+            .message;
 
         assert_eq!(service.unread_count().expect("count"), 1);
         let (mailbox, received) = service.get(sent.id).expect("get");
@@ -1342,7 +1363,8 @@ pub(crate) mod tests {
         let (_dir, service) = service();
         let sent = service
             .send(draft_to_self(&service, "signed", "body"), SenderKind::Human)
-            .expect("send");
+            .expect("send")
+            .message;
 
         let key = SigningKey::from_bytes(&[11u8; 32]);
         assert!(sent.verify(&key.verifying_key()).is_ok());
@@ -1359,7 +1381,8 @@ pub(crate) mod tests {
                 draft_to_self(&service, "from mcp", "body"),
                 SenderKind::Agent,
             )
-            .expect("send");
+            .expect("send")
+            .message;
         assert_eq!(agent.sender_kind, SenderKind::Agent);
 
         let human = service
@@ -1367,7 +1390,8 @@ pub(crate) mod tests {
                 draft_to_self(&service, "from cli", "body"),
                 SenderKind::Human,
             )
-            .expect("send");
+            .expect("send")
+            .message;
         assert_eq!(human.sender_kind, SenderKind::Human);
     }
 
@@ -1410,7 +1434,8 @@ pub(crate) mod tests {
         let (_dir, service) = service();
         let sent = service
             .send(draft_to_self(&service, "unread", "body"), SenderKind::Human)
-            .expect("send");
+            .expect("send")
+            .message;
         assert_eq!(service.unread_count().expect("count"), 1);
 
         service.mark_read(sent.id).expect("mark read");
@@ -1423,7 +1448,8 @@ pub(crate) mod tests {
         let (_dir, service) = service();
         let sent = service
             .send(draft_to_self(&service, "unread", "body"), SenderKind::Human)
-            .expect("send");
+            .expect("send")
+            .message;
         service.mark_read(sent.id).expect("first");
         service
             .mark_read(sent.id)
@@ -1447,11 +1473,13 @@ pub(crate) mod tests {
                 draft_to_self(&service, "dashboard PR", "take a look"),
                 SenderKind::Human,
             )
-            .expect("send");
+            .expect("send")
+            .message;
 
         let reply = service
             .reply(root.id, "on it".to_owned(), Vec::new(), SenderKind::Human)
-            .expect("reply");
+            .expect("reply")
+            .message;
 
         assert_eq!(reply.thread_id, root.thread_id);
         assert_eq!(reply.in_reply_to, Some(root.id));
@@ -1463,13 +1491,16 @@ pub(crate) mod tests {
         let (_dir, service) = service();
         let root = service
             .send(draft_to_self(&service, "lunch", "?"), SenderKind::Human)
-            .expect("send");
+            .expect("send")
+            .message;
         let first = service
             .reply(root.id, "yes".to_owned(), Vec::new(), SenderKind::Human)
-            .expect("reply");
+            .expect("reply")
+            .message;
         let second = service
             .reply(first.id, "1pm".to_owned(), Vec::new(), SenderKind::Human)
-            .expect("reply");
+            .expect("reply")
+            .message;
 
         assert_eq!(second.subject, "Re: lunch");
     }
@@ -1479,7 +1510,8 @@ pub(crate) mod tests {
         let (_dir, service) = service();
         let root = service
             .send(draft_to_self(&service, "lunch", "?"), SenderKind::Human)
-            .expect("send");
+            .expect("send")
+            .message;
         service
             .reply(root.id, "yes".to_owned(), Vec::new(), SenderKind::Human)
             .expect("reply");
@@ -1516,7 +1548,8 @@ pub(crate) mod tests {
                 draft_to_self(&service, "watch me", "body"),
                 SenderKind::Human,
             )
-            .expect("send");
+            .expect("send")
+            .message;
 
         let first = events.try_recv().expect("an event");
         let second = events.try_recv().expect("a second event");
@@ -1722,7 +1755,8 @@ pub(crate) mod tests {
 
         let sent = service
             .send(draft_with(&service, vec![small, large]), SenderKind::Human)
-            .expect("send");
+            .expect("send")
+            .message;
 
         assert_eq!(sent.attachments.len(), 2);
         assert!(sent.attachments[0].inline, "100 bytes is at the limit");
@@ -1745,7 +1779,8 @@ pub(crate) mod tests {
 
         let sent = service
             .send(draft_with(&service, files), SenderKind::Human)
-            .expect("send");
+            .expect("send")
+            .message;
 
         let inline: Vec<_> = sent.attachments.iter().filter(|a| a.inline).collect();
         assert_eq!(inline.len(), usize::try_from(budget / 100).expect("fits"));
@@ -1781,7 +1816,8 @@ pub(crate) mod tests {
                 draft_with(&service, vec![path.clone(), path]),
                 SenderKind::Human,
             )
-            .expect("send");
+            .expect("send")
+            .message;
 
         assert_eq!(sent.attachments.len(), 2, "both are listed");
         assert_eq!(
@@ -1798,7 +1834,8 @@ pub(crate) mod tests {
 
         let sent = service
             .send(draft_with(&service, vec![png]), SenderKind::Human)
-            .expect("send");
+            .expect("send")
+            .message;
 
         assert_eq!(
             sent.attachments[0].mime, "image/png",
@@ -1847,6 +1884,7 @@ pub(crate) mod tests {
                     SenderKind::Human,
                 )
                 .expect("send")
+                .message
         };
 
         std::fs::remove_file(dir.path().join("index.db")).expect("delete the index");
