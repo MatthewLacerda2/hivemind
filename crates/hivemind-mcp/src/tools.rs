@@ -104,8 +104,8 @@ impl HivemindMcp {
     /// One construction for the `inbox` tool and for the `hivemind://inbox`
     /// resource, which asked the same question in two places until #102 — and
     /// every filter in both of them could be deleted with the suite still
-    /// green. Two spellings of one question is one place for a filter to be
-    /// forgotten.
+    /// green. One question asked twice is one place too many for a filter to go
+    /// missing in.
     ///
     /// `unread_only` is not a field here. `new/` **is** the unread box, so once
     /// [`InboxParams::mailbox`] has refused every other box beside the flag,
