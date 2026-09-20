@@ -2,6 +2,13 @@
 //!
 //! Binds to `127.0.0.1` and fails closed if configured otherwise: it carries no
 //! authentication, so reachability *is* the authorization (SPEC §6.3).
+//!
+//! This module hands out a [`router`] and deliberately does not serve it. The
+//! daemon calls `axum::serve` itself: it nests the MCP service at `/mcp`, which
+//! this crate cannot depend on (SPEC §3), and a graceful shutdown has to close
+//! the event streams and the MCP sessions *before* draining, or `/api/v1/events`
+//! keeps the process alive for ever (#108). A helper here that took a shutdown
+//! future and forgot that was #112.
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -867,26 +874,6 @@ pub(crate) async fn events(
         }
     };
     Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
-}
-
-/// Serve the loopback router until `shutdown` resolves.
-///
-/// Takes a bound listener rather than an address so the caller decides where to
-/// bind — and so a test can bind port 0 and find out what it got.
-///
-/// # Errors
-/// Returns whatever the server failed with.
-pub async fn serve<F>(
-    listener: tokio::net::TcpListener,
-    state: AppState,
-    shutdown: F,
-) -> std::io::Result<()>
-where
-    F: std::future::Future<Output = ()> + Send + 'static,
-{
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(shutdown)
-        .await
 }
 
 #[cfg(test)]
