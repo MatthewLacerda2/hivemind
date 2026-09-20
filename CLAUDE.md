@@ -315,8 +315,11 @@ destroyed work three times in one session: `discovery.rs`, `CHANGELOG.md` and
 
 ## File size is a ratchet
 
-`just size` caps lines of code per file: **800 source, 600 test**, counted
-separately because most tests here live in the file they test.
+`just size` caps lines of code per file: **660 source, 560 test**, counted
+separately because most tests here live in the file they test. They were 800
+and 600 until #100 split `service.rs`; the numbers in this section will be
+wrong again the next time one comes down, so read `.github/scripts/size.py`
+when it matters.
 
 Blank lines and comments are free. `missing_docs` is a merge gate and the house
 style is to explain *why*, so a cap that counted prose would put those two
@@ -328,9 +331,17 @@ commands out of `commands.rs`, and the blob tests out of `peer.rs` — rather
 than a refactor. A gate that passes on the day it arrives is a gate nobody
 knows works.
 
-**They only ever come down.** Lower them as files are split; never raise them
-to admit growth. `just size --report` lists what to split next, largest first —
-`service.rs` at 667 source lines is the standing answer.
+**They only ever come down**, and the branch that lowers them is the branch
+that split something. Never raise them to admit growth. `just size --report`
+lists what to split next, largest first; `hivemind-api/src/local.rs` at 651
+source is the standing answer, with `hivemind-cli/tests/single_daemon.rs` at
+558 test lines the tightest of the test files.
+
+**The branch that hits the cap is the branch that pays for the split**, and
+that is worth one issue of its own rather than a refactor smuggled into a
+feature. #100 was filed at 791 of 800 because the two features behind it each
+added a service function, and a feature diff tangled up with a 780-line move
+is the shape nobody can review.
 
 Split by concern and **group into a subfolder rather than adding a filename
 prefix**. A shared prefix on sibling files is a subfolder waiting to happen.

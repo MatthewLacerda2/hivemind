@@ -34,11 +34,14 @@ a whole session.
 where everything collides here, measured over the last forty commits rather than
 guessed:
 
-- `crates/hivemind-api/src/service.rs` — the most-touched file in the repo and
-  the largest, so also the one `just size --report` keeps naming. Two branches
-  in it is the case to avoid above all others.
-- `crates/hivemind-cli/src/commands.rs`, and `local.rs` and `peer.rs` beside
-  `service.rs`. A CLI change and a service change usually meet in one of these.
+- `crates/hivemind-api/src/service/` and `crates/hivemind-cli/src/commands/`,
+  both of which were single files until #100 and #34 split them. Splitting
+  helped: two branches now meet only if they want the same concern rather than
+  the same file. Two branches in one submodule is still the case to avoid above
+  all others, and `service.rs` itself still holds the type every child touches.
+- `crates/hivemind-api/src/local.rs`, the largest file left and the one
+  `just size --report` now names, and `peer.rs` beside it. A CLI change and a
+  service change usually meet in one of these.
 - `justfile`, `Cargo.toml`, `Cargo.lock` — appended to by almost everything.
 - The four documents checked against the code: `docs/openapi.json`,
   `docs/protocol.md`'s problem table, `README.md`'s configuration table,
