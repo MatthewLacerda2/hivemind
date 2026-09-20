@@ -647,4 +647,91 @@ pub(crate) mod tests {
         assert_eq!(service.unread_count().expect("count"), 1);
         assert_eq!(service.get(sent.id).expect("get").1.subject, "survives");
     }
+
+    #[test]
+    fn per_recipient_delivery_state_survives_deleting_the_index() {
+        // ADR 0002 again, for what #31 added. Per-recipient state is read from
+        // the envelope in `out/` and `sent/` and never from `index.db`, which
+        // is what makes this pass: a column only the live path fills is a
+        // cache that cannot be rebuilt, and there is no such column.
+        //
+        // Two recipients, one of them never reached, so "the right one's
+        // state" is distinguishable from "all of them".
+        let dir = tempfile::tempdir().expect("temp dir");
+        let key = SigningKey::from_bytes(&[11u8; 32]);
+        let identity = NodeId::from_certificate_der(b"this node");
+
+        let (id, ana, beto) = {
+            let service =
+                MailService::open(dir.path(), describe(identity), key.clone()).expect("open");
+            let ana = hivemind_core::identity::Identity::from_seed([71u8; 32]).expect("identity");
+            let beto = hivemind_core::identity::Identity::from_seed([72u8; 32]).expect("identity");
+            for who in [&ana, &beto] {
+                service
+                    .admit(
+                        who.node_id(),
+                        "machine",
+                        None,
+                        who.certificate_der().to_vec(),
+                        PeerAddr::manual("10.0.0.2", 8400),
+                    )
+                    .expect("admit");
+            }
+
+            let sent = service
+                .send(
+                    Draft {
+                        to: vec![
+                            Recipient::Node(ana.node_id()),
+                            Recipient::Node(beto.node_id()),
+                        ],
+                        subject: "two recipients".to_owned(),
+                        body: "body".to_owned(),
+                        kind: Kind::Message,
+                        in_reply_to: None,
+                        attachments: Vec::new(),
+                    },
+                    SenderKind::Human,
+                )
+                .expect("send")
+                .message;
+
+            // Ana took it and read it; Beto's machine is off.
+            let mut outbound = service
+                .store
+                .get_outbound(Mailbox::Out, sent.id)
+                .expect("envelope");
+            assert!(outbound.mark_delivered(ana.node_id(), Utc::now()));
+            assert!(outbound.mark_read(ana.node_id(), Utc::now()));
+            service.save_outbound(&outbound).expect("save");
+
+            (sent.id, ana.node_id(), beto.node_id())
+        };
+
+        std::fs::remove_file(dir.path().join("index.db")).expect("delete the index");
+
+        let service = MailService::open(dir.path(), describe(identity), key).expect("reopen");
+        let recipients = service
+            .delivery_of(id)
+            .expect("read the envelope")
+            .expect("this node sent it");
+
+        let state_of = |who: NodeId| {
+            recipients
+                .iter()
+                .find(|r| r.node == who)
+                .map(RecipientState::state)
+        };
+        assert_eq!(state_of(ana), Some(hivemind_core::store::Delivery::Read));
+        assert_eq!(
+            state_of(beto),
+            Some(hivemind_core::store::Delivery::Queued),
+            "the machine that is off is still owed a copy"
+        );
+        assert_eq!(
+            service.get(id).expect("get").0,
+            Mailbox::Out,
+            "and the rebuilt index still has it in the right box"
+        );
+    }
 }

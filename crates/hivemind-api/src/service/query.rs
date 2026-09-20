@@ -21,26 +21,40 @@ impl MailService {
     /// [`ServiceError::NoSuchMessage`] if no mailbox holds it.
     pub fn get(&self, id: Ulid) -> Result<(Mailbox, Message), ServiceError> {
         // Prefer the received copy: a message addressed to its own sender
-        // exists twice, and "read this" means the one in the inbox.
-        for mailbox in [Mailbox::New, Mailbox::Cur, Mailbox::Sent] {
+        // exists twice, and "read this" means the one in the inbox. `out/` is
+        // last because a message that is still going out is also a message
+        // somebody may have sent to themselves, and the arrived copy is the
+        // one `read` means.
+        for mailbox in [Mailbox::New, Mailbox::Cur, Mailbox::Sent, Mailbox::Out] {
             match self.store.get(mailbox, id) {
                 Ok(message) => return Ok((mailbox, message)),
                 Err(StoreError::NotFound { .. }) => {}
                 Err(other) => return Err(other.into()),
             }
         }
+        Err(ServiceError::NoSuchMessage { id })
+    }
 
-        // `out/` last, and through the envelope: the file there is an
-        // `Outbound` — the signed message plus what is still owed each
-        // recipient — so reading it as a plain message fails to parse. It was
-        // in the loop above, which made every message still waiting for an
-        // offline peer unreadable: the listing shows it, and `read` answered
-        // "something went wrong on this node".
-        match self.store.get_outbound(id) {
-            Ok(outbound) => Ok((Mailbox::Out, outbound.message)),
-            Err(StoreError::NotFound { .. }) => Err(ServiceError::NoSuchMessage { id }),
-            Err(other) => Err(other.into()),
+    /// What each recipient of one of this node's own sends has done with it
+    /// (SPEC §8, #31).
+    ///
+    /// `None` for a message this node did not send, and for one whose
+    /// recipients were all this machine. Read from the envelope in `out/` or
+    /// `sent/` rather than from the index: the files are the source of truth
+    /// and this must answer on the pass after somebody deleted `index.db`
+    /// (ADR 0002).
+    ///
+    /// # Errors
+    /// [`ServiceError::Store`] if a file exists and will not read.
+    pub fn delivery_of(&self, id: Ulid) -> Result<Option<Vec<RecipientState>>, ServiceError> {
+        for mailbox in [Mailbox::Out, Mailbox::Sent] {
+            match self.store.get_outbound(mailbox, id) {
+                Ok(outbound) => return Ok(Some(outbound.recipients)),
+                Err(StoreError::NotFound { .. }) => {}
+                Err(other) => return Err(other.into()),
+            }
         }
+        Ok(None)
     }
 
     /// Every message in a thread, oldest first, once each.

@@ -62,22 +62,11 @@ impl MailService {
                     .rev()
                     .take_while(|id| generated_at(*id).is_some_and(|at| at >= cutoff))
                     .find(|id| {
-                        self.on_its_way_out(mailbox, *id)
-                            .is_some_and(|message| repeats(&message, draft))
+                        self.store
+                            .get(mailbox, *id)
+                            .is_ok_and(|message| repeats(&message, draft))
                     })
             })
-    }
-
-    /// One of this node's own sends, wherever it has got to.
-    ///
-    /// `out/` holds envelopes rather than plain messages, which is the whole
-    /// difference between the two mailboxes here.
-    fn on_its_way_out(&self, mailbox: Mailbox, id: Ulid) -> Option<Message> {
-        if mailbox == Mailbox::Out {
-            self.store.get_outbound(id).ok().map(|out| out.message)
-        } else {
-            self.store.get(mailbox, id).ok()
-        }
     }
 }
 
@@ -244,7 +233,16 @@ mod tests {
             received_at: None,
             signature: Signature::from_bytes([0u8; 64]),
         };
-        service.store.put(Mailbox::Sent, &message).expect("file it");
+        service
+            .store
+            .put_outbound(
+                Mailbox::Sent,
+                &hivemind_core::store::Outbound {
+                    recipients: Vec::new(),
+                    message,
+                },
+            )
+            .expect("file it");
         (dir, service, draft, id)
     }
 

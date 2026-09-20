@@ -15,7 +15,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use hivemind_core::message::Message;
 use hivemind_core::peer::NodeId;
-use hivemind_core::store::{MailStore, Outbound, RecipientState};
+use hivemind_core::store::{MailStore, Mailbox, Outbound, RecipientState};
 
 use crate::client::ClientError;
 
@@ -452,11 +452,11 @@ pub fn persist(
     outbound: &Outbound,
 ) -> Result<(), hivemind_core::store::StoreError> {
     if outbound.is_complete() {
-        // Drops the delivery bookkeeping: `sent/` is read like any other
-        // mailbox, so what lands there is the plain signed message.
+        // The envelope travels with it, so which recipient took the message —
+        // and which has read it — outlives the queue (#31).
         store.promote_to_sent(outbound)
     } else {
-        store.put_outbound(outbound)
+        store.put_outbound(Mailbox::Out, outbound)
     }
 }
 
@@ -552,7 +552,6 @@ mod pass_tests {
     use super::*;
     use hivemind_core::crypto::SigningKey;
     use hivemind_core::message::{Kind, Recipient, SenderKind};
-    use hivemind_core::store::Mailbox;
     use hivemind_core::store::RecipientState;
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -791,19 +790,22 @@ mod pass_tests {
         let mut outbound = outbound_to(&[a, b]);
         let id = outbound.message.id;
         persist(&store, &outbound).expect("persist");
-        assert!(store.get_outbound(id).is_ok(), "still owed to somebody");
+        assert!(
+            store.get_outbound(Mailbox::Out, id).is_ok(),
+            "still owed to somebody"
+        );
 
         outbound.mark_delivered(a, at(1));
         persist(&store, &outbound).expect("persist");
         assert!(
-            store.get_outbound(id).is_ok(),
+            store.get_outbound(Mailbox::Out, id).is_ok(),
             "one of two is not everybody"
         );
 
         outbound.mark_delivered(b, at(2));
         persist(&store, &outbound).expect("persist");
         assert!(
-            store.get_outbound(id).is_err(),
+            store.get_outbound(Mailbox::Out, id).is_err(),
             "out/ should be empty once everyone has it"
         );
         assert!(

@@ -178,8 +178,8 @@ rather than taken from the message, so a peer cannot nominate its own key.
 ├── mail/
 │   ├── new/<ulid>.json     # unread, received
 │   ├── cur/<ulid>.json     # read
-│   ├── out/<ulid>.json     # pending delivery (per recipient state inside the file)
-│   └── sent/<ulid>.json    # fully delivered
+│   ├── out/<ulid>.json     # pending delivery (per-recipient state inside the file)
+│   └── sent/<ulid>.json    # delivered to everyone (per-recipient state inside the file)
 ├── blobs/<sha256-hex>      # content-addressed attachments, deduplicated
 ├── index.db                # SQLite cache — derived, deletable, rebuilt on startup if missing/stale
 └── daemon.log
@@ -323,7 +323,8 @@ RFC 9457 problem+json everywhere. Stable `type` slugs (`not_paired`, `unknown_pe
 - Idempotency: recipients dedupe on message id; re-delivery is always safe.
 - Idempotency is the **recipient's**, and it cannot cover a sender that sent twice: two presses make two ids, and the far end has no way to tell them from two deliberate messages. So a send whose recipients, subject, body, kind and `in_reply_to` all repeat one this node sent in the last **two minutes** comes back with `duplicate_of` naming it — in the `202`, in the MCP result, and as a warning line from the CLI. A **notice, not a refusal**: the message is queued either way, because asking somebody the same thing again is a real message (#33).
 - Inline attachments: any single file ≤ `inline_max` (default 8 MiB) ships in the delivery multipart. Larger ones ship as refs; the recipient fetches lazily on first access or eagerly if `prefetch = true` in config.
-- Delivered messages move `out/` → `sent/` only when all recipients are delivered.
+- Delivered messages move `out/` → `sent/` only when all recipients are delivered. **Both directories hold the delivery envelope**: the signed message plus one record per recipient, so promotion moves the record rather than dropping it (ADR 0015).
+- **Per-recipient state is `queued` → `delivered` → `read`, with the time of each transition** (#31). `delivered` is set when the recipient's own daemon answers `202` to `POST /peer/v1/messages`, never by the sender assuming: the distinction is the whole value, because a sender otherwise has only its own daemon's word for it. None of it is held in `index.db` — it is read from the envelope, so deleting the index loses nothing (ADR 0002).
 
 ---
 

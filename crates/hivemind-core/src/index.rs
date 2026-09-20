@@ -224,10 +224,13 @@ CREATE TABLE messages (
     -- `hex(from_node)`, and the two have to be comparable in one query.
     --
     -- Node recipients only. `everyone` and an owner name are expanded at send
-    -- time into the outbox envelope (SPEC §8), and `sent/` keeps the signed
-    -- message alone — so a rebuild from the files could not recover an
-    -- expansion, and an index that cannot be rebuilt is not a cache
-    -- (ADR 0002).
+    -- time into the outgoing envelope (SPEC §8), and this column was added when
+    -- `sent/` still kept the signed message alone — so a rebuild could not have
+    -- recovered an expansion, and an index that cannot be rebuilt is not a
+    -- cache (ADR 0002). ADR 0015 put the envelope in `sent/` as well, so the
+    -- expansion *is* recoverable now; widening this to include it would change
+    -- who a conversation is reported as being with, which is a decision of its
+    -- own and not one this column should make quietly.
     to_nodes         TEXT NOT NULL,
     -- A message addressed to its own sender genuinely exists twice: once in
     -- `sent` as our copy, once in `new` as the one we received. The pair is
@@ -725,14 +728,11 @@ impl Index {
 
         for mailbox in Mailbox::ALL {
             for id in store.list(mailbox)? {
-                // `out/` holds an Outbound envelope: the signed message plus
-                // the per-recipient delivery state, which cannot live inside
-                // the message because it changes after signing.
-                let message = if mailbox == Mailbox::Out {
-                    store.get_outbound(id).map(|o| o.message)
-                } else {
-                    store.get(mailbox, id)
-                };
+                // The outgoing mailboxes hold an Outbound envelope: the signed
+                // message plus the per-recipient delivery state, which cannot
+                // live inside the message because it changes after signing.
+                // `store.get` unwraps it, so nothing here has to know which.
+                let message = store.get(mailbox, id);
 
                 // A message that will not parse is skipped rather than fatal:
                 // the index is a cache, and refusing to start because of one
@@ -1390,10 +1390,13 @@ mod tests {
 
         let message = message_at(1_000, "still going out", "body");
         store
-            .put_outbound(&crate::store::Outbound {
-                recipients: vec![crate::store::RecipientState::pending(message.from)],
-                message: message.clone(),
-            })
+            .put_outbound(
+                Mailbox::Out,
+                &crate::store::Outbound {
+                    recipients: vec![crate::store::RecipientState::pending(message.from)],
+                    message: message.clone(),
+                },
+            )
             .expect("put_outbound");
 
         let mut index = Index::in_memory().expect("index");
@@ -1426,12 +1429,15 @@ mod tests {
             (4_000, Mailbox::Sent),
         ] {
             let message = message_at(millis, &format!("subject {millis}"), "body");
-            if mailbox == Mailbox::Out {
+            if mailbox.holds_envelopes() {
                 store
-                    .put_outbound(&crate::store::Outbound {
-                        recipients: vec![crate::store::RecipientState::pending(message.from)],
-                        message: message.clone(),
-                    })
+                    .put_outbound(
+                        mailbox,
+                        &crate::store::Outbound {
+                            recipients: vec![crate::store::RecipientState::pending(message.from)],
+                            message: message.clone(),
+                        },
+                    )
                     .expect("put_outbound");
             } else {
                 store.put(mailbox, &message).expect("put");
@@ -1503,7 +1509,9 @@ mod tests {
                     }
                     // Send it.
                     (2, None) => {
-                        store.put_outbound(&outbound).expect("put_outbound");
+                        store
+                            .put_outbound(Mailbox::Out, &outbound)
+                            .expect("put_outbound");
                         live.upsert(Mailbox::Out, &message).expect("upsert");
                         placed.insert(which, Mailbox::Out);
                     }
