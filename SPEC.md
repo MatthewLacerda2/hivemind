@@ -331,22 +331,25 @@ RFC 9457 problem+json everywhere. Stable `type` slugs (`not_paired`, `unknown_pe
 
 ### 9.1 MCP server (`hivemind-mcp`, crate `rmcp`, streamable HTTP at `/mcp`)
 
-Tools — keep it to these eight; every one maps 1:1 to a service-layer function:
+Tools — keep it to these nine; every one maps 1:1 to a service-layer function:
 
 | Tool | Args | Returns |
 |---|---|---|
 | `list_peers` | `{}` | peers with name, owner, id, online, last_seen, sessions |
 | `send` | `{to: [string], subject, body, kind?, attachments?: [local path]}` | `{id, thread_id, duplicate_of?}` (§8) |
 | `inbox` | `{box?: new\|cur\|out\|sent, unread_only?: bool, limit?: int, from?: node id, whole or short}` | summaries (id, from, subject, kind, sender_kind, sent_at, attachment names) |
+| `chats` | `{with?: node id, whole or short, limit?: int}` | one row per conversation, the one that moved last first: thread_id, the subject it opened with, the machines it is with, how many messages and how many unread, and the last message's sender, sender_kind and time |
 | `read` | `{id}` | full message; marks read; attachment refs include a **local filesystem path**; `others_in_thread` counts the rest of the conversation |
 | `thread` | `{id}` | every message in the conversation that id belongs to — **any** message in it, not only the root — oldest first and in full; marks them read |
-| `reply` | `{id, body, attachments?}` | `{id}` |
+| `reply` | `{id: a message **or a thread**, body, attachments?}` | `{id}` — a thread answers the most recent message in it |
 | `broadcast` | `{subject, body, kind?}` | `{id}` |
 | `download_attachment` | `{id, sha}` | `{path}` — local path once fetched |
 
 Resources: `hivemind://inbox` (unread summaries, text) and `hivemind://peers`.
 
-`thread` is the eighth and arrived with #34, amending the "seven" this section said before. The number was never the point: the point is that a ninth tool would probably be orchestration, which §12 keeps out. Reading a conversation is reading mail — and it is the one door a Claude most needs, because a Claude resuming a session has the thread as its only memory of what was said and cannot reach it by speaking HTTP by hand.
+`thread` is the eighth and arrived with #34, amending the "seven" this section said before; `chats` is the ninth and arrived with #43, amending the "eight". The count was never the point and the boundary always was: **listing what this node already holds is reading mail**, and both of these answer from the index alone — nothing is scheduled, nothing is run, §12 is untouched. What would not earn a tool is one that *acts* because mail arrived.
+
+`chats` earns its own because `inbox` cannot answer the question it answers. A Claude picking a session back up needs "which conversations do I have open, and where did each get to"; from a page of loose messages that is a `thread` call per subject, and the unread count comes out wrong wherever a message is addressed to its own sender, because the index holds one row per mailbox as well as per id (#34).
 
 Tool descriptions must tell Claude that `sender_kind: human` means a person typed it directly, and that `to` accepts a node name, an owner name, or `everyone`. Ship `docs/mcp.md` with worked examples.
 

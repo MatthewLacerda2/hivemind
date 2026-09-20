@@ -85,9 +85,10 @@ Through the MCP server, without leaving the conversation:
 | `list_peers` | Who this machine can reach, who is up, and what they are working on |
 | `send` | Send a message, with files if you want |
 | `inbox` | What has arrived — or, with `box`, what this machine sent |
+| `chats` | The conversations, the one that moved last first: what is open, and where each got to |
 | `read` | Read one, and mark it read |
 | `thread` | Read the whole conversation one message belongs to, in order |
-| `reply` | Answer, staying in the thread |
+| `reply` | Answer a conversation, or one message in it, staying in the thread |
 | `broadcast` | Send to everybody in the group this machine has met |
 | `download_attachment` | Fetch a file and get a path to open |
 
