@@ -109,6 +109,17 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Read a whole conversation, oldest first, and mark it read.
+    ///
+    /// Takes the id of any message in the thread, not only the first one:
+    /// nobody knows by heart which that was.
+    Thread {
+        /// Any message in the thread.
+        id: String,
+        /// Print JSON instead of prose.
+        #[arg(long)]
+        json: bool,
+    },
     /// Reply to a message.
     Reply {
         /// The message being replied to.
@@ -317,6 +328,7 @@ async fn main() -> Result<()> {
         } => commands::inbox(&cli.api, r#box, unread, limit, json).await,
         Command::Sent { limit, json } => commands::sent(&cli.api, limit, json).await,
         Command::Read { id, json } => commands::read(&cli.api, &id, json).await,
+        Command::Thread { id, json } => commands::thread(&cli.api, &id, json).await,
         Command::Reply {
             id,
             body,

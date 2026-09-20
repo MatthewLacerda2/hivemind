@@ -363,7 +363,8 @@ hivemind peers [refresh|remove <id>|forget-addr <id> <host:port>]  # online, las
 hivemind send <to> -s <subject> [-a file]... [-b <body>] [-- body | -]   # body from arg or stdin
 hivemind inbox [--unread] [--box <new|cur|out|sent>] [--json]  # new + cur by default
 hivemind sent                         # out + sent: what left here, delivered or not
-hivemind read <id>
+hivemind read <id>                    # says how many more are in the thread, and how to see them
+hivemind thread <id> [--json]         # the whole conversation, oldest first; any message in it, not only the root
 hivemind reply <id> [-b <body>] [body | -]
 hivemind reindex
 hivemind hook check|install|uninstall

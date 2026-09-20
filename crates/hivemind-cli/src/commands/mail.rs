@@ -243,6 +243,7 @@ async fn listing(
 #[derive(Debug, Deserialize)]
 struct MessageBody {
     id: String,
+    thread_id: String,
     from: String,
     subject: String,
     body: String,
@@ -273,15 +274,17 @@ pub(crate) async fn read(api: &str, id: &str, json: bool) -> Result<()> {
         .post_empty(&format!("/api/v1/messages/{id}/read"))
         .await?;
 
+    // What else was said on this subject. A message read on its own is how a
+    // three-day conversation ends up reconstructed from memory (#34).
+    let others = thread_summaries(&client, &message.thread_id)
+        .await?
+        .len()
+        .saturating_sub(1);
+
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "id": message.id, "from": message.from, "subject": message.subject,
-                "body": message.body, "sender_kind": message.sender_kind,
-                "sent_at": message.sent_at, "attachments": message.attachments,
-            }))?
-        );
+        let mut reported = as_json(&message);
+        reported["others_in_thread"] = others.into();
+        println!("{}", serde_json::to_string_pretty(&reported)?);
         return Ok(());
     }
 
@@ -317,7 +320,123 @@ pub(crate) async fn read(api: &str, id: &str, json: bool) -> Result<()> {
             println!("    {}", attachment.sha256.dimmed());
         }
     }
+
+    if others > 0 {
+        println!();
+        println!(
+            "{}",
+            format!(
+                "{others} more in this thread · hivemind thread {}",
+                short_id(&message.thread_id)
+            )
+            .dimmed()
+        );
+    }
     Ok(())
+}
+
+/// Read a whole conversation, oldest first (SPEC §10).
+///
+/// Takes the id of any message in it, which is the point: the id somebody has
+/// to hand is the one they were just reading, and nobody knows by heart which
+/// message was first (#34).
+pub(crate) async fn thread(api: &str, id: &str, json: bool) -> Result<()> {
+    let client = Client::new(api);
+    let summaries = thread_summaries(&client, id).await?;
+
+    // The thread endpoint answers with summaries, and a conversation without
+    // the bodies is the inbox again — so each message is fetched in full.
+    let mut messages = Vec::with_capacity(summaries.len());
+    for summary in &summaries {
+        messages.push(
+            client
+                .get::<MessageBody>(&format!("/api/v1/messages/{}", summary.id))
+                .await?,
+        );
+        // Reading a conversation is reading the messages in it, which is what
+        // the web UI's thread view already decided (SPEC §11). Only what
+        // arrived and is unread: `new` is the one box this moves anything out
+        // of, and asking for the others would be a 404 on our own sent mail.
+        if summary.mailbox == "new" {
+            client
+                .post_empty(&format!("/api/v1/messages/{}/read", summary.id))
+                .await?;
+        }
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&messages.iter().map(as_json).collect::<Vec<_>>())?
+        );
+        return Ok(());
+    }
+
+    // The root's subject: the replies are all `Re:` it, and a conversation has
+    // one subject by construction.
+    let Some(first) = messages.first() else {
+        return Ok(());
+    };
+    println!("{}", first.subject.bold());
+    println!(
+        "{}",
+        format!(
+            "{} · thread {}",
+            count_phrase(messages.len()),
+            short_id(&first.thread_id)
+        )
+        .dimmed()
+    );
+
+    for message in &messages {
+        println!();
+        // `read`'s own line, with the message id on the end: in a conversation
+        // that id is what a `reply` to one particular message needs. Who sent
+        // it is shown exactly as `inbox` and `read` show it (#42 is where that
+        // changes, for all three at once).
+        println!(
+            "{} {} · {} · {} · {}",
+            "from".dimmed(),
+            short_node(&message.from),
+            message.sender_kind,
+            message.sent_at.format("%Y-%m-%d %H:%M"),
+            short_id(&message.id).dimmed()
+        );
+        println!("{}", message.body);
+        if !message.attachments.is_empty() {
+            let names: Vec<&str> = message
+                .attachments
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect();
+            // Names only: `hivemind read` is where the sizes and the shas are.
+            println!("{}", format!("📎 {}", names.join(", ")).dimmed());
+        }
+    }
+    Ok(())
+}
+
+/// The conversation `id` belongs to, oldest first.
+async fn thread_summaries(client: &Client, id: &str) -> Result<Vec<Summary>> {
+    client.get(&format!("/api/v1/threads/{id}")).await
+}
+
+/// One message as `--json` reports it, the same shape from `read` and `thread`.
+fn as_json(message: &MessageBody) -> serde_json::Value {
+    serde_json::json!({
+        "id": message.id, "thread_id": message.thread_id, "from": message.from,
+        "subject": message.subject, "body": message.body,
+        "sender_kind": message.sender_kind, "sent_at": message.sent_at,
+        "attachments": message.attachments,
+    })
+}
+
+/// How long the conversation is, without a stray plural.
+fn count_phrase(messages: usize) -> String {
+    match messages {
+        1 => "1 message".to_owned(),
+        n => format!("{n} messages"),
+    }
 }
 
 /// Reply to a message (SPEC §10).
@@ -375,6 +494,12 @@ mod tests {
     #[test]
     fn a_short_id_is_the_distinguishing_tail_not_the_timestamp() {
         assert_eq!(short_id("01JXT21Q00041061050R3GG28A"), "3GG28A");
+    }
+
+    #[test]
+    fn a_conversation_of_one_is_not_reported_as_1_messages() {
+        assert_eq!(count_phrase(1), "1 message");
+        assert_eq!(count_phrase(6), "6 messages");
     }
 
     #[test]

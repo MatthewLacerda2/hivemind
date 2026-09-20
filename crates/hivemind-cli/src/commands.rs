@@ -23,7 +23,7 @@ mod mail;
 
 pub(crate) use daemon::daemon;
 pub(crate) use init::{InitOptions, init};
-pub(crate) use mail::{BoxArg, inbox, read, reply, send, sent};
+pub(crate) use mail::{BoxArg, inbox, read, reply, send, sent, thread};
 
 /// Print the `OpenAPI` document (SPEC §7).
 pub(crate) fn openapi() -> Result<()> {
