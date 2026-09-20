@@ -1,22 +1,48 @@
 //! One real daemon in a temporary home, for the integration tests to drive.
 //!
-//! Shared by every file under `tests/`, because starting a daemon, waiting for
-//! its peer port and stopping it politely is the same job in all of them and
-//! was getting copied. Each integration test is its own binary, so anything an
-//! individual file does not use looks dead to that binary — hence the allow.
+//! **The one harness.** Every file under `tests/` starts its daemons through
+//! this, because starting one, waiting until it answers, retrying a port
+//! collision and stopping it politely is the same job in all of them. It was
+//! copied three ways once, and the copies are exactly why the retry below
+//! reached one of them and not the other two (#74). A test that needs
+//! something this does not do grows a parameter here rather than a fourth
+//! copy.
+//!
+//! The entry points are [`Daemon::start`], [`Daemon::start_with`] for a test
+//! that has to bend a setting, and [`Daemon::start_with_first_ports`], which
+//! exists so the retry can be exercised rather than presumed.
+//!
+//! Starting, stopping, restarting and [`Daemon::run`] are safe inside a
+//! `#[tokio::test]`, which is what `mcp_tools.rs` needs. [`Daemon::post`],
+//! [`Daemon::get_json`] and [`Daemon::get_bytes`] are not: they go through
+//! `reqwest::blocking`, which builds a runtime and panics when it is dropped
+//! in an async context. An async test that wants one of those should give it
+//! the same treatment [`Daemon::answers_locally`] got rather than start a
+//! fourth copy of this file.
+//!
+//! Each integration test is its own binary, so anything an individual file
+//! does not use looks dead to that binary — hence the allow.
 
 #![allow(dead_code)]
 
 use std::io::{BufRead as _, BufReader};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// A daemon in a temporary home, stopped when the test ends.
 pub(crate) struct Daemon {
     process: Child,
-    port: u16,
+    pub(crate) port: u16,
     pub(crate) peer_port: u16,
-    pub(crate) home: tempfile::TempDir,
+    // Reached through `home()`, so that the TempDir's lifetime stays this
+    // struct's business and a test only ever sees a path.
+    home: tempfile::TempDir,
+    // Where the daemon's stderr went. A daemon that died binding a port reads
+    // as "connection refused" from outside, indistinguishable from a slow one,
+    // until you can see what it said on the way out — so it is kept and
+    // quoted rather than discarded.
+    errors: PathBuf,
     // Held open: the daemon prints several startup lines and would take a
     // SIGPIPE on the next one if this were dropped. Replaced on restart,
     // which is why it is not underscore-prefixed.
@@ -29,18 +55,37 @@ impl Daemon {
     }
 
     /// Start with extra environment, for the settings a test needs to bend.
-    ///
-    /// Retries on a port collision. [`free_port`] cannot reserve anything —
-    /// it asks the OS for a free port and closes it again — so two daemons
-    /// starting at once can be handed the same number, and the loser exits
-    /// during startup. Retrying with fresh numbers turns that from a flake
-    /// in whichever test drew second into two seconds of nothing.
     pub(crate) fn start_with(name: &str, extra: &[(&str, &str)]) -> Self {
+        Self::start_retrying(name, extra, None)
+    }
+
+    /// Start with the first attempt forced onto these ports.
+    ///
+    /// The retry is invisible from outside unless the first attempt can be
+    /// made to fail, so this is how `tests/harness.rs` occupies a port and
+    /// watches the daemon come up on the next attempt anyway. Nothing else
+    /// should want it: a test that picks its own ports is reintroducing the
+    /// race this harness exists to absorb.
+    pub(crate) fn start_with_first_ports(name: &str, port: u16, peer_port: u16) -> Self {
+        Self::start_retrying(name, &[], Some((port, peer_port)))
+    }
+
+    /// Start, retrying on a port collision.
+    ///
+    /// [`free_port`] cannot reserve anything — it asks the OS for a free port
+    /// and closes it again — so two daemons starting at once can be handed the
+    /// same number, and the loser exits during startup. Retrying with fresh
+    /// numbers turns that from a flake in whichever test drew second into two
+    /// seconds of nothing.
+    fn start_retrying(name: &str, extra: &[(&str, &str)], first: Option<(u16, u16)>) -> Self {
         // Three, because a collision is already unlikely and three in a row
         // is not a race any more — it is something else, and it should say so
         // rather than spin.
         for attempt in 1..=3 {
-            match Self::try_start(name, extra) {
+            let ports = first
+                .filter(|_| attempt == 1)
+                .unwrap_or_else(|| (free_port(), free_port()));
+            match Self::try_start(name, extra, ports) {
                 Ok(daemon) => return daemon,
                 Err(why) => eprintln!("daemon start attempt {attempt} failed: {why}"),
             }
@@ -49,10 +94,13 @@ impl Daemon {
     }
 
     /// One attempt, which fails rather than panics so the caller can retry.
-    fn try_start(name: &str, extra: &[(&str, &str)]) -> Result<Self, String> {
-        let port = free_port();
-        let peer_port = free_port();
+    fn try_start(
+        name: &str,
+        extra: &[(&str, &str)],
+        (port, peer_port): (u16, u16),
+    ) -> Result<Self, String> {
         let home = tempfile::tempdir().expect("temp home");
+        let errors = home.path().join("daemon.stderr");
 
         let mut process = Command::new(env!("CARGO_BIN_EXE_hivemind"))
             .args(["daemon", "--port", &port.to_string()])
@@ -67,7 +115,9 @@ impl Daemon {
             .env("HIVEMIND_LOG", "warn")
             .envs(extra.iter().copied())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(
+                std::fs::File::create(&errors).expect("a file for the daemon stderr"),
+            ))
             .spawn()
             .expect("the daemon binary starts");
 
@@ -77,10 +127,13 @@ impl Daemon {
         let read = reader.read_line(&mut line).unwrap_or(0);
         if read == 0 || !line.contains("listening") {
             // It died before saying anything, which is what binding a taken
-            // port looks like from here.
+            // local API port looks like from here.
             let _ = process.kill();
             let _ = process.wait();
-            return Err(format!("it never said it was listening (said {line:?})"));
+            let said = complaint(&errors);
+            return Err(format!(
+                "it never said it was listening (said {line:?}){said}"
+            ));
         }
 
         let mut daemon = Self {
@@ -88,6 +141,7 @@ impl Daemon {
             port,
             peer_port,
             home,
+            errors,
             stdout: reader,
         };
         daemon.wait_until_ready()?;
@@ -116,7 +170,10 @@ impl Daemon {
         let deadline = Instant::now() + Duration::from_mins(1);
         while Instant::now() < deadline {
             if let Ok(Some(status)) = self.process.try_wait() {
-                return Err(format!("it exited during startup with {status}"));
+                return Err(format!(
+                    "it exited during startup with {status}{}",
+                    complaint(&self.errors)
+                ));
             }
             if self.answers_locally() && self.peer_port_open() {
                 return Ok(());
@@ -124,18 +181,43 @@ impl Daemon {
             std::thread::sleep(Duration::from_millis(20));
         }
         Err(format!(
-            "ports {} and {} were not both up within the deadline",
-            self.port, self.peer_port
+            "ports {} and {} were not both up within the deadline{}",
+            self.port,
+            self.peer_port,
+            complaint(&self.errors)
         ))
     }
 
     /// Does our own loopback API answer? Only our process can.
+    ///
+    /// A request written by hand over a plain socket, rather than through an
+    /// HTTP client. This is called from inside `#[tokio::test]` as well as
+    /// outside it, and `reqwest::blocking` builds a runtime of its own that
+    /// panics when it is dropped in an async context — which is what kept
+    /// `mcp_tools.rs` on its own copy of this harness rather than on this
+    /// line. That copy reached for `curl`, which is a whole process per poll
+    /// for a request that fits on one.
     fn answers_locally(&self) -> bool {
-        reqwest::blocking::Client::new()
-            .get(format!("{}/healthz", self.api()))
-            .timeout(Duration::from_secs(2))
-            .send()
-            .is_ok_and(|response| response.status().is_success())
+        use std::io::{Read as _, Write as _};
+
+        let Ok(mut socket) = std::net::TcpStream::connect(("127.0.0.1", self.port)) else {
+            return false;
+        };
+        let _ = socket.set_read_timeout(Some(Duration::from_secs(2)));
+        let _ = socket.set_write_timeout(Some(Duration::from_secs(2)));
+        let request = format!(
+            "GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+            self.port
+        );
+        if socket.write_all(request.as_bytes()).is_err() {
+            return false;
+        }
+
+        // The status line is the whole answer, and `Connection: close` means
+        // the read ends by itself rather than on a content length.
+        let mut response = Vec::new();
+        let _ = socket.read_to_end(&mut response);
+        response.starts_with(b"HTTP/1.1 200")
     }
 
     /// Is anything listening on the peer port? By now that is us.
@@ -147,10 +229,19 @@ impl Daemon {
         format!("http://127.0.0.1:{}", self.port)
     }
 
+    /// Where an MCP client connects, which is the same router one path down.
+    pub(crate) fn mcp_url(&self) -> String {
+        format!("{}/mcp", self.api())
+    }
+
+    pub(crate) fn home(&self) -> &Path {
+        self.home.path()
+    }
+
     pub(crate) fn run(&self, args: &[&str]) -> String {
         let output = Command::new(env!("CARGO_BIN_EXE_hivemind"))
             .args(args)
-            .env("HIVEMIND_HOME", self.home.path())
+            .env("HIVEMIND_HOME", self.home())
             .env("HIVEMIND_API", self.api())
             .env("NO_COLOR", "1")
             .output()
@@ -295,6 +386,10 @@ impl Daemon {
         {
             let _ = Command::new("kill")
                 .args(["-TERM", &self.process.id().to_string()])
+                // A start that failed has already reaped its child, so kill(1)
+                // would print "No such process" into the middle of the test
+                // output and name a pid nobody is looking for.
+                .stderr(Stdio::null())
                 .status();
             for _ in 0..200 {
                 if matches!(self.process.try_wait(), Ok(Some(_))) {
@@ -315,7 +410,7 @@ impl Daemon {
     pub(crate) fn restart(&mut self, name: &str) {
         let mut process = Command::new(env!("CARGO_BIN_EXE_hivemind"))
             .args(["daemon", "--port", &self.port.to_string()])
-            .env("HIVEMIND_HOME", self.home.path())
+            .env("HIVEMIND_HOME", self.home())
             .env("HIVEMIND_PEER_PORT", self.peer_port.to_string())
             .env("HIVEMIND_NAME", name)
             .env("HIVEMIND_OWNER", name)
@@ -323,15 +418,21 @@ impl Daemon {
             .env("HIVEMIND_DISCOVERY", "false")
             .env("HIVEMIND_LOG", "warn")
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(
+                std::fs::File::create(&self.errors).expect("a file for the daemon stderr"),
+            ))
             .spawn()
             .expect("the daemon binary starts");
 
         let stdout = process.stdout.take().expect("stdout");
         let mut reader = BufReader::new(stdout);
         let mut line = String::new();
-        reader.read_line(&mut line).expect("it says it is up");
-        assert!(line.contains("listening"), "unexpected: {line}");
+        let read = reader.read_line(&mut line).unwrap_or(0);
+        assert!(
+            read > 0 && line.contains("listening"),
+            "it never said it was listening (said {line:?}){}",
+            complaint(&self.errors)
+        );
 
         self.process = process;
         self.stdout = reader;
@@ -352,6 +453,10 @@ impl Drop for Daemon {
         {
             let _ = Command::new("kill")
                 .args(["-TERM", &self.process.id().to_string()])
+                // A start that failed has already reaped its child, so kill(1)
+                // would print "No such process" into the middle of the test
+                // output and name a pid nobody is looking for.
+                .stderr(Stdio::null())
                 .status();
             for _ in 0..50 {
                 if matches!(self.process.try_wait(), Ok(Some(_))) {
@@ -369,18 +474,30 @@ impl Drop for Daemon {
 ///
 /// Released immediately, which leaves a window: a parallel test can be handed
 /// the same number before this one's daemon binds it. That is a real race and
-/// not a theoretical one -- it is the likeliest cause of the red `main` after
-/// M6, where a daemon died during startup and the CLI reported only that
-/// nothing was listening.
+/// not a theoretical one — it red-lit `main` after M6 and again on a
+/// documentation-only branch (#74), both times as a daemon that died during
+/// startup while the CLI reported only that nothing was listening.
 ///
-/// It is not closed here, because closing it properly means the daemon binding
-/// port 0 and reporting what it got, which is a change to the product for the
-/// sake of the tests. Instead [`wait_until_answering`] panics with the
-/// daemon's stderr, so the next occurrence names itself instead of being
-/// guessed at.
+/// The window is not closed here, because closing it properly means the daemon
+/// binding port 0 and reporting what it got, which is a change to the product
+/// for the sake of the tests. `start_retrying` absorbs it instead,
+/// and a start that fails three times over quotes the daemon's stderr so the
+/// next occurrence names itself rather than being guessed at.
 pub(crate) fn free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     listener.local_addr().expect("addr").port()
+}
+
+/// What the daemon said on its way out, ready to append to an error.
+///
+/// Empty when it said nothing, so the caller's message reads the same either
+/// way. A bind conflict is invisible from outside — "connection refused" looks
+/// exactly like a slow start — and this is the line that names it.
+fn complaint(errors: &Path) -> String {
+    match std::fs::read_to_string(errors) {
+        Ok(text) if !text.trim().is_empty() => format!("\nIts stderr:\n{text}"),
+        _ => String::new(),
+    }
 }
 
 pub(crate) fn json(text: &str) -> serde_json::Value {

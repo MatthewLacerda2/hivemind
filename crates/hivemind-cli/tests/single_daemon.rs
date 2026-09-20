@@ -6,168 +6,25 @@
 //! starting, the data directory not being created, the identity not persisting
 //! — are invisible to an in-process test. M3 grows this into two and three
 //! daemons talking to each other.
+//!
+//! The daemon comes from `tests/daemon`, like every other file here. This one
+//! carried its own copy of it until #74, and the copy is why the retry that
+//! absorbs a port collision never reached these sixteen tests: the fix landed
+//! next door, in a file that looked the same.
 
-use std::io::{BufRead as _, BufReader};
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
 
-/// A daemon running in a temporary home, killed when the test ends.
-struct Daemon {
-    process: Child,
-    port: u16,
-    home: tempfile::TempDir,
-    // Held open deliberately. The daemon prints three lines at startup; if this
-    // reader is dropped after the first, the pipe closes and the next println!
-    // kills the daemon with SIGPIPE.
-    _stdout: BufReader<std::process::ChildStdout>,
-}
+mod daemon;
 
-impl Daemon {
-    fn start() -> Self {
-        Self::start_with(&[])
-    }
+use daemon::{Daemon, free_port, json};
 
-    /// Start with extra environment, for the settings a test needs to bend.
-    fn start_with(extra: &[(&str, &str)]) -> Self {
-        // Port 0 would be ideal, but the daemon prints the address it bound,
-        // so a port picked by the OS and released is close enough and keeps
-        // the CLI's --api flag simple.
-        let port = free_port();
-        let home = tempfile::tempdir().expect("temp home");
-        let errors = home.path().join("daemon.stderr");
-
-        let mut process = Command::new(env!("CARGO_BIN_EXE_hivemind"))
-            .args(["daemon", "--port", &port.to_string()])
-            .env("HIVEMIND_HOME", home.path())
-            // Its own peer port: two daemons on one machine genuinely cannot
-            // share 8400, and these tests run in parallel.
-            .env("HIVEMIND_PEER_PORT", free_port().to_string())
-            // Off, or daemons on this machine would discover each other
-            // and every other hivemind on the developer's LAN.
-            .env("HIVEMIND_DISCOVERY", "false")
-            .env("HIVEMIND_LOG", "warn")
-            .envs(extra.iter().copied())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::from(
-                std::fs::File::create(&errors).expect("a file for the daemon stderr"),
-            ))
-            .spawn()
-            .expect("the daemon binary starts");
-
-        // Wait for the line it prints once it has bound, rather than sleeping
-        // and hoping.
-        let stdout = process.stdout.take().expect("stdout");
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .expect("the daemon says it is up");
-        assert!(line.contains("listening"), "unexpected first line: {line}");
-
-        // ...and then wait for it to actually answer. The line above is
-        // printed after the socket is bound and before the router serves it,
-        // so a CLI call made on that line alone races the rest of startup:
-        // the peer listener, the courier and mDNS all come up in between.
-        //
-        // This is what turned `main` red after M6. On a loaded runner the
-        // first CLI call arrived before the daemon was answering, and the
-        // error it produced -- "no hivemind daemon at ..." -- named the
-        // symptom and not one of its causes.
-        wait_until_answering(port, &mut process, &errors);
-
-        Self {
-            process,
-            port,
-            home,
-            _stdout: reader,
-        }
-    }
-
-    fn api(&self) -> String {
-        format!("http://127.0.0.1:{}", self.port)
-    }
-
-    fn home(&self) -> &std::path::Path {
-        self.home.path()
-    }
-
-    /// Run a CLI subcommand against this daemon.
-    fn run(&self, args: &[&str]) -> String {
-        let output = Command::new(env!("CARGO_BIN_EXE_hivemind"))
-            .args(args)
-            .env("HIVEMIND_HOME", self.home.path())
-            .env("HIVEMIND_API", self.api())
-            .env("NO_COLOR", "1")
-            .output()
-            .expect("the cli runs");
-
-        assert!(
-            output.status.success(),
-            "`hivemind {}` failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).expect("utf-8 output")
-    }
-}
-
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        stop(&mut self.process);
-    }
-}
-
-/// Stop a daemon the way launchd would.
-///
-/// SIGKILL would leave it no chance to flush — including, under
-/// `cargo llvm-cov`, its coverage profile, which is why this test's subject
-/// would otherwise appear untested.
-fn stop(process: &mut Child) {
-    #[cfg(unix)]
-    {
-        // SAFETY-adjacent: `kill(2)` on a pid we own and have not yet reaped.
-        let pid = process.id();
-        let _ = Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .status();
-
-        // Give it a moment to shut down cleanly before insisting.
-        for _ in 0..50 {
-            if matches!(process.try_wait(), Ok(Some(_))) {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-    }
-
-    let _ = process.kill();
-    let _ = process.wait();
-}
-
-/// A port the OS says is free.
-///
-/// Released immediately, which leaves a window: a parallel test can be handed
-/// the same number before this one's daemon binds it. That is a real race and
-/// not a theoretical one -- it is the likeliest cause of the red `main` after
-/// M6, where a daemon died during startup and the CLI reported only that
-/// nothing was listening.
-///
-/// It is not closed here, because closing it properly means the daemon binding
-/// port 0 and reporting what it got, which is a change to the product for the
-/// sake of the tests. Instead [`wait_until_answering`] panics with the
-/// daemon's stderr, so the next occurrence names itself instead of being
-/// guessed at.
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-    listener.local_addr().expect("addr").port()
-}
-
-fn json(text: &str) -> serde_json::Value {
-    serde_json::from_str(text).expect("valid json")
-}
+/// The name every daemon in this file runs under. One machine, and nothing
+/// here asserts on who sent what, so it only has to be a name.
+const NAME: &str = "solo";
 
 #[test]
 fn a_fresh_daemon_creates_its_data_directory_and_an_identity() {
-    let daemon = Daemon::start();
+    let daemon = Daemon::start(NAME);
 
     assert!(daemon.home().join("identity/node.key").is_file());
     assert!(daemon.home().join("identity/node.crt").is_file());
@@ -179,7 +36,7 @@ fn a_fresh_daemon_creates_its_data_directory_and_an_identity() {
 #[test]
 fn a_message_sent_to_ourselves_comes_back_through_the_cli() {
     // The whole of M1 in one test: send, list, read (SPEC §14).
-    let daemon = Daemon::start();
+    let daemon = Daemon::start(NAME);
 
     daemon.run(&[
         "send",
@@ -207,7 +64,7 @@ fn a_message_sent_to_ourselves_comes_back_through_the_cli() {
 
 #[test]
 fn reading_a_message_clears_it_from_the_unread_count() {
-    let daemon = Daemon::start();
+    let daemon = Daemon::start(NAME);
     daemon.run(&["send", "everyone", "-s", "unread", "--", "body"]);
 
     let before = json(&daemon.run(&["status", "--json"]));
@@ -223,7 +80,7 @@ fn reading_a_message_clears_it_from_the_unread_count() {
 
 #[test]
 fn a_reply_lands_in_the_same_thread() {
-    let daemon = Daemon::start();
+    let daemon = Daemon::start(NAME);
     daemon.run(&["send", "everyone", "-s", "lunch", "--", "?"]);
 
     let inbox = json(&daemon.run(&["inbox", "--json"]));
@@ -249,80 +106,33 @@ fn a_reply_lands_in_the_same_thread() {
 #[test]
 fn a_message_survives_the_daemon_restarting() {
     // Store-and-forward is worth nothing if a restart loses mail (SPEC §8).
-    let home = tempfile::tempdir().expect("temp home");
-    let port = free_port();
-    let errors = home.path().join("daemon.stderr");
+    //
+    // Through the harness's own `stop` and `restart`, which is what they are
+    // for: SIGTERM the way launchd would, then the same home and the same
+    // ports back again. This test used to build its daemon by hand and so had
+    // its own copy of every startup race in the harness.
+    let mut daemon = Daemon::start(NAME);
+    daemon.run(&["send", "everyone", "-s", "survives a restart", "--", "body"]);
+    let identity_before = json(&daemon.run(&["status", "--json"]))["id"].clone();
 
-    let start = || {
-        let mut process = Command::new(env!("CARGO_BIN_EXE_hivemind"))
-            .args(["daemon", "--port", &port.to_string()])
-            .env("HIVEMIND_HOME", home.path())
-            // Its own peer port, and no mDNS: a real daemon may be running on
-            // this machine, and the test must not meet it.
-            .env("HIVEMIND_PEER_PORT", free_port().to_string())
-            .env("HIVEMIND_DISCOVERY", "false")
-            .env("HIVEMIND_LOG", "warn")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::from(
-                std::fs::File::create(&errors).expect("a file for the daemon stderr"),
-            ))
-            .spawn()
-            .expect("daemon starts");
-        let stdout = process.stdout.take().expect("stdout");
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        reader.read_line(&mut line).expect("daemon is up");
+    daemon.stop();
+    daemon.restart(NAME);
 
-        // This test builds its own daemon rather than using `Daemon::start`,
-        // and so had its own copy of the race that fix was for: the
-        // "listening" line is printed before the router serves, so a CLI call
-        // made on the strength of it alone can arrive first.
-        wait_until_answering(port, &mut process, &errors);
-
-        // Returned alongside the process so the pipe outlives this function;
-        // dropping it would SIGPIPE the daemon on its next println!.
-        (process, reader)
-    };
-
-    let cli = |args: &[&str]| -> String {
-        let output = Command::new(env!("CARGO_BIN_EXE_hivemind"))
-            .args(args)
-            .env("HIVEMIND_HOME", home.path())
-            .env("HIVEMIND_API", format!("http://127.0.0.1:{port}"))
-            .env("NO_COLOR", "1")
-            .output()
-            .expect("cli runs");
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).expect("utf-8")
-    };
-
-    let (mut first, _first_out) = start();
-    cli(&["send", "everyone", "-s", "survives a restart", "--", "body"]);
-    let identity_before = json(&cli(&["status", "--json"]))["id"].clone();
-    stop(&mut first);
-
-    let (mut second, _second_out) = start();
-    let after = json(&cli(&["status", "--json"]));
+    let after = json(&daemon.run(&["status", "--json"]));
     assert_eq!(after["unread"], 1, "the mail should still be there");
     assert_eq!(
         after["id"], identity_before,
         "and this node should still be the same node"
     );
 
-    let inbox = json(&cli(&["inbox", "--json"]));
+    let inbox = json(&daemon.run(&["inbox", "--json"]));
     assert_eq!(inbox[0]["subject"], "survives a restart");
-
-    stop(&mut second);
 }
 
 #[test]
 fn deleting_the_index_loses_nothing_because_the_files_are_the_truth() {
     // ADR 0002, exercised against a real daemon rather than a unit test.
-    let daemon = Daemon::start();
+    let daemon = Daemon::start(NAME);
     daemon.run(&["send", "everyone", "-s", "still here", "--", "body"]);
 
     std::fs::remove_file(daemon.home().join("index.db")).expect("delete the index");
@@ -335,7 +145,7 @@ fn deleting_the_index_loses_nothing_because_the_files_are_the_truth() {
 fn the_daemon_refuses_to_serve_anything_but_loopback() {
     // SPEC §6.3: the local API has no authentication, so reachability is the
     // authorization. Binding elsewhere would hand the machine away.
-    let daemon = Daemon::start();
+    let daemon = Daemon::start(NAME);
     let non_loopback = std::net::TcpStream::connect((std::net::Ipv4Addr::UNSPECIFIED, daemon.port));
     // 0.0.0.0 connects to loopback on most stacks, so the real assertion is
     // that the listener was never bound to a routable address.
@@ -369,7 +179,7 @@ fn the_cli_says_something_useful_when_no_daemon_is_running() {
 fn a_file_attached_from_the_command_line_comes_back_by_name() {
     // SPEC §10: `hivemind send -a file`. The CLI passes a path; the daemon
     // copies the contents, so the original can go away afterwards.
-    let daemon = Daemon::start();
+    let daemon = Daemon::start(NAME);
 
     let files = tempfile::tempdir().expect("temp dir");
     let path = files.path().join("report.md");
@@ -408,7 +218,7 @@ fn a_file_attached_from_the_command_line_comes_back_by_name() {
 
 #[test]
 fn attaching_a_file_that_is_not_there_fails_before_anything_is_sent() {
-    let daemon = Daemon::start();
+    let daemon = Daemon::start(NAME);
     let me = json(&daemon.run(&["status", "--json"]));
     let id = me["id"].as_str().expect("an id").to_owned();
 
@@ -442,41 +252,6 @@ fn attaching_a_file_that_is_not_there_fails_before_anything_is_sent() {
             .len(),
         0,
         "nothing should have been sent"
-    );
-}
-
-/// Poll the daemon's health endpoint until it answers, or give up loudly.
-///
-/// Loudly matters more than quickly. When this fails the daemon either died
-/// during startup or never got to serving, and the difference is in its
-/// stderr -- which is why the harness captures it to a file rather than
-/// discarding it. A bind conflict on the peer port reads as "connection
-/// refused" from outside, indistinguishable from slowness, until you can see
-/// what the process said on its way out.
-fn wait_until_answering(port: u16, process: &mut Child, errors: &std::path::Path) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
-    let url = format!("http://127.0.0.1:{port}/healthz");
-
-    while std::time::Instant::now() < deadline {
-        if let Ok(Some(status)) = process.try_wait() {
-            panic!(
-                "the daemon exited with {status} during startup.\nIts stderr:\n{}",
-                std::fs::read_to_string(errors).unwrap_or_default()
-            );
-        }
-        if std::process::Command::new("curl")
-            .args(["-sf", "-o", "/dev/null", "--max-time", "2", &url])
-            .status()
-            .is_ok_and(|status| status.success())
-        {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-
-    panic!(
-        "the daemon never answered {url}.\nIts stderr:\n{}",
-        std::fs::read_to_string(errors).unwrap_or_default()
     );
 }
 
@@ -542,7 +317,7 @@ fn the_wake_up_hook_needs_no_daemon_and_no_network() {
 #[test]
 fn the_wake_up_hook_says_what_is_waiting() {
     // The other half of §9.3: one line naming who and what, or nothing.
-    let daemon = Daemon::start();
+    let daemon = Daemon::start(NAME);
     let me = json(&daemon.run(&["status", "--json"]));
     let id = me["id"].as_str().expect("an id").to_owned();
 
@@ -569,7 +344,7 @@ fn the_daemon_writes_json_logs_beside_its_mail() {
     // debugging a service launchd started wants to grep a week of it.
     // The other tests run at `warn`, which is right for them — a quiet suite.
     // This one is about what the file contains, so it needs something in it.
-    let daemon = Daemon::start_with(&[("HIVEMIND_LOG", "info")]);
+    let daemon = Daemon::start_with(NAME, &[("HIVEMIND_LOG", "info")]);
 
     let log = daemon.home().join("daemon.log");
     assert!(log.is_file(), "SPEC §4.3 lists daemon.log");
@@ -607,7 +382,7 @@ fn a_network_operation_logs_the_peer_and_the_message() {
     // id." Asserted on the shape of the span rather than on a delivery, which
     // needs two daemons -- this checks the field names are what an operator
     // would grep for.
-    let daemon = Daemon::start();
+    let daemon = Daemon::start(NAME);
     let me = json(&daemon.run(&["status", "--json"]));
     let id = me["id"].as_str().expect("an id").to_owned();
 
@@ -660,7 +435,7 @@ fn the_short_id_the_inbox_prints_is_one_read_accepts() {
     // one that did not work — found from both ends at once, by a human and
     // by the Claude on the other machine, neither of whom could read a
     // message without talking to the API by hand.
-    let daemon = Daemon::start();
+    let daemon = Daemon::start(NAME);
     daemon.run(&[
         "send",
         "--subject",
@@ -705,7 +480,7 @@ fn the_short_id_the_inbox_prints_is_one_read_accepts() {
 
 #[test]
 fn a_tail_that_names_nothing_says_so_rather_than_guessing() {
-    let daemon = Daemon::start();
+    let daemon = Daemon::start(NAME);
     daemon.run(&[
         "send",
         "--subject",

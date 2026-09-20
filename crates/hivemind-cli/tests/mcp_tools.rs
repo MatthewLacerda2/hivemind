@@ -5,104 +5,23 @@
 //! directly is that the schema, the transport and the dispatch are part of what
 //! Claude actually sees. A tool that works in Rust but does not round-trip
 //! through JSON-RPC is not a working tool.
-
-use std::io::{BufRead as _, BufReader};
-use std::process::{Child, Command, Stdio};
+//!
+//! The daemon comes from `tests/daemon`, like every other file here. This one
+//! carried its own copy of it until #74, and a copy is a place a fix does not
+//! reach: the retry that absorbs a port collision landed next door and never
+//! came here.
 
 use rmcp_client::ServiceExt as _;
 use rmcp_client::model::CallToolRequestParams;
 use rmcp_client::transport::StreamableHttpClientTransport;
 
-struct Daemon {
-    process: Child,
-    port: u16,
-    _home: tempfile::TempDir,
-    // Held open: the daemon prints several startup lines and would take a
-    // SIGPIPE on the next one if this were dropped.
-    _stdout: BufReader<std::process::ChildStdout>,
-}
+mod daemon;
 
-impl Daemon {
-    fn start() -> Self {
-        let port = free_port();
+use daemon::Daemon;
 
-        let home = tempfile::tempdir().expect("temp home");
-        let errors = home.path().join("daemon.stderr");
-        let mut process = Command::new(env!("CARGO_BIN_EXE_hivemind"))
-            .args(["daemon", "--port", &port.to_string()])
-            .env("HIVEMIND_HOME", home.path())
-            // Its own peer port: two daemons on one machine genuinely cannot
-            // share 8400, and these tests run in parallel.
-            .env("HIVEMIND_PEER_PORT", free_port().to_string())
-            // Off, or daemons on this machine would discover each other
-            // and every other hivemind on the developer's LAN.
-            .env("HIVEMIND_DISCOVERY", "false")
-            .env("HIVEMIND_LOG", "warn")
-            // A banner per message would be noise on the machine running tests.
-            .env("HIVEMIND_NOTIFICATIONS", "false")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::from(
-                std::fs::File::create(&errors).expect("a file for the daemon stderr"),
-            ))
-            .spawn()
-            .expect("daemon starts");
-
-        let stdout = process.stdout.take().expect("stdout");
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        reader.read_line(&mut line).expect("daemon is up");
-        assert!(line.contains("listening"), "unexpected: {line}");
-
-        // ...and then wait for it to actually answer. That line is printed
-        // after the socket is bound and before the router serves it, so a
-        // request made on the strength of it alone races the rest of startup.
-        wait_until_answering(port, &mut process, &errors);
-
-        Self {
-            process,
-            port,
-            _home: home,
-            _stdout: reader,
-        }
-    }
-
-    fn mcp_url(&self) -> String {
-        format!("http://127.0.0.1:{}/mcp", self.port)
-    }
-}
-
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        stop(&mut self.process);
-    }
-}
-
-/// Stop a daemon the way launchd would.
-///
-/// SIGKILL would leave it no chance to flush — including, under
-/// `cargo llvm-cov`, its coverage profile, which is why this test's subject
-/// would otherwise appear untested.
-fn stop(process: &mut Child) {
-    #[cfg(unix)]
-    {
-        // SAFETY-adjacent: `kill(2)` on a pid we own and have not yet reaped.
-        let pid = process.id();
-        let _ = Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .status();
-
-        // Give it a moment to shut down cleanly before insisting.
-        for _ in 0..50 {
-            if matches!(process.try_wait(), Ok(Some(_))) {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-    }
-
-    let _ = process.kill();
-    let _ = process.wait();
-}
+/// The name every daemon in this file runs under. One machine, and these
+/// tests are about the tools rather than about who is calling them.
+const NAME: &str = "mcp";
 
 /// Connect an MCP client to a running daemon.
 async fn connect(
@@ -151,7 +70,7 @@ async fn call(
 async fn the_server_advertises_exactly_the_seven_tools_the_spec_names() {
     // SPEC §9.1 says seven, and says to keep it to seven. An eighth tool is
     // usually orchestration, which hivemind deliberately does not do.
-    let daemon = Daemon::start();
+    let daemon = Daemon::start(NAME);
     let client = connect(&daemon).await;
 
     let tools = client.list_tools(None).await.expect("list_tools");
@@ -177,7 +96,7 @@ async fn the_server_advertises_exactly_the_seven_tools_the_spec_names() {
 async fn every_tool_describes_itself_for_a_model_to_read() {
     // The descriptions are the product: they are what tells Claude what `to`
     // accepts and what sender_kind means (SPEC §9.1).
-    let daemon = Daemon::start();
+    let daemon = Daemon::start(NAME);
     let client = connect(&daemon).await;
 
     let tools = client.list_tools(None).await.expect("list_tools");
@@ -194,7 +113,7 @@ async fn every_tool_describes_itself_for_a_model_to_read() {
 
 #[tokio::test]
 async fn send_then_inbox_then_read_round_trips_through_mcp() {
-    let daemon = Daemon::start();
+    let daemon = Daemon::start(NAME);
     let client = connect(&daemon).await;
 
     let sent = call(
@@ -234,7 +153,7 @@ async fn send_then_inbox_then_read_round_trips_through_mcp() {
 async fn anything_sent_through_mcp_is_marked_as_written_by_an_agent() {
     // SPEC §4.1: the entrypoint decides, and MCP means a Claude. A person
     // reading their inbox must be able to tell the two apart.
-    let daemon = Daemon::start();
+    let daemon = Daemon::start(NAME);
     let client = connect(&daemon).await;
 
     call(
@@ -251,7 +170,7 @@ async fn anything_sent_through_mcp_is_marked_as_written_by_an_agent() {
 
 #[tokio::test]
 async fn a_caller_cannot_claim_to_be_human_by_passing_the_field() {
-    let daemon = Daemon::start();
+    let daemon = Daemon::start(NAME);
     let client = connect(&daemon).await;
 
     call(
@@ -276,7 +195,7 @@ async fn a_caller_cannot_claim_to_be_human_by_passing_the_field() {
 
 #[tokio::test]
 async fn reply_keeps_the_thread_and_broadcast_reaches_everyone() {
-    let daemon = Daemon::start();
+    let daemon = Daemon::start(NAME);
     let client = connect(&daemon).await;
 
     let root = call(
@@ -313,7 +232,7 @@ async fn reply_keeps_the_thread_and_broadcast_reaches_everyone() {
 
 #[tokio::test]
 async fn list_peers_is_empty_rather_than_missing_before_anything_is_paired() {
-    let daemon = Daemon::start();
+    let daemon = Daemon::start(NAME);
     let client = connect(&daemon).await;
 
     let peers = call(&client, "list_peers", serde_json::json!({})).await;
@@ -324,7 +243,7 @@ async fn list_peers_is_empty_rather_than_missing_before_anything_is_paired() {
 #[tokio::test]
 async fn asking_to_read_a_message_that_does_not_exist_is_the_callers_fault() {
     // Claude can recover from "bad id"; it cannot recover from "server broke".
-    let daemon = Daemon::start();
+    let daemon = Daemon::start(NAME);
     let client = connect(&daemon).await;
 
     let result = client
@@ -346,7 +265,7 @@ async fn asking_to_read_a_message_that_does_not_exist_is_the_callers_fault() {
 
 #[tokio::test]
 async fn download_attachment_reports_a_message_with_no_such_attachment() {
-    let daemon = Daemon::start();
+    let daemon = Daemon::start(NAME);
     let client = connect(&daemon).await;
 
     let sent = call(
@@ -369,7 +288,7 @@ async fn download_attachment_reports_a_message_with_no_such_attachment() {
 
 #[tokio::test]
 async fn the_two_resources_are_listed_and_readable() {
-    let daemon = Daemon::start();
+    let daemon = Daemon::start(NAME);
     let client = connect(&daemon).await;
 
     let resources = client.list_resources(None).await.expect("list_resources");
@@ -408,7 +327,7 @@ async fn the_two_resources_are_listed_and_readable() {
 async fn the_server_tells_claude_that_message_bodies_are_untrusted() {
     // A message body arrives from another machine. The instructions field is
     // where that warning has to live, because it is what a model reads first.
-    let daemon = Daemon::start();
+    let daemon = Daemon::start(NAME);
     let client = connect(&daemon).await;
 
     let info = client.peer_info().expect("server info");
@@ -419,29 +338,11 @@ async fn the_server_tells_claude_that_message_bodies_are_untrusted() {
     client.cancel().await.ok();
 }
 
-/// A port the OS says is free.
-///
-/// Released immediately, which leaves a window: a parallel test can be handed
-/// the same number before this one's daemon binds it. That is a real race and
-/// not a theoretical one -- it is the likeliest cause of the red `main` after
-/// M6, where a daemon died during startup and the CLI reported only that
-/// nothing was listening.
-///
-/// It is not closed here, because closing it properly means the daemon binding
-/// port 0 and reporting what it got, which is a change to the product for the
-/// sake of the tests. Instead [`wait_until_answering`] panics with the
-/// daemon's stderr, so the next occurrence names itself instead of being
-/// guessed at.
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-    listener.local_addr().expect("addr").port()
-}
-
 #[tokio::test]
 async fn an_attachment_sent_to_ourselves_is_readable_by_path() {
     // SPEC §9.1: `read` gives back a local filesystem path, so a Claude can
     // open the file rather than being handed bytes through the protocol.
-    let daemon = Daemon::start();
+    let daemon = Daemon::start(NAME);
     let client = connect(&daemon).await;
 
     let files = tempfile::tempdir().expect("temp dir");
@@ -479,7 +380,7 @@ async fn an_attachment_sent_to_ourselves_is_readable_by_path() {
 
 #[tokio::test]
 async fn download_attachment_returns_a_path_for_something_already_here() {
-    let daemon = Daemon::start();
+    let daemon = Daemon::start(NAME);
     let client = connect(&daemon).await;
 
     let files = tempfile::tempdir().expect("temp dir");
@@ -518,7 +419,7 @@ async fn download_attachment_returns_a_path_for_something_already_here() {
 async fn an_attachment_name_that_is_a_path_is_refused() {
     // SPEC §6.3. The name is derived from the path, so this is about what a
     // caller can talk the daemon into naming a file.
-    let daemon = Daemon::start();
+    let daemon = Daemon::start(NAME);
     let client = connect(&daemon).await;
 
     let result = client
@@ -539,36 +440,4 @@ async fn an_attachment_name_that_is_a_path_is_refused() {
     );
 
     client.cancel().await.ok();
-}
-
-/// Poll the daemon's health endpoint until it answers, or give up loudly.
-///
-/// See the copy in `single_daemon.rs` for why the stderr is kept: a daemon
-/// that died binding a port reads as "connection refused" from outside, and
-/// is indistinguishable from a slow one until you can see what it said.
-fn wait_until_answering(port: u16, process: &mut Child, errors: &std::path::Path) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
-    let url = format!("http://127.0.0.1:{port}/healthz");
-
-    while std::time::Instant::now() < deadline {
-        if let Ok(Some(status)) = process.try_wait() {
-            panic!(
-                "the daemon exited with {status} during startup.\nIts stderr:\n{}",
-                std::fs::read_to_string(errors).unwrap_or_default()
-            );
-        }
-        if std::process::Command::new("curl")
-            .args(["-sf", "-o", "/dev/null", "--max-time", "2", &url])
-            .status()
-            .is_ok_and(|status| status.success())
-        {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-
-    panic!(
-        "the daemon never answered {url}.\nIts stderr:\n{}",
-        std::fs::read_to_string(errors).unwrap_or_default()
-    );
 }
