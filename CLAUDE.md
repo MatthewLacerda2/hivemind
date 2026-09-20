@@ -315,11 +315,12 @@ destroyed work three times in one session: `discovery.rs`, `CHANGELOG.md` and
 
 ## File size is a ratchet
 
-`just size` caps lines of code per file: **660 source, 560 test**, counted
-separately because most tests here live in the file they test. They were 800
-and 600 until #100 split `service.rs`; the numbers in this section will be
-wrong again the next time one comes down, so read `.github/scripts/size.py`
-when it matters.
+`just size` caps lines of code per file, source and test counted separately
+because most tests here live in the file they test. **The caps live in
+`.github/scripts/size.py` and this file does not repeat them**: they were 800
+and 600, they are lower now, and every sentence here that quoted a number has
+been wrong within a night of somebody splitting a file. `just size` prints both
+caps every time it passes.
 
 Blank lines and comments are free. `missing_docs` is a merge gate and the house
 style is to explain *why*, so a cap that counted prose would put those two
@@ -332,10 +333,9 @@ than a refactor. A gate that passes on the day it arrives is a gate nobody
 knows works.
 
 **They only ever come down**, and the branch that lowers them is the branch
-that split something. Never raise them to admit growth. `just size --report`
-lists what to split next, largest first; `hivemind-api/src/local.rs` at 651
-source is the standing answer, with `hivemind-cli/tests/single_daemon.rs` at
-558 test lines the tightest of the test files.
+that split something. Never raise them to admit growth. **`just size --report`
+lists what to split next, largest first** — ask it rather than this paragraph,
+which cannot know.
 
 **The branch that hits the cap is the branch that pays for the split**, and
 that is worth one issue of its own rather than a refactor smuggled into a
