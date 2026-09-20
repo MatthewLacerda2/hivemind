@@ -57,7 +57,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Send a message.
+    /// Send a message, which opens a conversation.
+    ///
+    /// A new subject with somebody you are already talking to is a `send`, not
+    /// a `reply`: it starts a conversation of its own, which `hivemind chats`
+    /// then lists beside the others. `hivemind reply` is for staying in one.
     Send {
         /// A node id, an owner name, or `everyone`.
         to: Vec<String>,
