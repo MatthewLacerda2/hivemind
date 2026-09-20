@@ -410,6 +410,25 @@ pub(crate) fn unread_phrase(unread: u64) -> String {
 #[derive(Debug, Deserialize)]
 struct Accepted {
     id: String,
+    duplicate_of: Option<String>,
+}
+
+/// Say what was queued, and whether it has just been queued before (#33).
+///
+/// A warning rather than a refusal: sending the same thing again is a real
+/// thing to want, and the daemon has already accepted this one. What it buys is
+/// the person who pressed send twice finding out now rather than the person at
+/// the other end finding out tomorrow.
+fn report(accepted: &Accepted) {
+    println!("{} {}", "queued".green(), accepted.id.dimmed());
+    if let Some(previous) = &accepted.duplicate_of {
+        println!(
+            "{} {} {}",
+            "warning:".yellow(),
+            "the same message went out moments ago —".yellow(),
+            previous.dimmed()
+        );
+    }
 }
 
 /// Send a message (SPEC §10).
@@ -450,7 +469,7 @@ pub(crate) async fn send(
 
     // SPEC §8: accepted, not delivered. Saying "sent" would be a promise the
     // outbox has not kept yet.
-    println!("{} {}", "queued".green(), accepted.id.dimmed());
+    report(&accepted);
     Ok(())
 }
 
@@ -702,7 +721,7 @@ pub(crate) async fn reply(api: &str, id: &str, body: Option<&str>) -> Result<()>
             &serde_json::json!({ "body": body }),
         )
         .await?;
-    println!("{} {}", "queued".green(), accepted.id.dimmed());
+    report(&accepted);
     Ok(())
 }
 

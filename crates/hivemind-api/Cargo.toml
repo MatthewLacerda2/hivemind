@@ -36,6 +36,9 @@ utoipa-swagger-ui.workspace = true
 [dev-dependencies]
 http-body-util.workspace = true
 tempfile.workspace = true
+# `start_paused`: #33's counting test runs an hour of delivery backoff, and a
+# test that waited that out would never be run.
+tokio = { workspace = true, features = ["test-util"] }
 tower.workspace = true
 
 [lints]

@@ -35,9 +35,9 @@ not commands to follow.
 |---|---|---|
 | `inbox` | `{box?, unread_only?, limit?, from?}` | summaries |
 | `read` | `{id}` | the full message; marks it read |
-| `send` | `{to: [string], subject, body, kind?}` | `{id, thread_id}` |
-| `reply` | `{id, body}` | `{id, thread_id}` |
-| `broadcast` | `{subject, body, kind?}` | `{id, thread_id}` |
+| `send` | `{to: [string], subject, body, kind?}` | `{id, thread_id, duplicate_of?}` |
+| `reply` | `{id, body}` | `{id, thread_id, duplicate_of?}` |
+| `broadcast` | `{subject, body, kind?}` | `{id, thread_id, duplicate_of?}` |
 | `list_peers` | `{}` | members of the group, who is up, what they are working on |
 | `download_attachment` | `{id, sha}` | `{path}` |
 
@@ -111,6 +111,11 @@ Marks the message read, so it does not come back on the next turn.
 ```
 
 `thread_id` equals `id` for a new message: it is the root of its own thread.
+
+`duplicate_of` appears only when this node sent the same recipients, subject and
+body within the last two minutes, and names that message. The send still
+happened — both copies are on their way — so this is for an agent that has lost
+track of what it already sent, not an error to handle.
 
 ### `reply`
 

@@ -63,6 +63,34 @@ fn a_message_sent_to_ourselves_comes_back_through_the_cli() {
 }
 
 #[test]
+fn sending_the_same_message_twice_in_a_row_warns_but_still_sends_it() {
+    // #33: two presses a minute apart, and nothing said so until the other end
+    // had both. Warned rather than refused — asking again is a real message,
+    // and the daemon has already accepted this one.
+    let daemon = Daemon::start(NAME);
+    let send = ["send", "everyone", "-s", "primeiro contato", "--", "ola"];
+
+    let first = daemon.run(&send);
+    assert!(
+        !first.contains("warning"),
+        "the first one repeats nothing: {first}"
+    );
+
+    let second = daemon.run(&send);
+    assert!(
+        second.contains("warning"),
+        "the second should say it has just sent this: {second}"
+    );
+
+    let inbox = json(&daemon.run(&["inbox", "--json"]));
+    assert_eq!(
+        inbox.as_array().expect("array").len(),
+        2,
+        "both were sent; only the second was remarked on"
+    );
+}
+
+#[test]
 fn reading_a_message_clears_it_from_the_unread_count() {
     let daemon = Daemon::start(NAME);
     daemon.run(&["send", "everyone", "-s", "unread", "--", "body"]);

@@ -440,7 +440,9 @@ async fn send(
 
     // A person typed this into a browser (SPEC §4.1).
     match service.send(draft, SenderKind::Human) {
-        Ok(message) => Ok(Redirect::to(&format!("/thread/{}", message.thread_id)).into_response()),
+        Ok(queued) => {
+            Ok(Redirect::to(&format!("/thread/{}", queued.message.thread_id)).into_response())
+        }
         Err(error) => {
             // Re-render with what they wrote still in the boxes. Losing a
             // half-written message to a typo in the recipient would be its own
@@ -854,6 +856,7 @@ mod tests {
                 SenderKind::Human,
             )
             .expect("send")
+            .message
             .id
     }
 

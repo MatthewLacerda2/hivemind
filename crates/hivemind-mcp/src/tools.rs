@@ -4,7 +4,7 @@
 //! `sender_kind: human` means a person typed the message, and that `to` accepts
 //! a node name, an owner name or `everyone`.
 
-use hivemind_api::service::{Draft, ServiceError};
+use hivemind_api::service::{Draft, Queued, ServiceError};
 use hivemind_core::index::Query;
 use hivemind_core::message::{Kind, Recipient, SenderKind};
 use hivemind_core::store::Mailbox;
@@ -181,6 +181,22 @@ pub struct Sent {
     pub id: String,
     /// The thread it belongs to.
     pub thread_id: String,
+    /// An identical message this node sent in the last two minutes, if there
+    /// was one. This message was queued regardless; #33 is an agent or a person
+    /// running the same send twice, and an agent that has just been told so can
+    /// decide whether it meant to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duplicate_of: Option<String>,
+}
+
+impl From<Queued> for Sent {
+    fn from(queued: Queued) -> Self {
+        Self {
+            id: queued.message.id.to_string(),
+            thread_id: queued.message.thread_id.to_string(),
+            duplicate_of: queued.duplicate_of.map(|id| id.to_string()),
+        }
+    }
 }
 
 /// One row of the inbox.
@@ -394,15 +410,12 @@ impl HivemindMcp {
 
         // MCP means an agent, always. The caller does not get to say otherwise
         // (SPEC §4.1).
-        let message = self
+        let queued = self
             .service
             .send(draft, SenderKind::Agent)
             .map_err(|e| mcp_error(&e))?;
 
-        Ok(Json(Sent {
-            id: message.id.to_string(),
-            thread_id: message.thread_id.to_string(),
-        }))
+        Ok(Json(queued.into()))
     }
 
     #[tool(
@@ -416,7 +429,7 @@ impl HivemindMcp {
         Parameters(params): Parameters<ReplyParams>,
     ) -> Result<Json<Sent>, McpError> {
         let id = self.resolve(&params.id)?;
-        let message = self
+        let queued = self
             .service
             .reply(
                 id,
@@ -426,10 +439,7 @@ impl HivemindMcp {
             )
             .map_err(|e| mcp_error(&e))?;
 
-        Ok(Json(Sent {
-            id: message.id.to_string(),
-            thread_id: message.thread_id.to_string(),
-        }))
+        Ok(Json(queued.into()))
     }
 
     #[tool(
@@ -456,15 +466,12 @@ impl HivemindMcp {
             attachments: Vec::new(),
         };
 
-        let message = self
+        let queued = self
             .service
             .send(draft, SenderKind::Agent)
             .map_err(|e| mcp_error(&e))?;
 
-        Ok(Json(Sent {
-            id: message.id.to_string(),
-            thread_id: message.thread_id.to_string(),
-        }))
+        Ok(Json(queued.into()))
     }
 
     #[tool(

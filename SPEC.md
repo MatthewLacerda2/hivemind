@@ -270,6 +270,8 @@ GET    /api/v1/messages?box=new|cur|out|sent&thread=&from=&unread=&q=&limit=&cur
        # state of an inbox.
 GET    /api/v1/messages/{id}
 POST   /api/v1/messages                    multipart: json part `message` + N file parts → send
+       # 202 carries {id, thread_id} and, when this node sent the same thing
+       # within two minutes, `duplicate_of` naming it (§8). It is a notice.
 POST   /api/v1/messages/{id}/reply         same, with in_reply_to preset
 POST   /api/v1/messages/{id}/read          move new → cur
 GET    /api/v1/messages/{id}/attachments/{sha}   streams blob; triggers fetch if not inline & not cached
@@ -308,6 +310,7 @@ RFC 9457 problem+json everywhere. Stable `type` slugs (`not_paired`, `unknown_pe
 - `to: everyone` expands to all paired peers at send time (the expansion is stored, so late joiners don't get it).
 - `to: <owner>` expands to all paired peers with that owner.
 - Idempotency: recipients dedupe on message id; re-delivery is always safe.
+- Idempotency is the **recipient's**, and it cannot cover a sender that sent twice: two presses make two ids, and the far end has no way to tell them from two deliberate messages. So a send whose recipients, subject, body, kind and `in_reply_to` all repeat one this node sent in the last **two minutes** comes back with `duplicate_of` naming it — in the `202`, in the MCP result, and as a warning line from the CLI. A **notice, not a refusal**: the message is queued either way, because asking somebody the same thing again is a real message (#33).
 - Inline attachments: any single file ≤ `inline_max` (default 8 MiB) ships in the delivery multipart. Larger ones ship as refs; the recipient fetches lazily on first access or eagerly if `prefetch = true` in config.
 - Delivered messages move `out/` → `sent/` only when all recipients are delivered.
 
@@ -322,7 +325,7 @@ Tools — keep it to these seven; every one maps 1:1 to a service-layer function
 | Tool | Args | Returns |
 |---|---|---|
 | `list_peers` | `{}` | peers with name, owner, id, online, last_seen, sessions |
-| `send` | `{to: [string], subject, body, kind?, attachments?: [local path]}` | `{id, thread_id}` |
+| `send` | `{to: [string], subject, body, kind?, attachments?: [local path]}` | `{id, thread_id, duplicate_of?}` (§8) |
 | `inbox` | `{unread_only?: bool, limit?: int, from?: string}` | summaries (id, from, subject, kind, sender_kind, sent_at, attachment names) |
 | `read` | `{id}` | full message; marks read; attachment refs include a **local filesystem path** |
 | `reply` | `{id, body, attachments?}` | `{id}` |

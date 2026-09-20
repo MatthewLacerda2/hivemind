@@ -331,6 +331,21 @@ pub struct Accepted {
     pub id: String,
     /// The thread it belongs to.
     pub thread_id: String,
+    /// An identical message sent in the last two minutes, if there was one
+    /// (#33). Absent when there was not. The message was still queued: this is
+    /// a notice for whoever pressed send, not a refusal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duplicate_of: Option<String>,
+}
+
+impl From<crate::service::Queued> for Accepted {
+    fn from(queued: crate::service::Queued) -> Self {
+        Self {
+            id: queued.message.id.to_string(),
+            thread_id: queued.message.thread_id.to_string(),
+            duplicate_of: queued.duplicate_of.map(|id| id.to_string()),
+        }
+    }
 }
 
 /// Listing filters (SPEC §7.1).
@@ -758,14 +773,8 @@ pub(crate) async fn send_message(
 
     // HTTP means a human at the CLI or the web UI. MCP sets Agent instead, and
     // neither lets the caller choose (SPEC §4.1).
-    let message = service.send(draft, SenderKind::Human)?;
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(Accepted {
-            id: message.id.to_string(),
-            thread_id: message.thread_id.to_string(),
-        }),
-    ))
+    let queued = service.send(draft, SenderKind::Human)?;
+    Ok((StatusCode::ACCEPTED, Json(queued.into())))
 }
 
 #[utoipa::path(
@@ -780,19 +789,13 @@ pub(crate) async fn reply_to_message(
     Json(request): Json<ReplyRequest>,
 ) -> Result<(StatusCode, Json<Accepted>), Problem> {
     let id = service.resolve_message(&id)?;
-    let message = service.reply(
+    let queued = service.reply(
         id,
         request.body,
         local_paths(request.attachments),
         SenderKind::Human,
     )?;
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(Accepted {
-            id: message.id.to_string(),
-            thread_id: message.thread_id.to_string(),
-        }),
-    ))
+    Ok((StatusCode::ACCEPTED, Json(queued.into())))
 }
 
 #[utoipa::path(
@@ -1184,6 +1187,30 @@ mod tests {
             body["id"], body["thread_id"],
             "a new message starts a thread"
         );
+    }
+
+    #[tokio::test]
+    async fn sending_the_same_thing_twice_says_which_one_it_repeats() {
+        // #33: the send is still accepted — the second id comes back and the
+        // message goes — and the notice is for whoever pressed twice.
+        let (_dir, router, identity) = app();
+        let twice = || {
+            post_json(
+                "/api/v1/messages",
+                &serde_json::json!({
+                    "to": [identity.to_string()],
+                    "subject": "primeiro contato",
+                    "body": "olá",
+                }),
+            )
+        };
+
+        let (_, first) = call(&router, twice()).await;
+        assert_eq!(first["duplicate_of"], serde_json::Value::Null);
+
+        let (status, second) = call(&router, twice()).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(second["duplicate_of"], first["id"]);
     }
 
     #[tokio::test]

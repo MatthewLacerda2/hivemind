@@ -299,6 +299,7 @@ where
 mod tests {
     use super::*;
     use hivemind_core::crypto::SigningKey;
+    use hivemind_core::store::Mailbox;
     use hivemind_net::discovery::Seen as _;
 
     use crate::service::NodeDescription;
@@ -517,8 +518,8 @@ mod tests {
         assert!(outbox.addresses(node(3)).is_empty());
     }
 
-    /// A service, and a friend queued mail that has already failed four times.
-    fn backed_off_entry() -> (tempfile::TempDir, Arc<MailService>, NodeId) {
+    /// A service, and one message queued for a peer that will never answer.
+    fn queued_for_an_offline_peer() -> (tempfile::TempDir, Arc<MailService>, NodeId) {
         let (dir, service) = service();
         let friend = hivemind_core::identity::Identity::from_seed([44u8; 32]).expect("identity");
         let id = friend.node_id();
@@ -544,7 +545,12 @@ mod tests {
                 hivemind_core::message::SenderKind::Human,
             )
             .expect("send");
+        (dir, service, id)
+    }
 
+    /// A service, and a friend queued mail that has already failed four times.
+    fn backed_off_entry() -> (tempfile::TempDir, Arc<MailService>, NodeId) {
+        let (dir, service, id) = queued_for_an_offline_peer();
         let mut entry = ServiceOutbox::new(Arc::clone(&service))
             .pending()
             .pop()
@@ -623,5 +629,121 @@ mod tests {
         outbox.unreachable(id);
 
         assert!(!service.is_online(id));
+    }
+
+    /// A transport that never gets through, recording each message it was
+    /// handed so the ids can be counted afterwards.
+    #[derive(Default)]
+    struct NeverReaches {
+        seen: std::sync::Mutex<Vec<ulid::Ulid>>,
+    }
+
+    impl hivemind_net::delivery::Transport for NeverReaches {
+        async fn deliver(
+            &self,
+            _node: NodeId,
+            addr: &str,
+            message: &hivemind_core::message::Message,
+        ) -> Result<(), hivemind_net::client::ClientError> {
+            self.seen.lock().expect("lock").push(message.id);
+            Err(hivemind_net::client::ClientError::Connect {
+                addr: addr.to_owned(),
+                source: std::io::Error::from(std::io::ErrorKind::ConnectionRefused),
+            })
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_hour_of_retries_against_a_peer_that_is_off_leaves_one_record() {
+        // #33, the grave half: if a retry made a fresh message rather than
+        // reusing the one in `out/`, a peer that stayed off would multiply the
+        // sender's own copy — and each new ULID would arrive at the other end
+        // as a new message, because idempotency there is on the id (SPEC §8).
+        // Counting is the only honest way to ask: this runs the real worker
+        // against the real store and counts what is on disk.
+        let (dir, service, peer) = queued_for_an_offline_peer();
+        let sent_id = service
+            .pending_outbound()
+            .expect("pending")
+            .pop()
+            .expect("one queued message")
+            .message
+            .id;
+
+        let start = tokio::time::Instant::now();
+        let clock = move || DateTime::from_timestamp(0, 0).expect("in range") + start.elapsed();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn({
+            let outbox = ServiceOutbox::new(Arc::clone(&service));
+            async move {
+                let transport = NeverReaches::default();
+                hivemind_net::delivery::run(&outbox, &transport, clock, async {
+                    let _ = stopped.await;
+                })
+                .await;
+                transport
+            }
+        });
+
+        // Counted as it goes rather than only at the end. Under the bug this
+        // is written to catch, every pass would write another envelope and the
+        // next pass would retry all of them, so a single check an hour later
+        // would take an age to arrive — and a test that hangs says less than
+        // one that fails. Time is paused, so the hour costs microseconds.
+        let out = dir.path().join("mail").join("out");
+        let envelopes = || std::fs::read_dir(&out).expect("out/").count();
+
+        // Seconds in, before the first minute: a record that multiplied per
+        // pass would double every tick, and by a minute there would be more
+        // files than the test could count.
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        assert_eq!(envelopes(), 1, "one send, one envelope in out/");
+
+        for minute in 1..=60 {
+            tokio::time::sleep(std::time::Duration::from_mins(1)).await;
+            assert_eq!(
+                envelopes(),
+                1,
+                "one send should still be one envelope in out/ after {minute} min"
+            );
+        }
+        let _ = stop.send(());
+        let transport = worker.await.expect("the worker should not panic");
+
+        let handed_over = transport.seen.lock().expect("lock").clone();
+        assert!(
+            handed_over.len() >= 8,
+            "the test proves nothing unless it really retried: {} attempts",
+            handed_over.len()
+        );
+        let distinct: std::collections::HashSet<ulid::Ulid> = handed_over.into_iter().collect();
+        assert_eq!(
+            distinct,
+            std::iter::once(sent_id).collect(),
+            "every attempt must carry the message that was sent, not a new one"
+        );
+
+        // Files are the source of truth (ADR 0002) and are counted above; the
+        // index is asked separately because a duplicate visible only in
+        // `hivemind sent` would look exactly like #33 too.
+        let listed = service
+            .list(&hivemind_core::index::Query {
+                mailbox: Some(Mailbox::Out),
+                ..hivemind_core::index::Query::default()
+            })
+            .expect("list");
+        assert_eq!(listed.len(), 1, "and one row for it");
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("mail").join("sent"))
+                .expect("sent/")
+                .count(),
+            0,
+            "nothing was delivered, so nothing should have been filed as sent"
+        );
+        assert!(
+            service.pending_outbound().expect("pending")[0].recipients[0].attempts >= 8,
+            "the attempts accumulate on the one entry"
+        );
+        assert!(!service.is_online(peer));
     }
 }
