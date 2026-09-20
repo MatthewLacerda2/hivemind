@@ -116,13 +116,10 @@ fn a_reply_lands_in_the_same_thread() {
     daemon.run(&["reply", &id, "1pm"]);
 
     let original = json(&daemon.run(&["read", &id, "--json"]));
-    let thread: serde_json::Value = reqwest::blocking::get(format!(
-        "{}/api/v1/threads/{}",
-        daemon.api(),
+    let (_, thread) = daemon.get_json(&format!(
+        "/api/v1/threads/{}",
         original["id"].as_str().expect("id")
-    ))
-    .and_then(reqwest::blocking::Response::json)
-    .unwrap_or(serde_json::Value::Null);
+    ));
 
     // The root's id is its thread id, so the thread holds both messages.
     assert!(
@@ -179,9 +176,8 @@ fn the_daemon_refuses_to_serve_anything_but_loopback() {
     // that the listener was never bound to a routable address.
     drop(non_loopback);
 
-    let local =
-        reqwest::blocking::get(format!("{}/healthz", daemon.api())).expect("loopback works");
-    assert!(local.status().is_success());
+    let (status, _) = daemon.get_json("/healthz");
+    assert_eq!(status, 200, "loopback still works");
 }
 
 #[test]

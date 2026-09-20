@@ -70,3 +70,50 @@ fn a_taken_peer_port_costs_an_attempt_and_not_the_test() {
 
     drop(decoy);
 }
+
+/// The three HTTP helpers, driven from inside a `#[tokio::test]` (#77).
+///
+/// The rule they used to carry — that they could not be called from an async
+/// test, because `reqwest::blocking` builds a runtime and panics when it is
+/// dropped in one — was written in the module doc and exercised nowhere, so
+/// the first async test to want a `POST` would have been the one to find out.
+/// This is that test, standing in for it permanently.
+///
+/// All three in one daemon rather than three tests: they share a start-up,
+/// which is the expensive part, and the point is the runtime they run in
+/// rather than any one of the requests.
+#[tokio::test]
+async fn the_http_helpers_answer_from_inside_an_async_test() {
+    let daemon = Daemon::start("async");
+
+    let (status, me) = daemon.get_json("/api/v1/me");
+    assert_eq!(status, 200, "GET should answer: {me}");
+
+    let files = tempfile::tempdir().expect("temp dir");
+    let path = files.path().join("bytes.bin");
+    // Every byte there is, so that a body decoded as UTF-8 and re-encoded
+    // would come back as replacement characters rather than as itself.
+    // `get_bytes` exists for attachments, and an attachment is a blob.
+    let raw: Vec<u8> = (0..=u8::MAX).collect();
+    std::fs::write(&path, &raw).expect("write the attachment");
+
+    let (status, accepted) = daemon.post(
+        "/api/v1/messages",
+        &serde_json::json!({
+            "to": ["everyone"],
+            "subject": "from an async test",
+            "body": "with a blob on it",
+            "attachments": [path],
+        }),
+    );
+    assert_eq!(status, 202, "POST should be accepted: {accepted}");
+
+    let arrived = daemon.wait_for("from an async test");
+    let id = arrived["id"].as_str().expect("an id");
+    let full = daemon::json(&daemon.run(&["read", id, "--json"]));
+    let sha = full["attachments"][0]["sha256"].as_str().expect("a digest");
+
+    let (status, bytes) = daemon.get_bytes(&format!("/api/v1/messages/{id}/attachments/{sha}"));
+    assert_eq!(status, 200);
+    assert_eq!(bytes, raw, "the blob should arrive byte for byte");
+}
