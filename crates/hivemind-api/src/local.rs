@@ -788,7 +788,7 @@ pub(crate) async fn send_message(
 
 #[utoipa::path(
     post, path = "/api/v1/messages/{id}/reply",
-    params(("id" = String, Path, description = "Message being replied to")),
+    params(("id" = String, Path, description = "The message being answered, or a thread — which answers the most recent message in it")),
     request_body = ReplyRequest,
     responses((status = 202, body = Accepted), (status = 404, body = Problem))
 )]

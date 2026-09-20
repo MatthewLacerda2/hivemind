@@ -485,7 +485,7 @@
           {
             "name": "id",
             "in": "path",
-            "description": "Message being replied to",
+            "description": "The message being answered, or a thread — which answers the most recent message in it",
             "required": true,
             "schema": {
               "type": "string"

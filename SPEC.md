@@ -273,6 +273,10 @@ POST   /api/v1/messages                    multipart: json part `message` + N fi
        # 202 carries {id, thread_id} and, when this node sent the same thing
        # within two minutes, `duplicate_of` naming it (§8). It is a notice.
 POST   /api/v1/messages/{id}/reply         same, with in_reply_to preset
+       # `{id}` is a message, or a **thread** — which answers the most
+       # recent message in it, so continuing a subject does not mean
+       # hunting for the id of its latest message (§10). Answering our own
+       # message goes to whoever it was sent to, not back to this machine.
 POST   /api/v1/messages/{id}/read          move new → cur
 GET    /api/v1/messages/{id}/attachments/{sha}   streams blob; triggers fetch if not inline & not cached
 GET    /api/v1/threads?with=&limit=       conversations, the one that moved last first
@@ -376,7 +380,7 @@ hivemind sent                         # out + sent: what left here, delivered or
 hivemind wait [--from <peer>] [--thread <id>] [--timeout <30s|5m>] [--json]  # block until mail arrives; 3 if the timeout wins
 hivemind read <id>                    # says how many more are in the thread, and how to see them
 hivemind thread <id> [--json]         # the whole conversation, oldest first; any message in it, not only the root
-hivemind reply <id> [-b <body>] [body | -]
+hivemind reply <id> [-b <body>] [body | -]   # <id> is a message or a thread; a thread answers where it got to
 hivemind reindex
 hivemind hook check|install|uninstall
 hivemind mcp install|print
