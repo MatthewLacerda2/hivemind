@@ -14,18 +14,21 @@
 //! [`Daemon::start_from`], for the one test that has to replace the binary
 //! underneath a running daemon and so cannot use the one cargo built.
 //!
-//! Starting, stopping, restarting and [`Daemon::run`] are safe inside a
-//! `#[tokio::test]`, which is what `mcp_tools.rs` needs. [`Daemon::post`],
-//! [`Daemon::get_json`] and [`Daemon::get_bytes`] are not: they go through
-//! `reqwest::blocking`, which builds a runtime and panics when it is dropped
-//! in an async context. An async test that wants one of those should give it
-//! the same treatment [`Daemon::answers_locally`] got rather than start a
-//! fourth copy of this file.
+//! All of it is safe inside a `#[tokio::test]`, which is what `mcp_tools.rs`
+//! needs. That was not always true: [`Daemon::post`], [`Daemon::get_json`] and
+//! [`Daemon::get_bytes`] went through `reqwest::blocking`, which builds a
+//! runtime of its own and panics when it is dropped in an async context, so
+//! the harness carried a warning telling an async test not to call them. All
+//! three speak HTTP over a `TcpStream` now, like [`Daemon::answers_locally`]
+//! already did, and `tests/harness.rs` drives them from a `#[tokio::test]` so
+//! the claim is exercised rather than merely written (#77).
 //!
 //! Each integration test is its own binary, so anything an individual file
 //! does not use looks dead to that binary — hence the allow.
 
 #![allow(dead_code)]
+
+mod http;
 
 use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
@@ -213,34 +216,12 @@ impl Daemon {
 
     /// Does our own loopback API answer? Only our process can.
     ///
-    /// A request written by hand over a plain socket, rather than through an
-    /// HTTP client. This is called from inside `#[tokio::test]` as well as
-    /// outside it, and `reqwest::blocking` builds a runtime of its own that
-    /// panics when it is dropped in an async context — which is what kept
-    /// `mcp_tools.rs` on its own copy of this harness rather than on this
-    /// line. That copy reached for `curl`, which is a whole process per poll
-    /// for a request that fits on one.
+    /// Polled every 20ms during start-up, so a refused connection is an
+    /// ordinary answer here rather than a failure: the daemon has not got
+    /// there yet.
     fn answers_locally(&self) -> bool {
-        use std::io::{Read as _, Write as _};
-
-        let Ok(mut socket) = std::net::TcpStream::connect(("127.0.0.1", self.port)) else {
-            return false;
-        };
-        let _ = socket.set_read_timeout(Some(Duration::from_secs(2)));
-        let _ = socket.set_write_timeout(Some(Duration::from_secs(2)));
-        let request = format!(
-            "GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
-            self.port
-        );
-        if socket.write_all(request.as_bytes()).is_err() {
-            return false;
-        }
-
-        // The status line is the whole answer, and `Connection: close` means
-        // the read ends by itself rather than on a content length.
-        let mut response = Vec::new();
-        let _ = socket.read_to_end(&mut response);
-        response.starts_with(b"HTTP/1.1 200")
+        http::request(self.port, "GET", "/healthz", None, Duration::from_secs(2))
+            .is_ok_and(|response| response.status == 200)
     }
 
     /// Is anything listening on the peer port? By now that is us.
@@ -330,46 +311,41 @@ impl Daemon {
     }
 
     /// POST to this daemon's local API, returning the decoded JSON.
+    ///
+    /// A body that is not JSON decodes to `Null` rather than panicking: the
+    /// status code is half of what these tests assert, and an empty 204 is a
+    /// legitimate answer to assert on.
     pub(crate) fn post(&self, path: &str, body: &serde_json::Value) -> (u16, serde_json::Value) {
-        let response = reqwest::blocking::Client::new()
-            .post(format!("{}{path}", self.api()))
-            .json(body)
-            .send()
-            .expect("the daemon answers");
-        let status = response.status().as_u16();
-        let text = response.text().unwrap_or_default();
-        (
-            status,
-            serde_json::from_str(&text).unwrap_or(serde_json::Value::Null),
+        let encoded = body.to_string();
+        let response = http::request(
+            self.port,
+            "POST",
+            path,
+            Some(encoded.as_bytes()),
+            Duration::from_secs(30),
         )
+        .expect("the daemon answers");
+        (response.status, decode(&response.body))
     }
 
     /// GET from this daemon's local API, returning the decoded JSON.
     pub(crate) fn get_json(&self, path: &str) -> (u16, serde_json::Value) {
-        let response = reqwest::blocking::Client::new()
-            .get(format!("{}{path}", self.api()))
-            .send()
+        let response = http::request(self.port, "GET", path, None, Duration::from_secs(30))
             .expect("the daemon answers");
-        let status = response.status().as_u16();
-        let text = response.text().unwrap_or_default();
-        (
-            status,
-            serde_json::from_str(&text).unwrap_or(serde_json::Value::Null),
-        )
+        (response.status, decode(&response.body))
     }
 
     /// GET raw bytes from this daemon's local API.
+    ///
+    /// Bytes and not text: this is how an attachment is fetched, and a blob
+    /// read as UTF-8 and re-encoded would come back as replacement
+    /// characters rather than as itself.
     pub(crate) fn get_bytes(&self, path: &str) -> (u16, Vec<u8>) {
-        let response = reqwest::blocking::Client::builder()
-            // A first fetch pulls the whole file from the other daemon.
-            .timeout(Duration::from_mins(1))
-            .build()
-            .expect("client")
-            .get(format!("{}{path}", self.api()))
-            .send()
+        // A minute, because a first fetch pulls the whole file from the other
+        // daemon before a byte of this response is written.
+        let response = http::request(self.port, "GET", path, None, Duration::from_mins(1))
             .expect("the daemon answers");
-        let status = response.status().as_u16();
-        (status, response.bytes().expect("body").to_vec())
+        (response.status, response.body)
     }
 
     pub(crate) fn node_id(&self) -> String {
@@ -577,6 +553,11 @@ fn complaint(errors: &Path) -> String {
         Ok(text) if !text.trim().is_empty() => format!("\nIts stderr:\n{text}"),
         _ => String::new(),
     }
+}
+
+/// A response body as JSON, or `Null` when it is not JSON at all.
+fn decode(body: &[u8]) -> serde_json::Value {
+    serde_json::from_slice(body).unwrap_or(serde_json::Value::Null)
 }
 
 pub(crate) fn json(text: &str) -> serde_json::Value {

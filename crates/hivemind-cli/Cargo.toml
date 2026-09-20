@@ -39,7 +39,6 @@ hivemind-api.workspace = true
 
 [dev-dependencies]
 rmcp-client.workspace = true
-reqwest = { workspace = true, features = ["blocking"] }
 tempfile.workspace = true
 
 [lints]
