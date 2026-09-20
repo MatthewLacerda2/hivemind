@@ -58,8 +58,9 @@ impl HivemindMcp {
         message: hivemind_core::message::Message,
         others_in_thread: usize,
     ) -> FullMessage {
+        let id = message.id;
         FullMessage {
-            id: message.id.to_string(),
+            id: id.to_string(),
             thread_id: message.thread_id.to_string(),
             from: message.from.to_string(),
             subject: message.subject,
@@ -87,7 +88,41 @@ impl HivemindMcp {
                 })
                 .collect(),
             others_in_thread,
+            recipients: self
+                .service
+                .delivery_of(id)
+                .unwrap_or_default()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|state| RecipientNote {
+                    node: state.node.to_string(),
+                    state: state.state().as_str().to_owned(),
+                    delivered_at: state.delivered_at.map(|at| at.to_rfc3339()),
+                    read_at: state.read_at.map(|at| at.to_rfc3339()),
+                    attempts: state.attempts,
+                    last_error: state.last_error,
+                })
+                .collect(),
         }
+    }
+
+    /// How far one of this machine's own sends has got, if it is one.
+    ///
+    /// Read from the envelope in `out/` or `sent/` rather than from the index
+    /// (ADR 0015), so this answers after somebody deleted `index.db`.
+    fn delivery_note(&self, id: Ulid) -> Option<DeliveryNote> {
+        let recipients = self.service.delivery_of(id).ok()??;
+        let weakest = recipients
+            .iter()
+            .map(hivemind_core::store::RecipientState::state)
+            .min()?;
+        let at_least = |state| recipients.iter().filter(|r| r.state() >= state).count();
+        Some(DeliveryNote {
+            state: weakest.as_str().to_owned(),
+            recipients: recipients.len(),
+            delivered: at_least(hivemind_core::store::Delivery::Delivered),
+            read: at_least(hivemind_core::store::Delivery::Read),
+        })
     }
 
     /// Turn what an agent passed into a message id.
@@ -349,6 +384,25 @@ pub struct InboxItem {
     pub unread: bool,
     /// The names of any attachments.
     pub attachment_names: Vec<String>,
+    /// How far this message has got with its recipients, for one this machine
+    /// sent (SPEC §8). Absent for mail that arrived here. Check it before
+    /// telling the user something was sent: "the other Claude believes it sent
+    /// four messages, two arrived" is why this is here (#31).
+    pub delivery: Option<DeliveryNote>,
+}
+
+/// How a sent message's recipients are getting on.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct DeliveryNote {
+    /// `queued`, `delivered` or `read` — the weakest of what its recipients
+    /// support, so one machine that is off holds the whole message at `queued`.
+    pub state: String,
+    /// How many machines it was addressed to.
+    pub recipients: usize,
+    /// How many confirmed taking it. This is their machines' word, not ours.
+    pub delivered: usize,
+    /// How many said they had read it.
+    pub read: usize,
 }
 
 /// One conversation, as `chats` returns it.
@@ -399,6 +453,26 @@ pub struct FullMessage {
     /// How many **other** messages are in this thread. When it is not zero,
     /// `thread` with this id returns the whole conversation in order.
     pub others_in_thread: usize,
+    /// One line per recipient, for a message this machine sent: who has it, who
+    /// has read it, and why the rest have not. Empty for mail that arrived here.
+    pub recipients: Vec<RecipientNote>,
+}
+
+/// What one recipient has done with a message this machine sent.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct RecipientNote {
+    /// The machine this copy is for.
+    pub node: String,
+    /// `queued`, `delivered` or `read`.
+    pub state: String,
+    /// When that machine confirmed taking it, RFC 3339.
+    pub delivered_at: Option<String>,
+    /// When it said the message had been read, RFC 3339.
+    pub read_at: Option<String>,
+    /// How many delivery attempts have been made.
+    pub attempts: u32,
+    /// Why the last attempt failed — the answer to "why has this not arrived".
+    pub last_error: Option<String>,
 }
 
 /// An attachment, and where to find it on disk.
@@ -468,6 +542,7 @@ impl HivemindMcp {
             summaries
                 .into_iter()
                 .map(|s| InboxItem {
+                    delivery: self.delivery_note(s.id),
                     id: s.id.to_string(),
                     from: s.from.to_string(),
                     subject: s.subject,
@@ -1127,5 +1202,116 @@ mod tests {
     fn a_broken_index_is_not_blamed_on_the_caller() {
         let error = mcp_error(&ServiceError::Unavailable);
         assert_eq!(error.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+    }
+}
+
+#[cfg(test)]
+mod delivery_tests {
+    //! What a Claude is told about its own sends (SPEC §8, #31).
+    //!
+    //! The incident behind this is an agent's: the Claude on the other machine
+    //! believed it had sent four messages, two arrived, and neither side
+    //! noticed until they compared lists by hand. An `inbox` row that says
+    //! nothing about delivery is what let it believe that.
+
+    use super::*;
+    use crate::server::tests::{member, server};
+
+    /// One message from this machine to `to`, still in the outbox.
+    fn send_to(server: &HivemindMcp, to: hivemind_core::peer::NodeId, subject: &str) -> Ulid {
+        server
+            .service
+            .send(
+                hivemind_api::service::Draft {
+                    to: vec![hivemind_core::message::Recipient::Node(to)],
+                    subject: subject.to_owned(),
+                    body: "body".to_owned(),
+                    kind: hivemind_core::message::Kind::Message,
+                    in_reply_to: None,
+                    attachments: Vec::new(),
+                },
+                hivemind_core::message::SenderKind::Agent,
+            )
+            .expect("send")
+            .message
+            .id
+    }
+
+    #[tokio::test]
+    async fn a_listing_tells_an_agent_how_far_its_own_sends_have_got() {
+        let (_dir, server) = server();
+        let ana = member(&server, 81, "ana-mbp").node_id();
+        let beto = member(&server, 82, "beto-air").node_id();
+        let queued = send_to(&server, ana, "to ana");
+
+        // Ana's machine took it; Beto's was never written to.
+        let mut recipients = server
+            .service
+            .delivery_of(queued)
+            .expect("ours")
+            .expect("we sent it");
+        for state in &mut recipients {
+            state.delivered_at = Some(chrono::Utc::now());
+        }
+        server
+            .service
+            .save_outbound(&hivemind_core::store::Outbound {
+                message: server.service.get(queued).expect("get").1,
+                recipients,
+            })
+            .expect("save");
+        let waiting = send_to(&server, beto, "to beto");
+
+        let listed = server
+            .inbox(Parameters(InboxParams {
+                r#box: Some("sent".to_owned()),
+                ..InboxParams::default()
+            }))
+            .await
+            .expect("a listing")
+            .0;
+        let delivered = listed
+            .iter()
+            .find(|item| item.subject == "to ana")
+            .expect("the one ana took");
+        assert_eq!(
+            delivered.delivery.as_ref().map(|d| d.state.as_str()),
+            Some("delivered")
+        );
+
+        let listed = server
+            .inbox(Parameters(InboxParams {
+                r#box: Some("out".to_owned()),
+                ..InboxParams::default()
+            }))
+            .await
+            .expect("a listing")
+            .0;
+        let stuck = listed
+            .iter()
+            .find(|item| item.subject == "to beto")
+            .expect("the one still going");
+        let note = stuck.delivery.as_ref().expect("a delivery note");
+        assert_eq!(note.state, "queued");
+        assert_eq!(note.recipients, 1);
+        assert_eq!(note.delivered, 0);
+        assert_eq!(waiting, stuck.id.parse::<Ulid>().expect("an id"));
+    }
+
+    #[tokio::test]
+    async fn mail_that_arrived_here_carries_no_delivery_note() {
+        // A mark on somebody else's message would be a claim about this
+        // machine that nobody made.
+        let (_dir, server) = server();
+        let ana = member(&server, 83, "ana-mbp");
+        crate::server::tests::deliver(&server, &ana, 100, "from ana");
+
+        let listed = server
+            .inbox(Parameters(InboxParams::default()))
+            .await
+            .expect("a listing")
+            .0;
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].delivery.is_none());
     }
 }

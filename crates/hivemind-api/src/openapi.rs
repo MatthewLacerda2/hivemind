@@ -56,6 +56,8 @@ use crate::problem::{Problem, ProblemType};
         local::MessageSummary,
         local::MessageBody,
         local::Attachment,
+        local::DeliverySummary,
+        local::RecipientDelivery,
         local::SendRequest,
         local::ReplyRequest,
         local::Accepted,

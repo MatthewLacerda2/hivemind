@@ -28,11 +28,13 @@ use utoipa::ToSchema;
 use crate::problem::Problem;
 use crate::service::{Draft, MailService};
 
+pub mod delivery;
 pub mod group;
 pub mod messages;
 pub mod sessions;
 pub mod threads;
 
+pub use delivery::{DeliverySummary, RecipientDelivery};
 pub use messages::{
     Accepted, Attachment, ListParams, MessageBody, MessageSummary, ReplyRequest, SendRequest,
 };
@@ -487,13 +489,19 @@ pub(crate) async fn list_messages(
         cursor: params.cursor.as_deref().and_then(|c| c.parse().ok()),
     };
 
-    Ok(Json(
-        service
-            .list(&query)?
-            .into_iter()
-            .map(MessageSummary::from)
-            .collect(),
-    ))
+    // One envelope read per row rather than three columns in the index that
+    // only the live delivery path could fill (ADR 0015). A page is fifty small
+    // reads from the page cache; a column a rebuild cannot reconstruct is a
+    // cache that has stopped being one (ADR 0002).
+    let rows = service
+        .list(&query)?
+        .into_iter()
+        .map(|summary| {
+            let ours = service.delivery_of(summary.id).unwrap_or_default();
+            MessageSummary::new(summary, &ours.unwrap_or_default())
+        })
+        .collect();
+    Ok(Json(rows))
 }
 
 #[utoipa::path(
@@ -507,7 +515,13 @@ pub(crate) async fn get_message(
 ) -> Result<Json<MessageBody>, Problem> {
     let id = service.resolve_message(&id)?;
     let (mailbox, message) = service.get(id)?;
-    Ok(Json(MessageBody::new(mailbox, message, service.blobs())))
+    let recipients = service.delivery_of(id)?.unwrap_or_default();
+    Ok(Json(MessageBody::new(
+        mailbox,
+        message,
+        service.blobs(),
+        recipients,
+    )))
 }
 
 #[utoipa::path(

@@ -534,3 +534,127 @@ async fn a_thread_nobody_has_is_a_404_rather_than_an_empty_list() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(problem["type"], "/problems/message-not-found");
 }
+
+#[tokio::test]
+async fn a_listing_says_how_far_each_sent_message_has_got() {
+    // #31: the sender used to see a global `outbox: 1` that said *something*
+    // was outstanding and never what or to whom. Two recipients, neither
+    // reached, so the counts are distinguishable from "one" and from "all".
+    let (_dir, router, service) = app_with_service();
+    let ana = super::tests::admit(&service, 61);
+    let beto = super::tests::admit(&service, 62);
+
+    call(
+        &router,
+        post_json(
+            "/api/v1/messages",
+            &serde_json::json!({
+                "to": [ana.to_string(), beto.to_string()],
+                "subject": "two recipients",
+                "body": "x",
+            }),
+        ),
+    )
+    .await;
+
+    let (_, list) = call(&router, get("/api/v1/messages?box=out")).await;
+    let delivery = &list[0]["delivery"];
+    assert_eq!(delivery["state"], "queued");
+    assert_eq!(delivery["recipients"], 2);
+    assert_eq!(delivery["delivered"], 0);
+    assert_eq!(delivery["read"], 0);
+}
+
+#[tokio::test]
+async fn received_mail_has_no_delivery_to_report() {
+    // Nothing to confirm is not the same as nothing confirmed, and a mark on
+    // somebody else's message would be a claim about our own machine.
+    let (_dir, router, identity) = app();
+    call(
+        &router,
+        post_json(
+            "/api/v1/messages",
+            &serde_json::json!({ "to": [identity.to_string()], "subject": "note to self", "body": "x" }),
+        ),
+    )
+    .await;
+
+    let (_, list) = call(&router, get("/api/v1/messages?box=new")).await;
+    assert_eq!(list[0]["delivery"], serde_json::Value::Null);
+
+    let (_, sent) = call(&router, get("/api/v1/messages?box=sent")).await;
+    assert_eq!(
+        sent[0]["delivery"],
+        serde_json::Value::Null,
+        "a note to self has no recipient to confirm anything"
+    );
+}
+
+#[tokio::test]
+async fn reading_one_message_lists_what_each_recipient_has_done() {
+    // The other half of what #31 asks for: on the message itself, a line per
+    // recipient — including why the ones that have not had it have not.
+    let (_dir, router, service) = app_with_service();
+    let ana = super::tests::admit(&service, 63);
+    let beto = super::tests::admit(&service, 64);
+
+    let (_, accepted) = call(
+        &router,
+        post_json(
+            "/api/v1/messages",
+            &serde_json::json!({
+                "to": [ana.to_string(), beto.to_string()],
+                "subject": "two recipients",
+                "body": "x",
+            }),
+        ),
+    )
+    .await;
+    let id: Ulid = accepted["id"]
+        .as_str()
+        .expect("an id")
+        .parse()
+        .expect("ulid");
+
+    // Ana's machine took it and she read it; Beto's is off.
+    let mut outbound = service
+        .delivery_of(id)
+        .expect("ours")
+        .expect("we sent it")
+        .clone();
+    let now = chrono::Utc::now();
+    for state in &mut outbound {
+        if state.node == ana {
+            state.delivered_at = Some(now);
+            state.read_at = Some(now);
+        } else {
+            state.attempts = 3;
+            state.last_error = Some("could not reach 10.0.0.9:8400".to_owned());
+        }
+    }
+    service
+        .save_outbound(&hivemind_core::store::Outbound {
+            message: service.get(id).expect("get").1,
+            recipients: outbound,
+        })
+        .expect("save");
+
+    let (_, message) = call(&router, get(&format!("/api/v1/messages/{id}"))).await;
+    let lines = message["recipients"].as_array().expect("a line each");
+    assert_eq!(lines.len(), 2);
+
+    let hers = lines
+        .iter()
+        .find(|line| line["node"] == ana.to_string())
+        .expect("ana");
+    assert_eq!(hers["state"], "read");
+    assert!(hers["read_at"].is_string());
+
+    let his = lines
+        .iter()
+        .find(|line| line["node"] == beto.to_string())
+        .expect("beto");
+    assert_eq!(his["state"], "queued");
+    assert_eq!(his["attempts"], 3);
+    assert_eq!(his["last_error"], "could not reach 10.0.0.9:8400");
+}

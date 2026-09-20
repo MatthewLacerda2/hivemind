@@ -8,10 +8,11 @@
 use chrono::{DateTime, Utc};
 use hivemind_core::index::Summary;
 use hivemind_core::message::Message;
-use hivemind_core::store::Mailbox;
+use hivemind_core::store::{Mailbox, RecipientState};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
+use crate::local::delivery::{DeliverySummary, RecipientDelivery};
 use crate::problem::Problem;
 
 /// One row of a listing (SPEC §9.1).
@@ -37,10 +38,16 @@ pub struct MessageSummary {
     pub unread: bool,
     /// The names of its attachments.
     pub attachment_names: Vec<String>,
+    /// How its recipients are getting on, for a message this node sent
+    /// (SPEC §8). Absent for received mail, and for one whose only recipient
+    /// was this machine.
+    pub delivery: Option<DeliverySummary>,
 }
 
-impl From<Summary> for MessageSummary {
-    fn from(s: Summary) -> Self {
+impl MessageSummary {
+    /// A row, with what each recipient has done with it if this node sent it.
+    #[must_use]
+    pub fn new(s: Summary, recipients: &[RecipientState]) -> Self {
         // Read the derived flag before the struct is torn apart.
         let unread = s.is_unread();
         Self {
@@ -54,7 +61,14 @@ impl From<Summary> for MessageSummary {
             mailbox: s.mailbox.as_str().to_owned(),
             unread,
             attachment_names: s.attachment_names,
+            delivery: DeliverySummary::of(recipients),
         }
+    }
+}
+
+impl From<Summary> for MessageSummary {
+    fn from(s: Summary) -> Self {
+        Self::new(s, &[])
     }
 }
 
@@ -85,6 +99,10 @@ pub struct MessageBody {
     pub mailbox: String,
     /// The files that came with it.
     pub attachments: Vec<Attachment>,
+    /// One line per recipient, for a message this node sent (SPEC §8): who has
+    /// it, who has read it, and what is holding up the rest. Empty for
+    /// received mail.
+    pub recipients: Vec<RecipientDelivery>,
 }
 
 /// One attachment, as the local API describes it (SPEC §7.1).
@@ -110,8 +128,13 @@ impl MessageBody {
         mailbox: Mailbox,
         message: Message,
         blobs: &hivemind_core::blobs::BlobStore,
+        recipients: Vec<RecipientState>,
     ) -> Self {
         Self {
+            recipients: recipients
+                .into_iter()
+                .map(RecipientDelivery::from)
+                .collect(),
             id: message.id.to_string(),
             thread_id: message.thread_id.to_string(),
             in_reply_to: message.in_reply_to.map(|u| u.to_string()),
