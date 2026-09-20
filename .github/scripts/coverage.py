@@ -27,6 +27,17 @@ import sys
 from dataclasses import dataclass
 
 
+# What "nothing was measured" turned out to mean, both times it has happened.
+# The verdict on its own said that much and no more, and working out which of
+# these it was cost half an hour (#91).
+HINT = (
+    "  nothing to measure usually means the ignore expression matched every"
+    " file — llvm-cov matches it against the *absolute* path, so a worktree"
+    " directory called something-tests will do it — or that the profile data"
+    " is stale: cargo llvm-cov clean --workspace"
+)
+
+
 @dataclass(frozen=True)
 class Lines:
     """The line coverage totals, as llvm-cov counts them."""
@@ -147,6 +158,10 @@ def main(argv: list[str]) -> int:
     ok, line = verdict(measured, floor)
     print(line, flush=True)
     if not ok:
+        # Only where the report ran and still produced no number. A command
+        # that died has its own diagnosis, and this would talk over it.
+        if done.returncode == 0 and measured is None:
+            print(HINT, file=sys.stderr)
         # The command's own diagnosis of why there is no number.
         sys.stderr.write(done.stderr)
         return 1

@@ -21,7 +21,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 JUSTFILE = pathlib.Path(__file__).resolve().parents[3] / "justfile"
 
-from coverage import Lines, line_totals, main, parse, verdict  # noqa: E402
+from coverage import HINT, Lines, line_totals, main, parse, verdict  # noqa: E402
 
 
 def export(count=1000, covered=900, percent=90.0) -> str:
@@ -146,6 +146,8 @@ class Main(unittest.TestCase):
             )
         self.assertEqual(code, 1)
         self.assertIn("FAILED", out.getvalue())
+        # The command said why it failed; a guess on top of that is noise.
+        self.assertNotIn(HINT, err.getvalue())
 
     def test_a_report_command_that_prints_json_but_fails_is_not_a_pass(self):
         # Exit status and a parseable number are both required; either alone is
@@ -174,6 +176,42 @@ class Main(unittest.TestCase):
             )
         self.assertEqual(code, 1)
         self.assertIn("FAILED", out.getvalue())
+
+    def test_nothing_measured_says_where_to_look(self):
+        # The verdict alone cost half an hour: it said nothing was measured and
+        # not why, and the why was the ignore expression matching everything
+        # because the worktree was called `split-local-tests` (#91).
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            code = main(
+                [
+                    "coverage.py",
+                    "--floor",
+                    "85",
+                    "--",
+                    sys.executable,
+                    "-c",
+                    "print('error: no coverage data')",
+                ]
+            )
+        self.assertEqual(code, 1)
+        self.assertIn(HINT, err.getvalue())
+
+    def test_a_real_number_carries_no_hint(self):
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            main(
+                [
+                    "coverage.py",
+                    "--floor",
+                    "85",
+                    "--",
+                    sys.executable,
+                    "-c",
+                    f"print({export()!r})",
+                ]
+            )
+        self.assertNotIn(HINT, err.getvalue())
 
     def test_no_command_is_refused(self):
         with contextlib.redirect_stderr(io.StringIO()):
