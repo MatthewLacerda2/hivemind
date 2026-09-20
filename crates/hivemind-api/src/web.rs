@@ -768,7 +768,6 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
-    use hivemind_core::crypto::SigningKey;
     use hivemind_core::peer::NodeId;
     use http_body_util::BodyExt as _;
     use tower::ServiceExt as _;
@@ -777,11 +776,15 @@ mod tests {
 
     fn app() -> (tempfile::TempDir, Router, Arc<MailService>) {
         let dir = tempfile::tempdir().expect("temp dir");
-        let identity = NodeId::from_certificate_der(b"this node");
+        // A real certificate and key. With the placeholder that stood here,
+        // anything reaching the network failed while building the TLS
+        // configuration, so a test about an address that does not answer never
+        // contacted an address at all (#57).
+        let identity = hivemind_core::identity::Identity::from_seed([3u8; 32]).expect("identity");
         let node = NodeDescription {
-            id: identity,
-            certificate: b"this node".to_vec(),
-            private_key: Vec::new(),
+            id: identity.node_id(),
+            certificate: identity.certificate_der().to_vec(),
+            private_key: identity.private_key_pkcs8().expect("key"),
             name: "test".to_owned(),
             owner: Some("tester".to_owned()),
             callback_host: "127.0.0.1".to_owned(),
@@ -793,8 +796,7 @@ mod tests {
             tailscale: hivemind_core::config::Tailscale::Auto,
         };
         let service = Arc::new(
-            MailService::open(dir.path(), node, SigningKey::from_bytes(&[11u8; 32]))
-                .expect("service"),
+            MailService::open(dir.path(), node, identity.signing_key().clone()).expect("service"),
         );
         (dir, router(Arc::clone(&service)), service)
     }
@@ -820,7 +822,14 @@ mod tests {
         (status, String::from_utf8_lossy(&bytes).into_owned())
     }
 
-    async fn post_form(router: &Router, path: &str, form: &str) -> (StatusCode, Option<String>) {
+    /// The status, any `Location`, and the body — a handler that answers 200
+    /// with nothing in it is not the same as one that re-renders the page, and
+    /// only the body tells them apart (#57).
+    async fn post_form(
+        router: &Router,
+        path: &str,
+        form: &str,
+    ) -> (StatusCode, Option<String>, String) {
         let response = router
             .clone()
             .oneshot(
@@ -839,7 +848,58 @@ mod tests {
             .get("location")
             .and_then(|v| v.to_str().ok())
             .map(ToOwned::to_owned);
-        (status, location)
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        (
+            status,
+            location,
+            String::from_utf8_lossy(&bytes).into_owned(),
+        )
+    }
+
+    /// A POST with no body, for the routes whose whole input is the path.
+    async fn post(router: &Router, path: &str) -> (StatusCode, String) {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let status = response.status();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    async fn content_type(router: &Router, path: &str) -> Option<String> {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .map(ToOwned::to_owned)
     }
 
     fn send_to_self(service: &Arc<MailService>, subject: &str, body: &str) -> ulid::Ulid {
@@ -939,9 +999,21 @@ mod tests {
     async fn contacting_an_address_that_does_not_answer_stays_on_the_page_and_says_so() {
         // A redirect to the list would look as though it had worked.
         let (_dir, router, _service) = app();
-        let (status, location) = post_form(&router, "/peers/join", "host=127.0.0.1%3A1").await;
+        let (status, location, html) =
+            post_form(&router, "/peers/join", "host=127.0.0.1%3A1").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(location, None, "no redirect when nothing was reached");
+        // The status and the missing redirect are also what an empty answer
+        // looks like, so the page has to be there and has to carry the
+        // complaint.
+        assert!(
+            html.contains("<main id=\"main\">"),
+            "the peers page: {html}"
+        );
+        assert!(
+            html.contains("127.0.0.1:1"),
+            "the page should name the address that did not answer: {html}"
+        );
     }
 
     #[tokio::test]
@@ -978,7 +1050,7 @@ mod tests {
         let id = send_to_self(&service, "question", "what time?");
         let (_, message) = service.get(id).expect("get");
 
-        let (status, location) = post_form(
+        let (status, location, _) = post_form(
             &router,
             &format!("/thread/{}/reply", message.thread_id),
             "body=one+o%27clock",
@@ -1055,6 +1127,74 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(css.contains("prefers-color-scheme"), "SPEC §11 asks for it");
         assert!(css.contains(":focus-visible"), "and keyboard navigation");
+    }
+
+    #[tokio::test]
+    async fn an_error_page_escapes_what_it_quotes() {
+        // The error pages are built by hand rather than by askama, so the
+        // escaping is this module's own and nothing was asserting it: a sweep
+        // replaced `escape` with the empty string and with "xyzzy", and both
+        // survived (#57). The id in the path reaches the page through the
+        // error's detail, so it is attacker-controlled text.
+        let (_dir, router, _service) = app();
+
+        let (status, html) =
+            post(&router, "/peers/%3Cscript%3Ealert(1)%3C%2Fscript%3E/remove").await;
+
+        // 403, because an id this node does not know is an id it is not
+        // paired with (SPEC §7.3).
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            !html.contains("<script>"),
+            "the id must not reach the page as markup: {html}"
+        );
+        assert!(
+            html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
+            "and it should still say which id was asked for: {html}"
+        );
+    }
+
+    #[test]
+    fn a_size_reads_the_way_a_person_would_say_it() {
+        // Every arithmetic operation in `human_size` was replaceable, and so
+        // was the whole function (#57): the sizes render during the page
+        // tests and nothing looked at them. The boundaries are what a unit
+        // gets wrong.
+        for (bytes, expected) in [
+            (0u64, "0 B"),
+            (1, "1 B"),
+            (1023, "1023 B"),
+            (1024, "1.0 KiB"),
+            (1536, "1.5 KiB"),
+            (1024 * 1024 - 1, "1024.0 KiB"),
+            (1024 * 1024, "1.0 MiB"),
+            (10 * 1024 * 1024, "10.0 MiB"),
+            (1024 * 1024 * 1024, "1.0 GiB"),
+            (2560 * 1024 * 1024, "2.5 GiB"),
+        ] {
+            assert_eq!(human_size(bytes), expected, "{bytes} bytes");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_asset_is_served_as_the_type_it_is() {
+        // A stylesheet served as `application/octet-stream` is a stylesheet no
+        // browser applies, and the page tests never looked at the header:
+        // deleting each arm of the content-type match survived (#57).
+        let (_dir, router, _) = app();
+
+        assert_eq!(
+            content_type(&router, "/assets/hivemind.css")
+                .await
+                .as_deref(),
+            Some("text/css; charset=utf-8")
+        );
+        assert_eq!(
+            content_type(&router, "/assets/hivemind.js")
+                .await
+                .as_deref(),
+            Some("text/javascript; charset=utf-8")
+        );
     }
 
     #[tokio::test]
