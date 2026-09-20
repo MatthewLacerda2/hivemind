@@ -861,6 +861,47 @@ mod tests {
         )
     }
 
+    /// A POST with no body, for the routes whose whole input is the path.
+    async fn post(router: &Router, path: &str) -> (StatusCode, String) {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let status = response.status();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    async fn content_type(router: &Router, path: &str) -> Option<String> {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .map(ToOwned::to_owned)
+    }
+
     fn send_to_self(service: &Arc<MailService>, subject: &str, body: &str) -> ulid::Ulid {
         service
             .send(
@@ -1086,6 +1127,74 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(css.contains("prefers-color-scheme"), "SPEC §11 asks for it");
         assert!(css.contains(":focus-visible"), "and keyboard navigation");
+    }
+
+    #[tokio::test]
+    async fn an_error_page_escapes_what_it_quotes() {
+        // The error pages are built by hand rather than by askama, so the
+        // escaping is this module's own and nothing was asserting it: a sweep
+        // replaced `escape` with the empty string and with "xyzzy", and both
+        // survived (#57). The id in the path reaches the page through the
+        // error's detail, so it is attacker-controlled text.
+        let (_dir, router, _service) = app();
+
+        let (status, html) =
+            post(&router, "/peers/%3Cscript%3Ealert(1)%3C%2Fscript%3E/remove").await;
+
+        // 403, because an id this node does not know is an id it is not
+        // paired with (SPEC §7.3).
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            !html.contains("<script>"),
+            "the id must not reach the page as markup: {html}"
+        );
+        assert!(
+            html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
+            "and it should still say which id was asked for: {html}"
+        );
+    }
+
+    #[test]
+    fn a_size_reads_the_way_a_person_would_say_it() {
+        // Every arithmetic operation in `human_size` was replaceable, and so
+        // was the whole function (#57): the sizes render during the page
+        // tests and nothing looked at them. The boundaries are what a unit
+        // gets wrong.
+        for (bytes, expected) in [
+            (0u64, "0 B"),
+            (1, "1 B"),
+            (1023, "1023 B"),
+            (1024, "1.0 KiB"),
+            (1536, "1.5 KiB"),
+            (1024 * 1024 - 1, "1024.0 KiB"),
+            (1024 * 1024, "1.0 MiB"),
+            (10 * 1024 * 1024, "10.0 MiB"),
+            (1024 * 1024 * 1024, "1.0 GiB"),
+            (2560 * 1024 * 1024, "2.5 GiB"),
+        ] {
+            assert_eq!(human_size(bytes), expected, "{bytes} bytes");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_asset_is_served_as_the_type_it_is() {
+        // A stylesheet served as `application/octet-stream` is a stylesheet no
+        // browser applies, and the page tests never looked at the header:
+        // deleting each arm of the content-type match survived (#57).
+        let (_dir, router, _) = app();
+
+        assert_eq!(
+            content_type(&router, "/assets/hivemind.css")
+                .await
+                .as_deref(),
+            Some("text/css; charset=utf-8")
+        );
+        assert_eq!(
+            content_type(&router, "/assets/hivemind.js")
+                .await
+                .as_deref(),
+            Some("text/javascript; charset=utf-8")
+        );
     }
 
     #[tokio::test]
