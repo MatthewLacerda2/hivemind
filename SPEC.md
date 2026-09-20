@@ -255,6 +255,7 @@ GET    /api/v1/peers                       members + seen-not-in-the-group, with
 POST   /api/v1/peers/join      {host}      contact a node discovery cannot find
 DELETE /api/v1/peers/{id}
 POST   /api/v1/peers/refresh               re-run discovery now
+POST   /api/v1/peers/{id}/forget-addr {addr}  drop one address, keeping the peer
 
 GET    /api/v1/group                       joined? created when, member count — never the key
 POST   /api/v1/group/create    {replace?}  new key; returns the code once; refuses a node in a group without `replace`
@@ -353,16 +354,17 @@ hivemind status                       # daemon up? addresses, peer count, unread
 hivemind group [create [--replace]]   # show the group; `create` makes a new key and prints the code (rotation is `create --replace`)
 hivemind pair <code> [--replace]      # store the key; the one command a new machine runs after `init`
 hivemind join <host[:port]>           # contact a node discovery cannot find
-hivemind peers [refresh|remove <id>]  # online, last seen, sessions
+hivemind peers [refresh|remove <id>|forget-addr <id> <host:port>]  # online, last seen, sessions
 hivemind send <to> -s <subject> [-a file]... [body | -]   # body from arg or stdin
-hivemind inbox [--unread] [--json]
+hivemind inbox [--unread] [--box <new|cur|out|sent>] [--json]  # new + cur by default
+hivemind sent                         # out + sent: what left here, delivered or not
 hivemind read <id>
 hivemind reply <id> [body | -]
 hivemind reindex
 hivemind hook check|install|uninstall
 hivemind mcp install|print
 hivemind service install|uninstall|restart|logs
-hivemind doctor                       # checks: daemon, ports, tailscale, claude on PATH, hooks, mDNS
+hivemind doctor                       # checks: daemon, ports, tailscale, claude on PATH, hooks, mDNS, peer addresses
 ```
 
 `clap` with derive. `--json` on every read command. Colors via `owo-colors`, respecting `NO_COLOR`. The CLI talks to the daemon over `127.0.0.1:8401`; it never touches `mail/` directly except `hook check` (read-only index) and `reindex` (daemon must be stopped or it takes a lock).
