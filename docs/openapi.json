@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "hivemind local API",
-    "description": "The loopback API on 127.0.0.1:8401. No authentication: reachability is the authorization, and the listener refuses to bind anywhere else.\n\n## Problem types\n\nErrors are RFC 9457 `application/problem+json`. The `type` member is stable:\n\n- `/problems/message-not-found` — No such message (404)\n- `/problems/ambiguous-id` — Id matches more than one message (422)\n- `/problems/invalid-query` — Query is not one this endpoint understands (400)\n- `/problems/invalid-message` — Message is not acceptable (422)\n- `/problems/no-recipients` — Message has no recipients (422)\n- `/problems/not-paired` — Not paired (403)\n- `/problems/already-in-group` — Already in a group (409)\n- `/problems/invalid-group-code` — Not a group code (422)\n- `/problems/identity-mismatch` — Identity does not match the certificate (400)\n- `/problems/bad-signature` — Signature does not verify (400)\n- `/problems/peer-unreachable` — Peer could not be reached (502)\n- `/problems/blob-not-found` — No such attachment (404)\n- `/problems/blob-too-large` — Attachment is too large (413)\n- `/problems/unsafe-attachment-name` — Attachment name is not a file name (422)\n- `/problems/internal` — Internal error (500)",
+    "description": "The loopback API on 127.0.0.1:8401. No authentication: reachability is the authorization, and the listener refuses to bind anywhere else.\n\n## Problem types\n\nErrors are RFC 9457 `application/problem+json`. The `type` member is stable:\n\n- `/problems/message-not-found` — No such message (404)\n- `/problems/ambiguous-id` — Id matches more than one message (422)\n- `/problems/invalid-query` — Query is not one this endpoint understands (400)\n- `/problems/invalid-message` — Message is not acceptable (422)\n- `/problems/no-recipients` — Message has no recipients (422)\n- `/problems/not-paired` — Not paired (403)\n- `/problems/already-in-group` — Already in a group (409)\n- `/problems/invalid-group-code` — Not a group code (422)\n- `/problems/identity-mismatch` — Identity does not match the certificate (400)\n- `/problems/bad-signature` — Signature does not verify (400)\n- `/problems/peer-unreachable` — Peer could not be reached (502)\n- `/problems/blob-not-found` — No such attachment (404)\n- `/problems/blob-too-large` — Attachment is too large (413)\n- `/problems/unsafe-attachment-name` — Attachment name is not a file name (422)\n- `/problems/addr-not-found` — No such address (404)\n- `/problems/internal` — Internal error (500)",
     "contact": {
       "name": "The hivemind contributors"
     },
@@ -673,6 +673,67 @@
         }
       }
     },
+    "/api/v1/peers/{id}/forget-addr": {
+      "post": {
+        "tags": [
+          "peers"
+        ],
+        "operationId": "forget_addr",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The peer's full or short id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ForgetAddrRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PeerSummary"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/sessions": {
       "get": {
         "tags": [
@@ -913,6 +974,20 @@
             "type": "string",
             "description": "What every other machine pastes into `hivemind pair`.",
             "example": "hm-aaaq-eaye-auda-ocaj-bifq-ydio-b4"
+          }
+        }
+      },
+      "ForgetAddrRequest": {
+        "type": "object",
+        "description": "Which of a peer's addresses to forget.",
+        "required": [
+          "addr"
+        ],
+        "properties": {
+          "addr": {
+            "type": "string",
+            "description": "The address, exactly as `hivemind peers` and `doctor` print it.",
+            "example": "127.0.0.1:8400"
           }
         }
       },

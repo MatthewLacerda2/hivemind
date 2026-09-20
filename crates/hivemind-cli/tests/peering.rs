@@ -50,6 +50,103 @@ fn two_daemons_pair_and_exchange_mail() {
 }
 
 #[test]
+fn an_address_pointing_at_this_machine_does_not_come_back_out_of_the_file() {
+    // #29, over the thing that actually went wrong: two machines paired before
+    // #23 each wrote the other down at its *own* loopback, and delivery tries
+    // addresses in order, so the first attempt went to the local peer port.
+    // The fix on the way in does nothing for a file that already says it, and
+    // the file is what a person upgrading brings with them.
+    let alice = Daemon::start("alice");
+    let mut bob = Daemon::start("bob");
+    pair(&alice, &bob);
+
+    let peers = json(&bob.run(&["peers", "--json"]));
+    let alices_id = peers[0]["id"].as_str().expect("alice's id").to_owned();
+    let poison = format!("127.0.0.1:{}", bob.peer_port);
+
+    // By hand, into the file, exactly as a daemon from before #23 left it.
+    bob.stop();
+    let path = bob.home().join("peers.toml");
+    let book = std::fs::read_to_string(&path).expect("bob's address book");
+    let poisoned = format!(
+        "{book}\n[[peers.\"{alices_id}\".addrs]]\n\
+         host = \"127.0.0.1\"\nport = {}\nsource = \"manual\"\n",
+        bob.peer_port
+    );
+    std::fs::write(&path, &poisoned).expect("poison it");
+
+    bob.restart("bob");
+    let peers = json(&bob.run(&["peers", "--json"]));
+    let addrs: Vec<String> = peers[0]["addrs"]
+        .as_array()
+        .expect("addresses")
+        .iter()
+        .map(|a| a.as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert!(
+        !addrs.contains(&poison),
+        "bob's own peer port must not be a way to reach alice: {addrs:?}"
+    );
+    assert!(
+        addrs.contains(&format!("127.0.0.1:{}", alice.peer_port)),
+        "and alice's real address must survive it: {addrs:?}"
+    );
+    // Mail still flows, which is the half `hivemind peers remove` used to cost.
+    alice.run(&[
+        "send",
+        &bob.node_id(),
+        "-s",
+        "after the repair",
+        "--",
+        "hello",
+    ]);
+    bob.wait_for("after the repair");
+}
+
+#[test]
+fn one_address_can_be_forgotten_without_forgetting_the_peer() {
+    // The escape hatch #29 asks for. `join` is how a second address arrives:
+    // the same machine named differently, which is what a peer that moved
+    // networks leaves behind. Forgetting the peer to be rid of one of them
+    // would spend the whole trust relationship on it.
+    let alice = Daemon::start("alice");
+    let bob = Daemon::start("bob");
+    pair(&alice, &bob);
+    bob.run(&["join", &format!("localhost:{}", alice.peer_port)]);
+
+    let peers = json(&bob.run(&["peers", "--json"]));
+    let alices_short = peers[0]["short_id"].as_str().expect("short").to_owned();
+    let stale = format!("localhost:{}", alice.peer_port);
+    assert!(
+        peers[0]["addrs"]
+            .as_array()
+            .expect("addresses")
+            .iter()
+            .any(|a| a.as_str() == Some(stale.as_str())),
+        "the second name should be in the book to start with: {}",
+        peers[0]["addrs"]
+    );
+
+    let said = bob.run(&["peers", "forget-addr", &alices_short, &stale]);
+    assert!(said.contains(&alices_short), "it should say whose: {said}");
+
+    let peers = json(&bob.run(&["peers", "--json"]));
+    let addrs = peers[0]["addrs"].to_string();
+    assert!(!addrs.contains("localhost"), "the address goes: {addrs}");
+    assert!(
+        addrs.contains(&format!("127.0.0.1:{}", alice.peer_port)),
+        "the other one stays: {addrs}"
+    );
+    assert_eq!(peers[0]["paired"], true, "and so does the peer");
+    assert!(
+        !std::fs::read_to_string(bob.home().join("peers.toml"))
+            .expect("read the book")
+            .contains("localhost"),
+        "and it reaches the file, or the next start has it again"
+    );
+}
+
+#[test]
 fn a_machine_with_another_groups_code_is_seen_and_never_admitted() {
     // The peer port is reachable by anyone (ADR 0010); being reachable is not
     // being trusted. Both sides see the other, and neither can mail it.

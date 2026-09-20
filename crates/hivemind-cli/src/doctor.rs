@@ -105,12 +105,14 @@ pub(crate) fn checks(
     api: &str,
     daemon: Option<&DaemonFacts>,
     tailscale: Tailscale,
+    peer_port: u16,
 ) -> Vec<Check> {
     vec![
         daemon_check(api, daemon),
         peer_port_check(daemon),
         home_check(home),
         identity_check(home),
+        addresses_check(home, peer_port),
         tailscale_check(tailscale),
         claude_check(),
         hooks_check(),
@@ -189,6 +191,52 @@ fn home_check(home: &Path) -> Check {
             "data",
             format!("{} is not writable: {error}", home.display()),
             "check the directory's permissions and owner",
+        ),
+    }
+}
+
+/// Does the address book hold an address that cannot reach anybody?
+///
+/// Read from the file rather than asked of the daemon, because the daemon
+/// discards these as it loads the book and so would never report one (#29). The
+/// line is still in `peers.toml`, and stays there until something writes the
+/// book, so this is the one place a person finds out it is there.
+fn addresses_check(home: &Path, peer_port: u16) -> Check {
+    let book = match hivemind_core::peerbook::PeerBook::load(home, peer_port) {
+        Ok(book) => book,
+        // A book that will not parse is a different fault with a different
+        // answer, and the daemon check has already said the daemon is down.
+        Err(error) => {
+            return Check::bad(
+                "addresses",
+                format!(
+                    "{} has an address book that will not load: {error}",
+                    home.display()
+                ),
+                "fix or move peers.toml — every peer in it would have to pair again",
+            );
+        }
+    };
+
+    match book.discarded() {
+        [] => Check::good("addresses", "none point back at this machine"),
+        [first, rest @ ..] => Check::bad(
+            "addresses",
+            format!(
+                "peers.toml gives {} as the way to reach {}, which is this machine{}",
+                first.authority,
+                first.peer.short(),
+                if rest.is_empty() {
+                    String::new()
+                } else {
+                    format!(", and {} more like it", rest.len())
+                }
+            ),
+            format!(
+                "the daemon ignores it; `hivemind peers forget-addr {} {}` takes it out of the file",
+                first.peer.short(),
+                first.authority
+            ),
         ),
     }
 }
@@ -361,7 +409,11 @@ pub(crate) async fn run(home: Option<&Path>, api: &str, json: bool) -> anyhow::R
     // defaults are the right answer, because they are what the daemon would
     // have refused to start with.
     let config = Config::load(&home).unwrap_or_default();
-    let checks = checks(&home, api, daemon.as_ref(), config.tailscale);
+    // The running daemon's port wins over the file: a `peer_port` edited but
+    // not restarted into would have this judging addresses against a listener
+    // that is not there.
+    let peer_port = daemon.as_ref().map_or(config.peer_port, |f| f.peer_port);
+    let checks = checks(&home, api, daemon.as_ref(), config.tailscale, peer_port);
 
     if json {
         let rows: Vec<serde_json::Value> = checks
@@ -449,6 +501,70 @@ mod tests {
             peers: 2,
             discovery: true,
         }
+    }
+
+    /// An address book as a machine that paired before #23 has it: the peer's
+    /// real address, and this node's own loopback beside it. Written through
+    /// `PeerBook` with a different own-port, which is how such a file came to
+    /// exist — the daemon that wrote it did not know the rule.
+    fn book_with_our_own_loopback(dir: &Path) -> String {
+        use hivemind_core::peerbook::{CertificateDer, Peer, PeerAddr, PeerBook};
+
+        let certificate = CertificateDer::new(b"their certificate".to_vec());
+        let id = certificate.node_id();
+        let mut book = PeerBook::load(dir, 9999).expect("an empty book");
+        book.insert_peer(Peer {
+            id,
+            name: "arch".to_owned(),
+            owner: Some("matthew".to_owned()),
+            certificate,
+            addrs: vec![
+                PeerAddr::manual("100.102.24.1", 8400),
+                PeerAddr::manual("127.0.0.1", 8400),
+            ],
+            paired_at: chrono::Utc::now(),
+            last_seen: None,
+        });
+        book.save().expect("save");
+        id.short()
+    }
+
+    #[test]
+    fn an_address_that_points_at_this_machine_is_named_with_the_way_out() {
+        // #29. The daemon ignores it, so nothing else would ever mention it,
+        // and the file goes on saying that this machine is how to reach
+        // somebody else.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let short = book_with_our_own_loopback(dir.path());
+
+        let check = addresses_check(dir.path(), 8400);
+        assert_eq!(check.health, Health::Bad);
+        assert!(
+            check.detail.contains("127.0.0.1:8400") && check.detail.contains(&short),
+            "it has to name the line and whose it is: {check:?}"
+        );
+        let fix = check.fix.as_deref().unwrap_or_default();
+        assert!(
+            fix.contains(&format!("peers forget-addr {short} 127.0.0.1:8400")),
+            "and the command that removes it, ready to paste: {fix}"
+        );
+    }
+
+    #[test]
+    fn the_same_book_is_fine_for_a_daemon_on_another_port() {
+        // Two daemons on one machine is a real arrangement and loopback is the
+        // truth there. A check that shouted at it would teach people to ignore
+        // this one.
+        let dir = tempfile::tempdir().expect("temp dir");
+        book_with_our_own_loopback(dir.path());
+
+        assert_eq!(addresses_check(dir.path(), 8401).health, Health::Good);
+    }
+
+    #[test]
+    fn a_machine_with_no_address_book_yet_has_nothing_wrong_with_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        assert_eq!(addresses_check(dir.path(), 8400).health, Health::Good);
     }
 
     #[test]
@@ -636,6 +752,7 @@ mod tests {
             "http://127.0.0.1:1",
             None,
             Tailscale::Auto,
+            8400,
         );
 
         for check in &checks {

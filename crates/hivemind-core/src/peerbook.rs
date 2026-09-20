@@ -57,6 +57,29 @@ impl PeerAddr {
         }
     }
 
+    /// Does this address point at this node's own peer listener rather than at
+    /// somebody else?
+    ///
+    /// This is the one place that decides it, because the same judgement is
+    /// needed twice: a handshake must not record such an address (#23), and a
+    /// file written before that fix must not have it read back (#29). Two
+    /// machines that met in the first real test both wrote `127.0.0.1:8400`
+    /// down beside the other's real address, and delivery tries addresses in
+    /// order — at best it reached the peer's own daemon, at worst whatever
+    /// else was listening on that port.
+    ///
+    /// The **port** carries as much of the rule as the host. A loopback
+    /// address on some *other* port is a second daemon on this machine, where
+    /// loopback is the truth — that is what every integration test here is, and
+    /// discarding it would break the case #23 was careful to keep.
+    ///
+    /// `0.0.0.0` counts with the loopback addresses: "every interface on this
+    /// machine" is not a way to reach another one either.
+    #[must_use]
+    pub fn points_at_this_node(&self, own_peer_port: u16) -> bool {
+        self.port == own_peer_port && host_is_this_machine(&self.host)
+    }
+
     /// `host:port`, for a connection attempt.
     #[must_use]
     pub fn authority(&self) -> String {
@@ -66,6 +89,35 @@ impl PeerAddr {
         }
         format!("{}:{}", self.host, self.port)
     }
+}
+
+/// Is `host` a name for the machine this code is running on?
+///
+/// A literal is judged by what it is; a name is only judged if it is
+/// `localhost`, because a hostname is not resolved here and a `MagicDNS` name
+/// outlives the address behind it (#23).
+fn host_is_this_machine(host: &str) -> bool {
+    let bare = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    match bare.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.is_loopback() || ip.is_unspecified(),
+        Err(_) => bare.eq_ignore_ascii_case("localhost"),
+    }
+}
+
+/// An address the address book refused to read back, and whose peer it was
+/// filed against.
+///
+/// Kept so that nothing vanishes without saying so: the daemon logs these at
+/// start and `hivemind doctor` names the line still in the file (#29).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscardedAddr {
+    /// The peer it was filed against.
+    pub peer: NodeId,
+    /// `host:port`, as it reads in the file.
+    pub authority: String,
 }
 
 /// A machine we have paired with (SPEC §4.2).
@@ -222,6 +274,11 @@ pub enum PeerBookError {
 pub struct PeerBook {
     path: PathBuf,
     file: PeerBookFile,
+    /// This node's own peer port, which is half of the rule in
+    /// [`PeerAddr::points_at_this_node`].
+    own_peer_port: u16,
+    /// What the file holds that this node will not use.
+    discarded: Vec<DiscardedAddr>,
 }
 
 impl PeerBook {
@@ -231,7 +288,7 @@ impl PeerBook {
     /// [`PeerBookError::Malformed`] if the file will not parse, or
     /// [`PeerBookError::FingerprintMismatch`] if a stored certificate does not
     /// hash to the id it is filed under.
-    pub fn load(dir: &Path) -> Result<Self, PeerBookError> {
+    pub fn load(dir: &Path, own_peer_port: u16) -> Result<Self, PeerBookError> {
         let path = dir.join("peers.toml");
         let file = match std::fs::read_to_string(&path) {
             Ok(text) => {
@@ -260,14 +317,50 @@ impl PeerBook {
             }
         };
 
-        Ok(Self { path, file })
+        let mut book = Self {
+            path,
+            file,
+            own_peer_port,
+            discarded: Vec::new(),
+        };
+        book.discard_addrs_that_point_here();
+        Ok(book)
+    }
+
+    /// What the file holds and this node refuses to use (SPEC §5.4, #29).
+    #[must_use]
+    pub fn discarded(&self) -> &[DiscardedAddr] {
+        &self.discarded
+    }
+
+    /// Forget one address of one peer, keeping the peer.
+    ///
+    /// Returns whether it was there — including when the read discarded it,
+    /// which is the case `doctor` sends people here for: the address is not
+    /// among the peer's any more, and the file still says it.
+    pub fn forget_addr(&mut self, id: NodeId, authority: &str) -> bool {
+        let discarded = self.discarded.len();
+        self.discarded
+            .retain(|d| d.peer != id || d.authority != authority);
+        let was_discarded = self.discarded.len() != discarded;
+
+        let Some(peer) = self.file.peers.get_mut(&id.to_string()) else {
+            return was_discarded;
+        };
+        let held = peer.addrs.len();
+        peer.addrs.retain(|a| a.authority() != authority);
+        peer.addrs.len() != held || was_discarded
     }
 
     /// Write the book back, atomically.
     ///
+    /// Takes `&mut self` because it settles what the file says: an address the
+    /// read discarded is gone from the file once this returns, so the list of
+    /// discards — which is a statement about the file — is emptied with it.
+    ///
     /// # Errors
     /// [`PeerBookError::Io`] if the write or rename fails.
-    pub fn save(&self) -> Result<(), PeerBookError> {
+    pub fn save(&mut self) -> Result<(), PeerBookError> {
         let io = |context: String| move |source| PeerBookError::Io { context, source };
 
         if let Some(parent) = self.path.parent() {
@@ -286,7 +379,37 @@ impl PeerBook {
         std::fs::write(&temp, text.as_bytes())
             .map_err(io(format!("could not write {}", temp.display())))?;
         std::fs::rename(&temp, &self.path)
-            .map_err(io(format!("could not move {} into place", temp.display())))
+            .map_err(io(format!("could not move {} into place", temp.display())))?;
+
+        self.discarded.clear();
+        Ok(())
+    }
+
+    /// Take out every address that is this node's own listener.
+    ///
+    /// In memory, and not written back here: `load` is a read, and a read that
+    /// rewrites its input would fail on a read-only home and would eat the
+    /// evidence if this rule were ever found to be wrong. `peers.toml` is the
+    /// source of truth (ADR 0002), so it is edited when something asks — the
+    /// next save for any reason writes the corrected book, and
+    /// `hivemind peers forget-addr` asks for it now.
+    fn discard_addrs_that_point_here(&mut self) {
+        let own_port = self.own_peer_port;
+        let mut discarded = Vec::new();
+        for peer in self.file.peers.values_mut() {
+            let id = peer.id;
+            peer.addrs.retain(|addr| {
+                if addr.points_at_this_node(own_port) {
+                    discarded.push(DiscardedAddr {
+                        peer: id,
+                        authority: addr.authority(),
+                    });
+                    return false;
+                }
+                true
+            });
+        }
+        self.discarded = discarded;
     }
 
     /// Every paired peer.
@@ -338,6 +461,9 @@ impl PeerBook {
 mod tests {
     use super::*;
 
+    /// The peer port these tests pretend this node's listener is on.
+    const OWN_PORT: u16 = 8400;
+
     fn certificate(seed: &[u8]) -> CertificateDer {
         CertificateDer::new(seed.to_vec())
     }
@@ -363,19 +489,19 @@ mod tests {
     #[test]
     fn a_missing_address_book_is_empty_not_an_error() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let book = PeerBook::load(dir.path()).expect("load");
+        let book = PeerBook::load(dir.path(), OWN_PORT).expect("load");
         assert_eq!(book.peers().count(), 0);
     }
 
     #[test]
     fn a_peer_survives_a_save_and_load() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let mut book = PeerBook::load(dir.path()).expect("load");
+        let mut book = PeerBook::load(dir.path(), OWN_PORT).expect("load");
         let peer = peer(b"their certificate", Some("rafael"));
         book.insert_peer(peer.clone());
         book.save().expect("save");
 
-        let reloaded = PeerBook::load(dir.path()).expect("reload");
+        let reloaded = PeerBook::load(dir.path(), OWN_PORT).expect("reload");
         assert_eq!(reloaded.peer(peer.id), Some(&peer));
         assert!(reloaded.is_paired(peer.id));
     }
@@ -383,7 +509,7 @@ mod tests {
     #[test]
     fn saving_leaves_no_temporary_file_behind() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let book = PeerBook::load(dir.path()).expect("load");
+        let mut book = PeerBook::load(dir.path(), OWN_PORT).expect("load");
         book.save().expect("save");
 
         let names: Vec<String> = std::fs::read_dir(dir.path())
@@ -399,14 +525,14 @@ mod tests {
         // The id *is* the fingerprint. A file that disagrees with itself would
         // have TLS pinning against a certificate nobody admitted (SPEC §6.3).
         let dir = tempfile::tempdir().expect("temp dir");
-        let mut book = PeerBook::load(dir.path()).expect("load");
+        let mut book = PeerBook::load(dir.path(), OWN_PORT).expect("load");
         let mut peer = peer(b"their certificate", None);
         peer.certificate = certificate(b"a different certificate entirely");
         book.insert_peer(peer);
         book.save().expect("save");
 
         assert!(matches!(
-            PeerBook::load(dir.path()),
+            PeerBook::load(dir.path(), OWN_PORT),
             Err(PeerBookError::FingerprintMismatch { .. })
         ));
     }
@@ -414,14 +540,14 @@ mod tests {
     #[test]
     fn an_unpaired_node_is_not_paired() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let book = PeerBook::load(dir.path()).expect("load");
+        let book = PeerBook::load(dir.path(), OWN_PORT).expect("load");
         assert!(!book.is_paired(certificate(b"a stranger").node_id()));
     }
 
     #[test]
     fn owner_lookup_ignores_case_because_a_human_typed_it() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let mut book = PeerBook::load(dir.path()).expect("load");
+        let mut book = PeerBook::load(dir.path(), OWN_PORT).expect("load");
         book.insert_peer(peer(b"laptop", Some("Matthew")));
         book.insert_peer(peer(b"desktop!!", Some("matthew")));
         book.insert_peer(peer(b"someone else's", Some("rafael")));
@@ -435,7 +561,7 @@ mod tests {
     #[test]
     fn a_peer_with_no_owner_is_not_reached_by_an_owner_name() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let mut book = PeerBook::load(dir.path()).expect("load");
+        let mut book = PeerBook::load(dir.path(), OWN_PORT).expect("load");
         book.insert_peer(peer(b"anonymous", None));
         assert_eq!(book.peers_owned_by("matthew").count(), 0);
     }
@@ -522,7 +648,7 @@ mod tests {
         // "waiting for a human", which no longer exists; the peers beside
         // them are real pins and must survive the upgrade.
         let dir = tempfile::tempdir().expect("temp dir");
-        let mut book = PeerBook::load(dir.path()).expect("load");
+        let mut book = PeerBook::load(dir.path(), OWN_PORT).expect("load");
         let kept = peer(b"already paired", None);
         let kept_id = kept.id;
         book.insert_peer(kept);
@@ -535,7 +661,7 @@ mod tests {
         );
         std::fs::write(&path, text).expect("write");
 
-        let book = PeerBook::load(dir.path()).expect("an old book must still load");
+        let book = PeerBook::load(dir.path(), OWN_PORT).expect("an old book must still load");
         assert!(book.is_paired(kept_id));
         assert_eq!(book.peers().count(), 1);
     }
@@ -543,7 +669,7 @@ mod tests {
     #[test]
     fn removing_a_peer_reports_whether_it_was_there() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let mut book = PeerBook::load(dir.path()).expect("load");
+        let mut book = PeerBook::load(dir.path(), OWN_PORT).expect("load");
         let peer = peer(b"leaving", None);
         let id = peer.id;
         book.insert_peer(peer);
@@ -561,8 +687,195 @@ mod tests {
         std::fs::write(dir.path().join("peers.toml"), b"[peers\nbroken").expect("write");
 
         assert!(matches!(
-            PeerBook::load(dir.path()),
+            PeerBook::load(dir.path(), OWN_PORT),
             Err(PeerBookError::Malformed { .. })
         ));
+    }
+
+    /// A `peers.toml` as the two machines in #29 ended up with it: the real
+    /// address, and beside it this node's own loopback, written by a handshake
+    /// from before #23 taught each side to believe the socket over the claim.
+    ///
+    /// Written out by hand rather than saved by this module, because the whole
+    /// question is what happens to a file somebody else's version wrote.
+    const POISONED: &str = r#"
+[peers."hm1:nidx-mhdl-c4gx-u3a4-ymm5-jzsx-tcep-baeg-pjdr-vqb2-od2s-6dn6-ig2q"]
+id = "6a07761c6b170d7a6c1cc319d4e6579888f080867a471ac03a70f52f0dbe41b5"
+name = "arch"
+owner = "matthew"
+certificate = "7468656972206365727469666963617465"
+paired_at = "2026-09-18T12:00:00Z"
+
+[[peers."hm1:nidx-mhdl-c4gx-u3a4-ymm5-jzsx-tcep-baeg-pjdr-vqb2-od2s-6dn6-ig2q".addrs]]
+host = "100.102.24.1"
+port = 8400
+source = "manual"
+
+[[peers."hm1:nidx-mhdl-c4gx-u3a4-ymm5-jzsx-tcep-baeg-pjdr-vqb2-od2s-6dn6-ig2q".addrs]]
+host = "127.0.0.1"
+port = 8400
+source = "manual"
+"#;
+
+    /// Write `text` as the address book in a fresh directory.
+    fn book_holding(text: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("peers.toml");
+        std::fs::write(&path, text).expect("write");
+        (dir, path)
+    }
+
+    #[test]
+    fn our_own_loopback_does_not_survive_the_read() {
+        // #29: #23 stopped the handshake recording this, and did nothing for
+        // the file that already said it. Delivery tries addresses in order, so
+        // the first attempt went to this machine's own peer port.
+        let (dir, _) = book_holding(POISONED);
+        let book = PeerBook::load(dir.path(), OWN_PORT).expect("load");
+
+        let peer = book.peers().next().expect("the peer itself must survive");
+        let kept: Vec<String> = peer.addrs.iter().map(PeerAddr::authority).collect();
+        assert_eq!(
+            kept,
+            ["100.102.24.1:8400"],
+            "the real address stays and the loopback goes"
+        );
+
+        let discarded: Vec<&str> = book
+            .discarded()
+            .iter()
+            .map(|d| d.authority.as_str())
+            .collect();
+        assert_eq!(
+            discarded,
+            ["127.0.0.1:8400"],
+            "and what was dropped is remembered, so `doctor` can name it"
+        );
+    }
+
+    #[test]
+    fn a_loopback_address_on_another_port_is_a_second_daemon_and_is_kept() {
+        // Two daemons on one machine is what every integration test is, and
+        // there loopback is the truth. The rule is about the port as much as
+        // the host: only our own listener cannot be somebody else.
+        let (dir, _) = book_holding(POISONED);
+        let book = PeerBook::load(dir.path(), 8401).expect("load");
+
+        let peer = book.peers().next().expect("the peer");
+        assert_eq!(
+            peer.addrs.len(),
+            2,
+            "both addresses are reachable from here"
+        );
+        assert!(book.discarded().is_empty());
+    }
+
+    #[test]
+    fn the_discard_is_not_written_back_by_the_read_itself() {
+        // `load` is a read. The correction holds in memory and reaches the file
+        // the next time the book is written for a reason of its own — which
+        // keeps a read-only home loadable and leaves the evidence in place if
+        // this rule is ever found to be wrong.
+        let (dir, path) = book_holding(POISONED);
+        let before = std::fs::read_to_string(&path).expect("read");
+        let mut book = PeerBook::load(dir.path(), OWN_PORT).expect("load");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            before,
+            "loading must not rewrite the file"
+        );
+
+        book.save().expect("save");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            !text.contains("127.0.0.1"),
+            "and the first save for any reason takes it out for good: {text}"
+        );
+    }
+
+    #[test]
+    fn a_saved_book_has_nothing_left_to_discard() {
+        // `discarded` is a statement about what the file still holds. Left
+        // standing after the save that removed it, `doctor` would report a
+        // line nobody can find and `forget_addr` would claim a hit on it.
+        let (dir, _) = book_holding(POISONED);
+        let mut book = PeerBook::load(dir.path(), OWN_PORT).expect("load");
+        assert_eq!(book.discarded().len(), 1);
+        book.save().expect("save");
+        assert!(book.discarded().is_empty());
+    }
+
+    #[test]
+    fn one_address_can_be_forgotten_without_forgetting_the_peer() {
+        // The escape hatch #29 asks for: losing a whole trust relationship
+        // over one bad line in a list of addresses is out of proportion.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut book = PeerBook::load(dir.path(), OWN_PORT).expect("load");
+        let mut peer = peer(b"two addresses", None);
+        let id = peer.id;
+        peer.learn_addr(PeerAddr::manual("100.64.0.9", 8400));
+        book.insert_peer(peer);
+
+        assert!(book.forget_addr(id, "10.0.0.1:8400"));
+        let left: Vec<String> = book
+            .peer(id)
+            .expect("the peer stays")
+            .addrs
+            .iter()
+            .map(PeerAddr::authority)
+            .collect();
+        assert_eq!(left, ["100.64.0.9:8400"]);
+        assert!(
+            !book.forget_addr(id, "10.0.0.1:8400"),
+            "forgetting it twice is not two hits"
+        );
+        assert!(!book.forget_addr(id, "nowhere:1"));
+    }
+
+    #[test]
+    fn an_address_the_read_discarded_can_still_be_forgotten() {
+        // Otherwise `doctor` would name a line in the file and the command it
+        // recommends would answer "no such address": the daemon dropped it on
+        // the way in, so it is not among the peer's addresses to remove.
+        let (dir, path) = book_holding(POISONED);
+        let mut book = PeerBook::load(dir.path(), OWN_PORT).expect("load");
+        let id = book.peers().next().expect("the peer").id;
+
+        assert!(book.forget_addr(id, "127.0.0.1:8400"));
+        assert!(book.discarded().is_empty());
+        book.save().expect("save");
+        assert!(
+            !std::fs::read_to_string(&path)
+                .expect("read")
+                .contains("127.0.0.1")
+        );
+    }
+
+    #[test]
+    fn only_this_machine_at_our_own_port_points_at_this_node() {
+        for host in [
+            "127.0.0.1",
+            "127.0.1.1",
+            "::1",
+            "[::1]",
+            "localhost",
+            "LOCALHOST",
+            "0.0.0.0",
+        ] {
+            assert!(
+                PeerAddr::manual(host, OWN_PORT).points_at_this_node(OWN_PORT),
+                "{host} at our own port is us"
+            );
+            assert!(
+                !PeerAddr::manual(host, OWN_PORT + 1).points_at_this_node(OWN_PORT),
+                "{host} on another port is another daemon on this machine"
+            );
+        }
+        for host in ["100.102.24.1", "arch.taile.ts.net", "10.0.0.1", "::2"] {
+            assert!(
+                !PeerAddr::manual(host, OWN_PORT).points_at_this_node(OWN_PORT),
+                "{host} is somewhere else"
+            );
+        }
     }
 }

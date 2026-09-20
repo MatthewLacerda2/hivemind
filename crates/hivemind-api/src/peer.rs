@@ -234,6 +234,10 @@ async fn read_delivery(
 /// A peer genuinely on this machine keeps its loopback address, because there
 /// it is true — and that is the case every integration test exercises, which
 /// is why the bug survived to be found on two real machines.
+///
+/// The other half of the same judgement is
+/// [`PeerAddr::points_at_this_node`](hivemind_core::peerbook::PeerAddr::points_at_this_node),
+/// which is what a `peers.toml` written before this fix is read through (#29).
 fn callback_address(caller: &CallerIdentity, claimed_host: &str, claimed_port: u16) -> PeerAddr {
     let observed = caller.remote.ip();
 

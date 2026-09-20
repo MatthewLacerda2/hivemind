@@ -170,6 +170,26 @@ pub(crate) async fn remove(api: &str, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Forget one address, keeping the peer (SPEC §10).
+pub(crate) async fn forget_addr(api: &str, id: &str, addr: &str) -> Result<()> {
+    let peer: PeerRow = Client::new(api)
+        .post(
+            &format!("/api/v1/peers/{id}/forget-addr"),
+            &serde_json::json!({ "addr": addr }),
+        )
+        .await?;
+
+    println!("{} no longer has {addr}", peer.short_id.bold());
+    // What is left is the useful half: an address list that is now empty says
+    // the peer cannot be reached until discovery or `hivemind join` finds it.
+    if peer.addrs.is_empty() {
+        println!("no addresses left — `hivemind join <host>` when you know one");
+    } else {
+        println!("    addresses {}", peer.addrs.join(", "));
+    }
+    Ok(())
+}
+
 fn peers_json(peers: &[PeerRow]) -> serde_json::Value {
     serde_json::Value::Array(
         peers

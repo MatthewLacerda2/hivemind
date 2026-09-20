@@ -254,6 +254,37 @@ impl MailService {
         Ok(true)
     }
 
+    /// Forget one of a peer's addresses, keeping the peer (SPEC §10).
+    ///
+    /// The escape hatch #29 asks for. Before it, one unusable line in a list of
+    /// addresses cost the whole trust relationship: `hivemind peers remove` and
+    /// pair again. It also reaches an address the read discarded, which is the
+    /// case `doctor` sends people here for — the daemon is not using it and the
+    /// file still says it, so forgetting it is what writes the file back.
+    ///
+    /// # Errors
+    /// [`ServiceError::NoSuchPeer`] if the peer is not in the book,
+    /// [`ServiceError::NoSuchAddr`] if it is and that is not one of its
+    /// addresses, or [`ServiceError::PeerBook`] if the book cannot be written.
+    pub fn forget_addr(&self, id: NodeId, authority: &str) -> Result<Peer, ServiceError> {
+        let mut peers = self.peers()?;
+        if peers.peer(id).is_none() {
+            return Err(ServiceError::NoSuchPeer { id: id.to_string() });
+        }
+
+        if !peers.forget_addr(id, authority) {
+            return Err(ServiceError::NoSuchAddr {
+                peer: id.short(),
+                addr: authority.to_owned(),
+            });
+        }
+        peers.save()?;
+        peers
+            .peer(id)
+            .cloned()
+            .ok_or_else(|| ServiceError::NoSuchPeer { id: id.to_string() })
+    }
+
     /// Re-run discovery now and return how many nodes answered (SPEC §5.2).
     ///
     /// Tailscale is a source, never a requirement: if it is not installed, not
@@ -366,5 +397,104 @@ impl MailService {
             .ok()?
             .into_iter()
             .find(|node| node.id == id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use hivemind_core::peer::NodeId;
+    use hivemind_core::peerbook::PeerAddr;
+
+    use crate::service::{MailService, ServiceError};
+
+    /// A member of this node's group with two ways to reach it.
+    fn admitted(service: &MailService) -> NodeId {
+        let friend = hivemind_core::identity::Identity::from_seed([29; 32]).expect("identity");
+        let id = friend.node_id();
+        service
+            .admit(
+                id,
+                "arch",
+                Some("matthew"),
+                friend.certificate_der().to_vec(),
+                PeerAddr::manual("100.102.24.1", 8400),
+            )
+            .expect("admit");
+        service
+            .admit(
+                id,
+                "arch",
+                Some("matthew"),
+                friend.certificate_der().to_vec(),
+                PeerAddr::manual("192.168.1.9", 8400),
+            )
+            .expect("admit again");
+        id
+    }
+
+    #[test]
+    fn forgetting_one_address_keeps_the_peer_and_the_others() {
+        // #29: losing a trust relationship over one bad line in a list of
+        // addresses is out of proportion, and it was the only escape.
+        let (_dir, service) = crate::service::tests::service();
+        let id = admitted(&service);
+
+        let peer = service
+            .forget_addr(id, "100.102.24.1:8400")
+            .expect("the address goes");
+        let left: Vec<String> = peer.addrs.iter().map(PeerAddr::authority).collect();
+        assert_eq!(left, ["192.168.1.9:8400"]);
+        assert!(
+            service
+                .paired_peers()
+                .expect("peers")
+                .iter()
+                .any(|p| p.id == id),
+            "the peer itself stays paired"
+        );
+    }
+
+    #[test]
+    fn forgetting_an_address_survives_the_daemon_restarting() {
+        // It is the file that has to change: a correction held only in memory
+        // is one the next start undoes.
+        let (dir, service) = crate::service::tests::service();
+        let id = admitted(&service);
+        service
+            .forget_addr(id, "100.102.24.1:8400")
+            .expect("the address goes");
+        drop(service);
+
+        let book = hivemind_core::peerbook::PeerBook::load(dir.path(), 8400).expect("reload");
+        let left: Vec<String> = book
+            .peer(id)
+            .expect("the peer")
+            .addrs
+            .iter()
+            .map(PeerAddr::authority)
+            .collect();
+        assert_eq!(left, ["192.168.1.9:8400"]);
+    }
+
+    #[test]
+    fn an_address_the_peer_does_not_have_is_refused_rather_than_shrugged_at() {
+        // A typo answering "done" would have somebody believe they had fixed
+        // the thing `doctor` complained about.
+        let (_dir, service) = crate::service::tests::service();
+        let id = admitted(&service);
+
+        assert!(matches!(
+            service.forget_addr(id, "10.0.0.1:8400"),
+            Err(ServiceError::NoSuchAddr { .. })
+        ));
+    }
+
+    #[test]
+    fn forgetting_an_address_of_a_peer_we_do_not_know_says_so() {
+        let (_dir, service) = crate::service::tests::service();
+        assert!(matches!(
+            service.forget_addr(NodeId::from_certificate_der(b"a stranger"), "10.0.0.1:8400"),
+            Err(ServiceError::NoSuchPeer { .. })
+        ));
     }
 }

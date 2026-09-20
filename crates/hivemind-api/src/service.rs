@@ -187,6 +187,14 @@ pub enum ServiceError {
         /// The id that was asked for.
         id: String,
     },
+    /// The peer is known; that address is not one of the ways to reach it.
+    #[error("{peer} has no address {addr}")]
+    NoSuchAddr {
+        /// The peer, in its short form.
+        peer: String,
+        /// The `host:port` that was asked for.
+        addr: String,
+    },
     /// The host could not be reached, or refused the handshake.
     #[error(transparent)]
     Peer(#[from] hivemind_net::client::ClientError),
@@ -323,7 +331,18 @@ impl MailService {
         // Cheap when the index was already current, because it is only the
         // files that exist; correct when it was not.
         index.rebuild_from(&store)?;
-        let peers = PeerBook::load(root)?;
+        let peers = PeerBook::load(root, node.peer_port)?;
+        // Said out loud, once, at start: a peers.toml written before #23 holds
+        // this node's own loopback as the way to reach somebody else, and an
+        // address quietly vanishing is worse than the address.
+        for discarded in peers.discarded() {
+            tracing::warn!(
+                peer = %discarded.peer.short(),
+                addr = %discarded.authority,
+                "ignoring an address in peers.toml that points at this node; \
+                 `hivemind peers forget-addr` takes it out of the file"
+            );
+        }
         let group = hivemind_core::group::Group::load(root)?;
 
         let (events, _) = broadcast::channel(EVENT_BUFFER);
