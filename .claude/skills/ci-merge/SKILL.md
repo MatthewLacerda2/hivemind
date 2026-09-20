@@ -96,12 +96,23 @@ thing that went wrong.
 ## The mutation signal
 
 `just mutants` is a **signal, never a gate**. It cannot fail a build and it
-does not hold a merge. It is scoped to the branch's diff, so its cost tracks
-the size of the change rather than the size of the codebase.
+does not hold a merge.
 
-Read the report when it lists survivors in code **this branch wrote**. Sort by
-cost: fix what is cheap while the code is in hand; file a real bug and fix it
-after this branch merges; or exclude it with a written reason.
+**Most branches do not want it.** Over M7 it ran twice, finished neither time,
+and turned up one survivor that was already recorded in #57 — while the hand
+sabotage `CLAUDE.md` describes found four real problems in the same session,
+seconds each. Running the sweep because a branch exists is paying a lot for a
+question the cheap habit already answers.
+
+**Reach for it when a whole module reads well-covered and you suspect nothing
+is asserting its mechanism.** That is what it is uniquely good at, and the
+case that earned it here: `outbox.rs` at 85–90% coverage with 19 survivors,
+every method replaceable by a no-op. A module, deliberately — not a diff, out
+of habit.
+
+When it does run, read the report for survivors in code **this branch wrote**.
+Sort by cost: fix what is cheap while the code is in hand; file a real bug and
+fix it after this branch merges; or exclude it with a written reason.
 
 **Establish equivalence by applying the mutation and running the suite**, never
 by reasoning that it must be equivalent. Reasoning has been wrong; measurement
@@ -116,4 +127,7 @@ A survivor usually means one of two things, and both have been seen here:
   exercised.** In this repo that shape is the backoff clamp, the inline-size
   limit and the attachment-name length check.
 
-Do not run it while something else is compiling. It fans out.
+Do not run it while something else is compiling. It fans out — and check the
+disk first, which `just workspace` does: it copies the tree per job, and the
+one sweep that did run here was in flight when the machine ran out of
+space.

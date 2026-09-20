@@ -213,9 +213,21 @@ test written after the code passes immediately, which proves nothing about
 whether it can catch anything.
 
 **When a test passes the first time it is run, sabotage the code and check it
-fails.** `just mutants` is the automatic form of this and is scoped to the
-branch's diff. Both have earned their keep — twice by finding a test that was
-passing for the wrong reason:
+fails.** Back the file up, break the thing the test is about, run the test,
+restore. It costs seconds and it is the single highest-return habit here — one
+session of it found three tests that asserted nothing and one suite that
+**hung** instead of failing:
+
+- `refresh_peers`'s "Tailscale is off" test passed with the gate deleted,
+  because this machine has no tailnet either way.
+- `an_unknown_mailbox_filter_returns_nothing` asserted an empty list against a
+  service with no messages in it. It would have passed whether the filter
+  worked or not — and the code in fact returned *everything* (#28).
+- `mergeable`'s wait test mocked `sleep` and left `monotonic` frozen, so a
+  loop that should have been bounded ran forever. A hanging test is worse than
+  a failing one, because nothing tells you which it was.
+
+Two more, from earlier, are why the rule exists at all:
 
 - `doctor`'s "optional tools are absent, not broken" rule had no failing case,
   because this machine has Tailscale installed and the interesting branch never
@@ -229,14 +241,27 @@ passing for the wrong reason:
 reasoning that it must be equivalent. Reasoning has been wrong; measurement has
 not.
 
+### `just mutants` is for one job, not for every branch
+
+The sweep is **not** the automatic form of the habit above, and treating it as
+one was a mistake worth writing down. Over M7 it ran twice, finished neither
+time, and produced a single survivor that was already recorded in #57. The
+same session's hand sabotage found four real problems in seconds each.
+
+So: **run it when a whole module reads well-covered and you suspect nothing is
+asserting its mechanism.** That case is real and it is what the sweep is
+uniquely good at — `outbox.rs` read 85–90% covered with **19 survivors**,
+every method replaceable by a no-op. Reach for it on a module, deliberately,
+not on a diff out of habit.
+
+It is a signal and never a gate, so skipping it holds up nothing.
+
 **Coverage and mutation measure different things, and the gap between them is
-where bugs live.** `outbox.rs` — the bridge between the mail service and the
-delivery worker — read 85–90% covered and had **19 surviving mutants**: every
-method could be replaced with a no-op and nothing failed. Its lines execute
-during the integration tests; nothing asserted on them. The sharpest case was
-`due_a_greeting`, which survived `true`, `false` and both sides of its
-comparison — the limit that stops an mDNS browse result becoming a TLS
-handshake every minute was entirely unasserted.
+where bugs live.** That `outbox.rs` sweep is the case in point: its lines
+execute during the integration tests and nothing asserted on them. The
+sharpest survivor was `due_a_greeting`, which survived `true`, `false` and
+both sides of its comparison — the limit that stops an mDNS browse result
+becoming a TLS handshake every minute was entirely unasserted.
 
 A whole module with nothing asserting its mechanism is **one finding about the
 tests**, not a list of survivors. Stop and fix that; a scattered survivor in
