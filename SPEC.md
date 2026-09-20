@@ -366,6 +366,7 @@ hivemind peers [refresh|remove <id>|forget-addr <id> <host:port>]  # online, las
 hivemind send <to> -s <subject> [-a file]... [-b <body>] [-- body | -]   # body from arg or stdin
 hivemind inbox [--unread] [--box <new|cur|out|sent>] [--json]  # new + cur by default
 hivemind sent                         # out + sent: what left here, delivered or not
+hivemind wait [--from <peer>] [--thread <id>] [--timeout <30s|5m>] [--json]  # block until mail arrives; 3 if the timeout wins
 hivemind read <id>                    # says how many more are in the thread, and how to see them
 hivemind thread <id> [--json]         # the whole conversation, oldest first; any message in it, not only the root
 hivemind reply <id> [-b <body>] [body | -]
@@ -375,6 +376,8 @@ hivemind mcp install|print
 hivemind service install|uninstall|restart|logs
 hivemind doctor                       # checks: daemon, binary, ports, tailscale, claude on PATH, hooks, mDNS, peer addresses
 ```
+
+`hivemind wait` blocks until mail arrives and prints it exactly as `inbox` does, for somebody — or a Claude — who has decided to wait for an answer rather than ask again in a minute: `hivemind wait && notify-send 'mail'`. It is the user saying "I will wait" and never the daemon running anything because mail arrived, which stays reserved (§12). Four rules make it a door rather than another polling loop (#40): it subscribes to `/api/v1/events` **before** it looks in the box, so mail arriving between the two is still reported; **unread mail already there ends the wait at once**, rather than waiting for the next one; `--timeout` exits **3**, a status no other outcome uses, so "nothing arrived" can never be read as "something did" — and never 1, which is what anything going wrong exits with; and a daemon that goes away mid-wait, or a `--from` that names nobody this machine knows, is an error rather than a wait that can never end. `--from` takes a node id, its short form, a machine name or an owner — an owner's machines all count — and `--thread` takes any message id in the conversation, like `hivemind thread`.
 
 The body of a message is taken three ways, and the rules between them are part of the contract (#38). `-b` / `--body` spells it like `--subject`, because the two are the same kind of thing and only one of them used to need a `--` in front of it. `--` still works, and is still the way to send a body starting with a hyphen from the command line. Given **both**, the CLI refuses rather than picking: two explicit bodies mean two different things and only one can be sent. Given **neither**, the body is read from stdin when stdin is not a terminal — an argument always beats the pipe, because a redirected stdin is ambient rather than a claim — and when stdin *is* a terminal the CLI says what to pass instead of waiting for a body nobody is typing. `-` in either spelling reads stdin whichever it is.
 

@@ -109,6 +109,16 @@ there are in the thread and points at it. It is the same thing the `thread` MCP
 tool answers, and the thing a Claude picking a session back up needs, because
 the thread is all it remembers of what was said.
 
+**`hivemind wait` waits for the answer, so nothing has to poll for it.** It
+blocks until mail arrives, prints it the way `hivemind inbox` does and exits 0,
+so `hivemind wait && notify-send 'mail'` is the whole of a desktop alert.
+`--from <peer>` and `--thread <id>` wait for one particular answer — the common
+case, having just sent something — and `--timeout 5m` gives up, exiting **3**
+rather than 0 so a script can tell "nothing arrived" from "something did". Mail
+already sitting unread ends it at once rather than waiting for the next one, and
+a daemon that stops answering is an error rather than a wait with no end. It
+never runs anything itself: waiting is your decision, not the mail's.
+
 **`hivemind sent` answers "did it arrive?".** It lists what this machine sent,
 newest first, and marks what is still waiting for a recipient to take it. Any
 one box on its own is `hivemind inbox --box new|cur|out|sent`, and `hivemind

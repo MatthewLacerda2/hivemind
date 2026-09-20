@@ -11,6 +11,7 @@ use serde::Deserialize;
 use crate::body;
 use crate::client::Client;
 use crate::colour::Paint as _;
+use crate::events;
 
 use super::short_node;
 
@@ -84,6 +85,7 @@ pub(crate) async fn send(
 #[derive(Debug, Deserialize)]
 struct Summary {
     id: String,
+    thread_id: String,
     from: String,
     subject: String,
     sender_kind: String,
@@ -179,6 +181,14 @@ async fn listing(
     summaries.sort_by_key(|s| std::cmp::Reverse(s.sent_at));
     summaries.truncate(limit);
 
+    show(&summaries, json)
+}
+
+/// Print a page of summaries, the one way this CLI prints a list of mail.
+///
+/// `inbox`, `sent` and `wait` all go through here, which is what makes "`wait`
+/// prints it as `inbox` prints it" true rather than intended (#40).
+fn show(summaries: &[Summary], json: bool) -> Result<()> {
     if json {
         println!(
             "{}",
@@ -204,7 +214,7 @@ async fn listing(
         return Ok(());
     }
 
-    for summary in &summaries {
+    for summary in summaries {
         let marker = if summary.unread { "●" } else { " " };
         // The badge is the point of sender_kind: you should be able to see at a
         // glance whether a person wrote this or a Claude did (SPEC §11).
@@ -457,6 +467,240 @@ pub(crate) async fn reply(
     Ok(())
 }
 
+/// How a wait ended, which is the difference between exiting 0 and exiting 3.
+///
+/// A bool would do and is exactly what must not be used: the whole point of
+/// this command is that "nothing arrived" and "something did" never wear the
+/// same face, and that starts with the two of them having names (#40).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Waited {
+    /// Mail matching what was asked for is in the box, and has been printed.
+    Arrived,
+    /// The timeout passed first.
+    TimedOut,
+}
+
+/// What a wait is for, once the arguments have been resolved (SPEC §10).
+///
+/// Pure, and matched against here rather than in the API's query string, for
+/// two reasons: `--from` may name a person who runs several machines, which
+/// `?from=` cannot express, and the decision "is this the message I am waiting
+/// for" is the one thing in this command that must be testable without a clock
+/// or a socket.
+#[derive(Debug, Default)]
+struct Want {
+    /// The node ids `--from` named, if it was given. Empty is not this:
+    /// nothing to wait for is refused when the argument is resolved.
+    from: Option<Vec<String>>,
+    /// The thread `--thread` named, as its full id.
+    thread: Option<String>,
+}
+
+impl Want {
+    /// Is this the message we are waiting for?
+    fn matches(&self, summary: &Summary) -> bool {
+        self.from
+            .as_ref()
+            .is_none_or(|ids| ids.iter().any(|id| id == &summary.from))
+            && self
+                .thread
+                .as_ref()
+                .is_none_or(|id| id == &summary.thread_id)
+    }
+}
+
+/// A node this machine can name: a peer, or itself.
+#[derive(Debug, Deserialize)]
+struct Named {
+    id: String,
+    short_id: String,
+    name: String,
+    owner: Option<String>,
+}
+
+impl Named {
+    /// Is `typed` one of this node's names?
+    ///
+    /// The four spellings somebody has to hand: the full node id, the short id
+    /// `hivemind peers` prints, the machine's name, and its owner's. The same
+    /// four `send` accepts as a recipient, because "wait for a reply from the
+    /// machine I just sent to" should not need a different spelling.
+    fn answers_to(&self, typed: &str) -> bool {
+        let spellings = [
+            Some(self.id.as_str()),
+            Some(self.short_id.as_str()),
+            Some(self.name.as_str()),
+            self.owner.as_deref(),
+        ];
+        spellings
+            .into_iter()
+            .flatten()
+            .any(|spelling| spelling.eq_ignore_ascii_case(typed))
+    }
+}
+
+/// Which nodes `typed` means. Several, when it is a person with two machines.
+fn senders(typed: &str, known: &[Named]) -> Vec<String> {
+    // An empty argument names nothing rather than everything: `--from ""` is a
+    // shell variable that did not expand, and answering it with the whole
+    // address book would wait for the wrong message and say it was the one.
+    if typed.is_empty() {
+        return Vec::new();
+    }
+    known
+        .iter()
+        .filter(|node| node.answers_to(typed))
+        .map(|node| node.id.clone())
+        .collect()
+}
+
+/// A timeout as somebody types it: `30s`, `5m`, `2h`, or bare seconds.
+///
+/// Hand-rolled rather than `humantime`, which is one crate for one argument
+/// (CLAUDE.md, dependencies). The rule is deliberately narrow: a spelling this
+/// does not understand is refused, because a `--timeout 5` that silently meant
+/// five seconds when five minutes was intended is the failure this command is
+/// here to prevent, one level up.
+fn duration(typed: &str) -> Result<std::time::Duration> {
+    let refusal =
+        || anyhow::anyhow!("`{typed}` is not a length of time — try `30s`, `5m`, `2h`, or seconds");
+
+    let (digits, scale) = match typed.strip_suffix(['s', 'm', 'h']) {
+        // The digits come back without the unit, and `typed` still ends
+        // with it, which is where the scale is read from.
+        Some(digits) => (
+            digits,
+            match typed.as_bytes().last() {
+                Some(b'm') => 60,
+                Some(b'h') => 60 * 60,
+                _ => 1,
+            },
+        ),
+        None => (typed, 1),
+    };
+
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(refusal());
+    }
+    let seconds: u64 = digits.parse().map_err(|_| refusal())?;
+    seconds
+        .checked_mul(scale)
+        .map(std::time::Duration::from_secs)
+        .ok_or_else(refusal)
+}
+
+/// Block until mail arrives, and print it as `inbox` does (SPEC §10).
+///
+/// # Errors
+/// When the daemon is not there, stops answering mid-wait, or cannot resolve
+/// what `--from` or `--thread` named.
+pub(crate) async fn wait(
+    api: &str,
+    from: Option<&str>,
+    thread: Option<&str>,
+    timeout: Option<&str>,
+    json: bool,
+) -> Result<Waited> {
+    let limit = timeout.map(duration).transpose()?;
+    let client = Client::new(api);
+    let want = resolve(&client, from, thread).await?;
+
+    // Subscribe *before* looking in the box. A message that arrives between
+    // the two is otherwise reported by neither: it is not in the answer to the
+    // question already asked, and its event went to a stream nobody had opened
+    // yet. That ordering is most of what this command is for — the loop it
+    // replaces was written four times by hand and the first one could have
+    // waited four hours with the mail already sitting there (#40).
+    let mut events = events::Stream::open(api).await?;
+
+    let watching = watch(&client, &mut events, &want, json);
+    let Some(limit) = limit else {
+        watching.await?;
+        return Ok(Waited::Arrived);
+    };
+
+    let Ok(result) = tokio::time::timeout(limit, watching).await else {
+        // On stderr, and never on stdout: a script reading `--json` must not be
+        // handed prose, and the exit status is the answer it is reading.
+        eprintln!(
+            "nothing arrived within {}",
+            timeout.unwrap_or_default().dimmed()
+        );
+        return Ok(Waited::TimedOut);
+    };
+    result.map(|()| Waited::Arrived)
+}
+
+/// Look in the box, then wait for the next arrival and look again.
+async fn watch(
+    client: &Client,
+    events: &mut events::Stream,
+    want: &Want,
+    json: bool,
+) -> Result<()> {
+    loop {
+        let waiting = wanted_unread(client, want).await?;
+        if !waiting.is_empty() {
+            show(&waiting, json)?;
+            return Ok(());
+        }
+
+        // Only mail arriving ends a wait. The stream also carries deliveries,
+        // reads and peers coming and going, and waking up for those would put
+        // this command back to polling with extra steps. The daemon going away
+        // is an error rather than a longer wait, which is `next`'s business.
+        while events.next().await?.name != "message.received" {}
+    }
+}
+
+/// The unread mail that matches, newest first.
+///
+/// `box=new` is the unread box by construction, so this is the whole of what a
+/// wait can be about. One page of it: a matching message that is already
+/// hundreds of messages old is in a box nobody is reading, and anything that
+/// arrives while waiting is by definition on the first page.
+async fn wanted_unread(client: &Client, want: &Want) -> Result<Vec<Summary>> {
+    let mut summaries: Vec<Summary> = client.get("/api/v1/messages?box=new&limit=200").await?;
+    summaries.retain(|summary| want.matches(summary));
+    summaries.sort_by_key(|s| std::cmp::Reverse(s.sent_at));
+    Ok(summaries)
+}
+
+/// Turn `--from` and `--thread` into ids, refusing what names nothing.
+///
+/// Both of these are resolved before the wait rather than during it, because
+/// the alternative is waiting for ever on a typo — and a wait that can never
+/// end is exactly the failure this command exists to remove (#40).
+async fn resolve(client: &Client, from: Option<&str>, thread: Option<&str>) -> Result<Want> {
+    let mut want = Want::default();
+
+    if let Some(typed) = from {
+        let mut known: Vec<Named> = client.get("/api/v1/peers").await?;
+        // This machine among them: mail sent to `everyone` arrives here too,
+        // and waiting for it by name should work like waiting for anyone else.
+        known.push(client.get("/api/v1/me").await?);
+
+        let ids = senders(typed, &known);
+        anyhow::ensure!(
+            !ids.is_empty(),
+            "no machine or person here is called `{typed}` — `hivemind peers` lists who this one knows"
+        );
+        want.from = Some(ids);
+    }
+
+    if let Some(typed) = thread {
+        let summaries = thread_summaries(client, typed)
+            .await
+            .with_context(|| format!("cannot wait on a thread `{typed}` does not name"))?;
+        let first = summaries
+            .first()
+            .with_context(|| format!("no thread here has a message `{typed}`"))?;
+        want.thread = Some(first.thread_id.clone());
+    }
+
+    Ok(want)
+}
+
 /// ULIDs are long and the first characters are the timestamp, so the tail is
 /// what actually distinguishes two messages sent in the same millisecond.
 fn short_id(id: &str) -> String {
@@ -499,6 +743,136 @@ mod tests {
     fn a_conversation_of_one_is_not_reported_as_1_messages() {
         assert_eq!(count_phrase(1), "1 message");
         assert_eq!(count_phrase(6), "6 messages");
+    }
+
+    /// A summary with the two fields a wait judges on, and the rest plausible.
+    fn summary(from: &str, thread_id: &str) -> Summary {
+        Summary {
+            id: "01JXT21Q00041061050R3GG28A".to_owned(),
+            thread_id: thread_id.to_owned(),
+            from: from.to_owned(),
+            subject: "anything".to_owned(),
+            sender_kind: "human".to_owned(),
+            sent_at: chrono::Utc::now(),
+            unread: true,
+            mailbox: "new".to_owned(),
+            attachment_names: Vec::new(),
+        }
+    }
+
+    fn named(id: &str, short_id: &str, name: &str, owner: Option<&str>) -> Named {
+        Named {
+            id: id.to_owned(),
+            short_id: short_id.to_owned(),
+            name: name.to_owned(),
+            owner: owner.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn an_unfiltered_wait_takes_the_first_thing_that_arrives() {
+        assert!(Want::default().matches(&summary("hm1:w2mq-xor2", "01AAA")));
+    }
+
+    #[test]
+    fn a_wait_for_one_sender_ignores_everybody_else() {
+        let want = Want {
+            from: Some(vec!["hm1:w2mq-xor2".to_owned()]),
+            thread: None,
+        };
+        assert!(want.matches(&summary("hm1:w2mq-xor2", "01AAA")));
+        assert!(!want.matches(&summary("hm1:zzzz-nope", "01AAA")));
+    }
+
+    #[test]
+    fn a_wait_for_a_person_with_two_machines_takes_either_of_them() {
+        let want = Want {
+            from: Some(vec!["hm1:one".to_owned(), "hm1:two".to_owned()]),
+            thread: None,
+        };
+        assert!(want.matches(&summary("hm1:one", "01AAA")));
+        assert!(want.matches(&summary("hm1:two", "01AAA")));
+        assert!(!want.matches(&summary("hm1:three", "01AAA")));
+    }
+
+    #[test]
+    fn a_wait_for_one_thread_ignores_other_conversations() {
+        let want = Want {
+            from: None,
+            thread: Some("01AAA".to_owned()),
+        };
+        assert!(want.matches(&summary("hm1:anyone", "01AAA")));
+        assert!(!want.matches(&summary("hm1:anyone", "01BBB")));
+    }
+
+    #[test]
+    fn both_filters_together_have_to_both_hold() {
+        let want = Want {
+            from: Some(vec!["hm1:one".to_owned()]),
+            thread: Some("01AAA".to_owned()),
+        };
+        assert!(want.matches(&summary("hm1:one", "01AAA")));
+        assert!(!want.matches(&summary("hm1:one", "01BBB")));
+        assert!(!want.matches(&summary("hm1:two", "01AAA")));
+    }
+
+    #[test]
+    fn a_sender_is_named_four_ways() {
+        let known = vec![named("hm1:w2mq-xor2-seiv", "w2mq", "arch", Some("matthew"))];
+        for typed in ["hm1:w2mq-xor2-seiv", "w2mq", "arch", "matthew", "MATTHEW"] {
+            assert_eq!(
+                senders(typed, &known),
+                vec!["hm1:w2mq-xor2-seiv".to_owned()],
+                "{typed} should have named that node"
+            );
+        }
+    }
+
+    #[test]
+    fn a_person_who_runs_two_machines_is_both_of_them() {
+        let known = vec![
+            named("hm1:one", "one", "arch", Some("matthew")),
+            named("hm1:two", "two", "mac", Some("matthew")),
+            named("hm1:three", "three", "pi", Some("somebody else")),
+        ];
+        assert_eq!(
+            senders("matthew", &known),
+            vec!["hm1:one".to_owned(), "hm1:two".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_name_nobody_here_has_names_nothing() {
+        // Which is what turns a typo into a refusal rather than a wait that
+        // can never end.
+        let known = vec![named("hm1:one", "one", "arch", Some("matthew"))];
+        assert!(senders("nobody", &known).is_empty());
+        assert!(senders("", &known).is_empty());
+    }
+
+    #[test]
+    fn a_timeout_is_read_in_seconds_minutes_or_hours() {
+        use std::time::Duration;
+        assert_eq!(duration("30s").expect("30s"), Duration::from_secs(30));
+        assert_eq!(duration("5m").expect("5m"), Duration::from_mins(5));
+        assert_eq!(duration("2h").expect("2h"), Duration::from_hours(2));
+        assert_eq!(
+            duration("45").expect("bare seconds"),
+            Duration::from_secs(45)
+        );
+    }
+
+    #[test]
+    fn a_timeout_nobody_can_read_is_refused_rather_than_guessed() {
+        for typed in ["", "soon", "5 m", "1.5m", "-3s", "5d", "m", "5min"] {
+            let complaint = duration(typed)
+                .expect_err(&format!("`{typed}` should not have parsed"))
+                .to_string();
+            assert!(
+                complaint.contains("30s"),
+                "the refusal should say what it does take: {complaint}"
+            );
+        }
     }
 
     #[test]

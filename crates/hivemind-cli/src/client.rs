@@ -124,11 +124,7 @@ impl Client {
         path: &str,
         body: Option<Vec<u8>>,
     ) -> Result<Response> {
-        let authority = self
-            .base
-            .trim_start_matches("http://")
-            .trim_start_matches("https://")
-            .trim_end_matches('/');
+        let authority = authority(&self.base);
 
         match tokio::time::timeout(self.timeout, self.exchange(authority, method, path, body)).await
         {
@@ -213,9 +209,21 @@ impl Client {
     }
 }
 
+/// The `host:port` to connect to, from the base URL a caller was given.
+///
+/// Shared with `events.rs`, which opens its own connection because the body it
+/// reads is a stream rather than something to collect. Two spellings of the
+/// same parsing would be one of them going wrong on `--api` with a trailing
+/// slash.
+pub(crate) fn authority(base: &str) -> &str {
+    base.trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .trim_end_matches('/')
+}
+
 /// The overwhelmingly likely cause of a connection error is that the daemon is
 /// not running, so say that instead of showing a transport error.
-fn not_running(base: &str) -> anyhow::Error {
+pub(crate) fn not_running(base: &str) -> anyhow::Error {
     anyhow::anyhow!(
         "no hivemind daemon at {base}\n\nStart one with `hivemind daemon`, \
          or point elsewhere with --api."

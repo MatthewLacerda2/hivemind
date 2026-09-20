@@ -11,6 +11,7 @@ mod client;
 mod colour;
 mod commands;
 mod doctor;
+mod events;
 mod freshness;
 mod hooks;
 mod notify;
@@ -92,6 +93,14 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Block until mail arrives, and print it as `inbox` does.
+    ///
+    /// For somebody — or a Claude — who has decided to wait for an answer
+    /// rather than ask again in a minute: `hivemind wait && notify-send mail`.
+    /// Unread mail already in the box ends the wait at once. With `--timeout`
+    /// it exits 3 when nothing arrived, which is a status no other outcome
+    /// uses, so "nothing" can never be read as "something".
+    Wait(WaitArgs),
     /// List what you sent, including what is still on its way.
     Sent {
         /// How many to show.
@@ -210,6 +219,28 @@ enum Command {
     },
 }
 
+/// What `hivemind wait` takes.
+///
+/// A struct rather than four fields on the variant, so that the arm in `main`
+/// is one line: the interesting part of this command is what it exits with, and
+/// that lives in [`waited`].
+#[derive(Debug, clap::Args)]
+struct WaitArgs {
+    /// Only mail from this machine or person: a node id, its short form, a
+    /// machine name, or an owner.
+    #[arg(long)]
+    from: Option<String>,
+    /// Only mail in this conversation. Any message id in it will do.
+    #[arg(long)]
+    thread: Option<String>,
+    /// Give up after this long: `30s`, `5m`, `2h`, or bare seconds.
+    #[arg(long)]
+    timeout: Option<String>,
+    /// Print JSON instead of prose.
+    #[arg(long)]
+    json: bool,
+}
+
 #[derive(Debug, Subcommand)]
 enum GroupCommand {
     /// Make a new group and print its code.
@@ -288,6 +319,32 @@ enum McpCommand {
     Print,
 }
 
+/// What `hivemind wait` exits with when its timeout passed first (SPEC §10).
+const NOTHING_ARRIVED: i32 = 3;
+
+/// `hivemind wait`, and the exit status its outcome asks for.
+///
+/// Apart from the match in `main` because the status *is* the answer here, and
+/// it is the one thing about this command a caller cannot afford to have to
+/// guess: 3 is distinct from the 0 of mail arriving and from the 1 anything
+/// that went wrong exits with, so all three can be told apart (#40). 3 rather
+/// than 2, which clap already spends on a usage error, and the same code
+/// `just mergeable --wait` uses for its own "not yet".
+async fn waited(api: &str, args: &WaitArgs) -> Result<()> {
+    match commands::wait(
+        api,
+        args.from.as_deref(),
+        args.thread.as_deref(),
+        args.timeout.as_deref(),
+        args.json,
+    )
+    .await?
+    {
+        commands::Waited::Arrived => Ok(()),
+        commands::Waited::TimedOut => std::process::exit(NOTHING_ARRIVED),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -327,6 +384,7 @@ async fn main() -> Result<()> {
             json,
         } => commands::inbox(&cli.api, r#box, unread, limit, json).await,
         Command::Sent { limit, json } => commands::sent(&cli.api, limit, json).await,
+        Command::Wait(args) => waited(&cli.api, &args).await,
         Command::Read { id, json } => commands::read(&cli.api, &id, json).await,
         Command::Thread { id, json } => commands::thread(&cli.api, &id, json).await,
         Command::Reply {
