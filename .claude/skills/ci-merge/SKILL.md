@@ -77,6 +77,21 @@ worth holding onto:
   and if no run appears, read `just mergeable`'s output before touching any
   workflow file. A conflicted branch produces no run either.
 
+### Leave a beat between the last push and `gh pr ready`
+
+A force-push and `gh pr ready` in the same second produce a run whose jobs are
+**all skipped**, because the webhook payload still says draft while the
+workflow's own `if` reads it. Skipped jobs are an absent check wearing the
+costume of a passing one, which is the failure this whole skill exists to
+prevent — `just mergeable` catches it, and that is the only reason it was seen.
+It bit two branches in one night, so it is cadence rather than luck.
+
+If it happens, `gh pr close && gh pr reopen` fires a real run without rewriting
+history. **It leaves a cancelled sibling behind**, because the reopen's
+concurrency group cancels the run the close triggered, and `just mergeable`
+refuses on any cancelled run in the head's set — correctly, since a cancelled
+run concluded nothing. `gh run rerun <cancelled id>` clears it.
+
 ## When a pull request is red
 
 Fix it in the next commit. It does not go back to draft — draft is for work
