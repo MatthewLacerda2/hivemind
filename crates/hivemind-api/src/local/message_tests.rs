@@ -13,6 +13,7 @@ use tower::ServiceExt as _;
 use ulid::Ulid;
 
 use super::tests::{app, app_with_service, call, get, post_json};
+use crate::problem::ProblemType;
 
 #[tokio::test]
 async fn a_mailbox_that_is_not_one_is_refused_rather_than_ignored() {
@@ -275,7 +276,13 @@ async fn asking_for_a_message_that_does_not_exist_is_a_problem_json_404() {
     let problem: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
     assert_eq!(problem["type"], "/problems/message-not-found");
     assert_eq!(problem["status"], 404);
-    assert!(problem["title"].is_string());
+    // `is_string` held for `""` too, so it said nothing about whether the
+    // type's title reached the body at all (#97).
+    assert_eq!(
+        problem["title"],
+        ProblemType::MessageNotFound.title(),
+        "the body carries the problem type's own title"
+    );
 }
 
 #[tokio::test]

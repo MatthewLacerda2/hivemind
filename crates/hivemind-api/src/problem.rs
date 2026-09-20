@@ -257,23 +257,90 @@ impl IntoResponse for ServiceError {
 mod tests {
     use super::*;
 
+    /// One row of the error table in `docs/protocol.md`, which is
+    /// ``| `/problems/<slug>` | <title> | <status> |``.
+    struct Row<'a> {
+        slug: &'a str,
+        title: &'a str,
+        status: &'a str,
+    }
+
+    /// The table's rows, in the order the document lists them.
+    ///
+    /// The check reads the row rather than searching the whole document,
+    /// because `doc.contains(needle)` cannot fail for an empty needle and
+    /// passes for one that lands anywhere — inside another word, or inside a
+    /// longer title the table has since drifted away from (#97).
+    fn documented_problems(doc: &str) -> Vec<Row<'_>> {
+        doc.lines()
+            .filter_map(|line| {
+                let mut cells = line.split('|').map(str::trim);
+                // A row opens with the delimiter, so the first cell is empty.
+                cells.next()?;
+                let slug = cells.next()?.trim_matches('`');
+                let title = cells.next()?;
+                let status = cells.next()?;
+                slug.starts_with("/problems/").then_some(Row {
+                    slug,
+                    title,
+                    status,
+                })
+            })
+            .collect()
+    }
+
     #[test]
-    fn every_problem_type_is_in_the_protocol_document() {
+    fn every_problem_type_has_a_row_carrying_its_title_and_status() {
         // The slugs are the API's contract (SPEC §7.3). A new failure reaching
         // clients undocumented is the drift this catches; the table used to
         // carry a `TODO(M1)` instead, four milestones after M1 shipped.
         let doc = include_str!("../../../docs/protocol.md");
+        let rows = documented_problems(doc);
 
         for kind in ProblemType::ALL {
             let slug = format!("/problems/{}", kind.slug());
+            let matching: Vec<&Row<'_>> = rows.iter().filter(|row| row.slug == slug).collect();
+            assert_eq!(
+                matching.len(),
+                1,
+                "docs/protocol.md should have exactly one row for {slug}"
+            );
+
+            let row = matching[0];
+            assert_eq!(row.title, kind.title(), "{slug}'s title has drifted");
+            // The status column was documented and unchecked until #97. A row
+            // promising a 404 where the code answers 500 misleads a client as
+            // surely as a missing row does.
+            assert_eq!(
+                row.status,
+                kind.status().as_u16().to_string(),
+                "{slug}'s status has drifted"
+            );
+        }
+    }
+
+    #[test]
+    fn a_problem_type_has_a_title_and_a_slug_to_put_in_the_table() {
+        // The rule is on the code, not on the document: a blank title matches
+        // a blank cell, so the row check alone would still admit one. And
+        // `title` is what a client shows a person when it understands nothing
+        // else about the failure.
+        for kind in ProblemType::ALL {
             assert!(
-                doc.contains(&slug),
-                "{slug} is missing from docs/protocol.md — add a row for it"
+                !kind.title().trim().is_empty(),
+                "{} has no title",
+                kind.slug()
+            );
+            // A delimiter would split the cell the title has to sit in, so the
+            // row check would then fail for a reason nobody could read.
+            assert!(
+                !kind.title().contains('|'),
+                "{}'s title cannot contain a table delimiter",
+                kind.slug()
             );
             assert!(
-                doc.contains(kind.title()),
-                "{:?}'s title is missing from docs/protocol.md",
-                kind.slug()
+                !kind.slug().is_empty(),
+                "{kind:?} has no slug, so its `type` member would be /problems/"
             );
         }
     }
