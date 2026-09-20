@@ -439,6 +439,17 @@ impl Daemon {
         let _ = self.process.wait();
     }
 
+    /// Kill the daemon outright, the way a crash or a lost battery does.
+    ///
+    /// Not [`Self::stop`], which is SIGTERM and therefore the polite path: a
+    /// graceful shutdown waits for connections that are still open, and an
+    /// event stream is open by design. A test about what a client does when the
+    /// daemon *dies* wants it dead rather than draining (#40).
+    pub(crate) fn kill(&mut self) {
+        let _ = self.process.kill();
+        let _ = self.process.wait();
+    }
+
     /// Start it again on the same home, ports included.
     ///
     /// The ports have to be the same: the sender learned where to reach this
