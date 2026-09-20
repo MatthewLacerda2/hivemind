@@ -15,6 +15,12 @@ rather than by path — most tests in this repo live in the file they test, and 
 path-based rule would call a 300-line module with a 600-line test module a
 900-line source file.
 
+That attribute is not always in the file it governs. `#[cfg(test)] mod y;` in
+`x.rs` makes the whole of `x/y.rs` test code, and nothing inside `x/y.rs` says
+so, which had five such files counting as production code (#110). So the
+declaration is read from the parent. The declaration, not the name: `_tests` is
+a convention, and `peer/hello.rs` sits beside `peer/hello_tests.rs`.
+
     just size
 """
 
@@ -34,12 +40,18 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 # paid for the gate rather than a refactor — a gate that passes on the day it
 # arrives is a gate nobody knows works.
 #
-# These come down with #100, which split `service.rs` from 791 source into a
-# `service/` folder of which the largest part is 182. The largest left are 651
+# These came down with #100, which split `service.rs` from 791 source into a
+# `service/` folder of which the largest part is 182. The largest left are 656
 # source (`hivemind-api/src/local.rs`) and 558 test
 # (`hivemind-cli/tests/single_daemon.rs`), and the numbers sit just above each:
 # the split that lowers a limit is not also the branch that has to split the
 # next file down the list.
+#
+# #110 moved five child test modules out of the source column, the largest 520
+# (`hivemind-api/src/web/page_tests.rs`). Neither number moves for it: the
+# largest of each kind is a file it did not reclassify, and a limit is lowered
+# by the branch that splits that file, not by one that stops miscounting
+# others.
 SOURCE_LIMIT = 660
 TEST_LIMIT = 560
 
@@ -47,6 +59,19 @@ SEARCHED = ("crates",)
 
 # `#[cfg(test)]` on its own line, with or without an attribute above it.
 CFG_TEST = re.compile(r"^\s*#\[cfg\(test\)\]")
+
+# `mod y;` — a declaration of a module living in another file, as opposed to an
+# inline `mod y { … }`. Any visibility may precede it.
+MOD_DECL = re.compile(
+    r"^\s*(?:pub\s*(?:\([^)]*\)\s*)?)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;"
+)
+
+# Another attribute may sit between `#[cfg(test)]` and what it applies to.
+ATTRIBUTE = re.compile(r"^\s*#!?\[")
+
+# These own the directory they sit in; any other file owns a subdirectory named
+# after itself. `mod y;` resolves against that.
+DIRECTORY_OWNERS = ("lib.rs", "main.rs", "mod.rs")
 
 
 @dataclass
@@ -87,16 +112,25 @@ def count(text: str, is_test_file: bool) -> Counted:
             pending_cfg_test = True
 
         opened = stripped.count("{") - stripped.count("}")
-        if pending_cfg_test and "{" in stripped:
-            test_depth = depth
-            pending_cfg_test = False
+
+        # `pending_cfg_test` is still set on the attribute line itself and on
+        # anything between it and the module's brace. Those are test code:
+        # counting them as source was an off-by-one the counter's own tests
+        # found.
+        is_test_line = is_test_file or test_depth is not None or pending_cfg_test
+
+        if pending_cfg_test:
+            if "{" in stripped:
+                test_depth = depth
+                pending_cfg_test = False
+            elif MOD_DECL.match(line):
+                # `#[cfg(test)] mod y;` opens no brace, so the attribute is
+                # spent here rather than left pending over the rest of the file.
+                # `y`'s own file is handled by `declared_test_files`.
+                pending_cfg_test = False
 
         if counts:
-            # `pending_cfg_test` is still set on the attribute line itself and
-            # on anything between it and the module's brace. Those are test
-            # code: counting them as source was an off-by-one the counter's own
-            # tests found.
-            if is_test_file or test_depth is not None or pending_cfg_test:
+            if is_test_line:
                 test += 1
             else:
                 source += 1
@@ -108,23 +142,87 @@ def count(text: str, is_test_file: bool) -> Counted:
     return Counted(source, test)
 
 
-def files() -> list[pathlib.Path]:
-    found: list[pathlib.Path] = []
+def read_sources() -> dict[pathlib.Path, str]:
+    """Every Rust file under `SEARCHED`, by path, with its text."""
+    sources: dict[pathlib.Path, str] = {}
     for entry in SEARCHED:
-        found.extend(sorted((ROOT / entry).rglob("*.rs")))
+        for path in sorted((ROOT / entry).rglob("*.rs")):
+            try:
+                sources[path] = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+    return sources
+
+
+def mod_declarations(text: str) -> list[tuple[str, bool]]:
+    """Each `mod y;` in `text`, and whether `#[cfg(test)]` applies to it."""
+    declared: list[tuple[str, bool]] = []
+    pending_cfg_test = False
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("//"):
+            continue
+
+        match = MOD_DECL.match(line)
+        if match:
+            declared.append((match.group(1), pending_cfg_test))
+            pending_cfg_test = False
+        elif CFG_TEST.match(line):
+            pending_cfg_test = True
+        elif not ATTRIBUTE.match(line):
+            # Anything else consumes the attribute, so an inline
+            # `#[cfg(test)] mod tests { … }` cannot hand it to the next
+            # declaration down.
+            pending_cfg_test = False
+
+    return declared
+
+
+def module_files(parent: pathlib.Path, name: str) -> list[pathlib.Path]:
+    """Where `mod name;` inside `parent` puts that module's file."""
+    folder = (
+        parent.parent
+        if parent.name in DIRECTORY_OWNERS
+        else parent.parent / parent.stem
+    )
+    return [folder / f"{name}.rs", folder / name / "mod.rs"]
+
+
+def declared_test_files(sources: dict[pathlib.Path, str]) -> set[pathlib.Path]:
+    """Files that are test code because of how their parent declares them.
+
+    Repeated to a fixed point, because a file that is test code in its entirety
+    needs no `#[cfg(test)]` on the modules it declares in turn — and so has
+    none.
+    """
+    found: set[pathlib.Path] = set()
+    growing = True
+
+    while growing:
+        growing = False
+        for parent, text in sources.items():
+            parent_is_test = parent in found
+            for name, cfg_test in mod_declarations(text):
+                if not (cfg_test or parent_is_test):
+                    continue
+                for child in module_files(parent, name):
+                    if child in sources and child not in found:
+                        found.add(child)
+                        growing = True
+
     return found
 
 
 def measure() -> list[tuple[str, Counted]]:
+    sources = read_sources()
+    declared = declared_test_files(sources)
     out: list[tuple[str, Counted]] = []
-    for path in files():
+    for path, text in sources.items():
         relative = path.relative_to(ROOT).as_posix()
         # `crates/*/tests/*.rs` is an integration test: all of it is test code.
-        is_test_file = "/tests/" in relative
-        try:
-            out.append((relative, count(path.read_text(encoding="utf-8"), is_test_file)))
-        except OSError:
-            continue
+        is_test_file = "/tests/" in relative or path in declared
+        out.append((relative, count(text, is_test_file)))
     return out
 
 
