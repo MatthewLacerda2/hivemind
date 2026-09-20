@@ -610,6 +610,17 @@ async fn a_thread_comes_back_whole_from_the_id_of_any_message_in_it() {
         );
     }
 
+    // Reading the conversation read the messages in it, and only those, so a
+    // Claude does not meet them again on the next turn.
+    let unread = call(&client, "inbox", serde_json::json!({ "unread_only": true })).await;
+    let subjects: Vec<&str> = unread
+        .as_array()
+        .expect("an array")
+        .iter()
+        .map(|m| m["subject"].as_str().expect("a subject"))
+        .collect();
+    assert_eq!(subjects, ["lunch"], "what is left unread: {unread}");
+
     // And reading one message says there is more, so a Claude that read the
     // reply knows to ask for the rest.
     let one = call(&client, "read", serde_json::json!({ "id": reply_id })).await;

@@ -80,6 +80,17 @@ fn a_thread_prints_in_order_and_holds_nothing_from_the_other_conversation() {
     assert_eq!(ids, [root.as_str(), reply.as_str()]);
     assert_eq!(by_root[0]["body"], "take a look");
     assert_eq!(by_root[1]["body"], "on it");
+
+    // Reading the conversation read the messages in it, and only those: the
+    // other one is still waiting to be looked at.
+    let unread = json(&daemon.run(&["inbox", "--unread", "--json"]));
+    let subjects: Vec<&str> = unread
+        .as_array()
+        .expect("an array")
+        .iter()
+        .map(|m| m["subject"].as_str().expect("a subject"))
+        .collect();
+    assert_eq!(subjects, ["lunch"], "what is left unread: {unread}");
 }
 
 #[test]
