@@ -20,6 +20,7 @@ import unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 JUSTFILE = pathlib.Path(__file__).resolve().parents[3] / "justfile"
+WORKFLOW = pathlib.Path(__file__).resolve().parents[2] / "workflows" / "ci.yml"
 
 from coverage import HINT, Lines, line_totals, main, parse, verdict  # noqa: E402
 
@@ -269,6 +270,15 @@ class IgnoredFiles(unittest.TestCase):
         ):
             with self.subTest(path=path):
                 self.assertFalse(self.ignored(path))
+
+    def test_nothing_carries_its_own_copy_of_the_expression(self):
+        # A correct COV_IGNORE proves nothing about a recipe that still spells
+        # the expression out, and the copy in ci.yml is the one nobody reads.
+        for line in JUSTFILE.read_text().splitlines():
+            if "--ignore-filename-regex" in line:
+                with self.subTest(line=line.strip()):
+                    self.assertIn("{{COV_IGNORE}}", line)
+        self.assertNotIn("--ignore-filename-regex", WORKFLOW.read_text())
 
     def test_the_integration_tests_and_the_cli_are_ignored_either_way(self):
         for root in (PLAIN_WORKTREE, TESTS_WORKTREE):
