@@ -11,7 +11,13 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from size import count  # noqa: E402
+from size import (  # noqa: E402
+    ROOT,
+    count,
+    declared_test_files,
+    measure,
+    read_sources,
+)
 
 
 class Counting(unittest.TestCase):
@@ -97,6 +103,159 @@ fn after() {}
         counted = count(text, is_test_file=True)
         self.assertEqual(counted.source, 0)
         self.assertEqual(counted.test, 3)
+
+    def test_a_cfg_test_module_declaration_does_not_leak_past_itself(self):
+        # `#[cfg(test)] mod y;` opens no brace, so the attribute is spent on
+        # the declaration. Leaving it pending made every later line test code.
+        text = """#[cfg(test)]
+mod page_tests;
+
+fn after() {}
+"""
+        counted = count(text, is_test_file=False)
+        self.assertEqual(counted.source, 1, "only after()")
+        self.assertEqual(counted.test, 2, "the attribute and the declaration")
+
+
+def at(relative: str) -> pathlib.Path:
+    return ROOT / relative
+
+
+class DeclaredTestModules(unittest.TestCase):
+    """Which files are test code because of how their parent declares them.
+
+    The `#[cfg(test)]` that makes a child file test code lives in the parent,
+    so a rule that only reads the file itself counts the whole of it as source
+    (#110). The evidence is the declaration; a name ending `_tests` is a
+    convention, and a rule keyed on a convention stops being true quietly.
+    """
+
+    def test_a_cfg_test_child_module_is_test_code(self):
+        sources = {
+            at("crates/a/src/web.rs"): "#[cfg(test)]\nmod page_tests;\n",
+            at("crates/a/src/web/page_tests.rs"): "#[test]\nfn it_works() {}\n",
+        }
+        self.assertEqual(
+            declared_test_files(sources), {at("crates/a/src/web/page_tests.rs")}
+        )
+
+    def test_a_child_named_tests_but_declared_plainly_is_source(self):
+        # `peer/hello.rs` and `peer/hello_tests.rs` are siblings in this repo.
+        # The name says nothing; only the declaration does.
+        sources = {
+            at("crates/a/src/peer.rs"): "mod hello_tests;\n",
+            at("crates/a/src/peer/hello_tests.rs"): "pub fn helper() {}\n",
+        }
+        self.assertEqual(declared_test_files(sources), set())
+
+    def test_an_attribute_on_an_inline_module_does_not_reach_the_next_file(self):
+        # A `#[cfg(test)] mod tests { … }` above a plain `mod real;` must not
+        # hand its attribute on to the declaration that follows.
+        sources = {
+            at("crates/a/src/peer.rs"): "#[cfg(test)]\nmod tests {}\nmod hello;\n",
+            at("crates/a/src/peer/hello.rs"): "pub fn helper() {}\n",
+        }
+        self.assertEqual(declared_test_files(sources), set())
+
+    def test_a_crate_root_declares_its_siblings(self):
+        # `mod y;` in `lib.rs`, `main.rs` or `mod.rs` means `y.rs` beside it,
+        # not `lib/y.rs`.
+        sources = {
+            at("crates/a/src/lib.rs"): "#[cfg(test)]\nmod fixtures;\n",
+            at("crates/a/src/fixtures.rs"): "pub fn fixture() {}\n",
+        }
+        self.assertEqual(declared_test_files(sources), {at("crates/a/src/fixtures.rs")})
+
+    def test_a_child_written_as_a_folder_resolves_to_its_mod_rs(self):
+        sources = {
+            at("crates/a/src/peer.rs"): "#[cfg(test)]\npub(crate) mod cases;\n",
+            at("crates/a/src/peer/cases/mod.rs"): "pub fn case() {}\n",
+        }
+        self.assertEqual(
+            declared_test_files(sources), {at("crates/a/src/peer/cases/mod.rs")}
+        )
+
+    def test_a_module_of_a_test_module_is_test_code_too(self):
+        # Inside a file that is already test-only, a plain `mod z;` needs no
+        # `#[cfg(test)]` of its own — and gets none. Deepest first, because that
+        # is the order in which one pass over the tree is not enough: nothing
+        # knows `page_tests.rs` is test code until `web.rs` has been read.
+        sources = {
+            at("crates/a/src/web/page_tests/fixtures.rs"): "pub fn page() {}\n",
+            at("crates/a/src/web/page_tests.rs"): "mod fixtures;\n",
+            at("crates/a/src/web.rs"): "#[cfg(test)]\nmod page_tests;\n",
+        }
+        self.assertEqual(
+            declared_test_files(sources),
+            {
+                at("crates/a/src/web/page_tests.rs"),
+                at("crates/a/src/web/page_tests/fixtures.rs"),
+            },
+        )
+
+    def test_a_comment_does_not_spend_the_attribute(self):
+        # Anything that is not an attribute consumes a pending `#[cfg(test)]`,
+        # and the house style puts prose between the two often enough.
+        sources = {
+            at("crates/a/src/web.rs"): (
+                "#[cfg(test)]\n// Why these live in a file of their own.\n"
+                "mod page_tests;\n"
+            ),
+            at("crates/a/src/web/page_tests.rs"): "#[test]\nfn it_works() {}\n",
+        }
+        self.assertEqual(
+            declared_test_files(sources), {at("crates/a/src/web/page_tests.rs")}
+        )
+
+    def test_a_mention_of_a_declaration_is_not_a_declaration(self):
+        # The pattern is anchored to the line, not searched within it.
+        # `boundaries.py`'s network rule was anchored as if it were reading
+        # `Cargo.toml` and would never have fired; this is the same family.
+        sources = {
+            at("crates/a/src/web.rs"): (
+                '#[cfg(test)]\nconst SAMPLE: &str = "mod page_tests;";\n'
+            ),
+            at("crates/a/src/web/page_tests.rs"): "#[test]\nfn it_works() {}\n",
+        }
+        self.assertEqual(declared_test_files(sources), set())
+
+
+class AgainstTheRepository(unittest.TestCase):
+    def test_every_cfg_test_declaration_in_the_tree_resolves(self):
+        """A declaration the resolver cannot find is a rule that has gone quiet.
+
+        `boundaries.py`'s network rule was anchored as if it were scanning
+        `Cargo.toml` and would never have fired. The same family of bug lives
+        here: if the layout the resolver assumes stops being the layout, this
+        test says so rather than the count drifting.
+        """
+        sources = read_sources()
+        declared = declared_test_files(sources)
+        parents = [
+            path
+            for path, text in sources.items()
+            if "mod page_tests;" in text or "_tests;" in text
+        ]
+        self.assertTrue(parents, "this repo uses the child-test-module pattern")
+        self.assertTrue(declared, "and at least one of them resolves")
+        for path in declared:
+            self.assertTrue(path.exists(), path)
+
+    def test_the_gate_counts_a_declared_file_as_test_code(self):
+        """The walk is wired into what the limits are applied to.
+
+        Without this, `measure` could ignore the walk entirely and every test
+        above would still pass.
+        """
+        declared = {
+            path.relative_to(ROOT).as_posix()
+            for path in declared_test_files(read_sources())
+        }
+        counted = {name: c for name, c in measure() if name in declared}
+        self.assertEqual(len(counted), len(declared))
+        for name, c in counted.items():
+            self.assertEqual(c.source, 0, name)
+            self.assertGreater(c.test, 0, name)
 
 
 if __name__ == "__main__":
