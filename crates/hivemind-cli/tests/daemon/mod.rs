@@ -12,6 +12,14 @@
 //! that has to bend a setting, and [`Daemon::start_with_first_ports`], which
 //! exists so the retry can be exercised rather than presumed.
 //!
+//! Starting, stopping, restarting and [`Daemon::run`] are safe inside a
+//! `#[tokio::test]`, which is what `mcp_tools.rs` needs. [`Daemon::post`],
+//! [`Daemon::get_json`] and [`Daemon::get_bytes`] are not: they go through
+//! `reqwest::blocking`, which builds a runtime and panics when it is dropped
+//! in an async context. An async test that wants one of those should give it
+//! the same treatment [`Daemon::answers_locally`] got rather than start a
+//! fourth copy of this file.
+//!
 //! Each integration test is its own binary, so anything an individual file
 //! does not use looks dead to that binary — hence the allow.
 
