@@ -128,3 +128,15 @@ Claude Code and mDNS, and every check that can fail says what to do about it.
 
 `hivemind status` is the shorter question: am I up, who do I know, is anything
 waiting.
+
+If `doctor` says a peer is listed at an address that is this machine — a
+`127.0.0.1` line beside its real one, left by a version from before that was
+fixed — the daemon already ignores it, and
+
+```
+hivemind peers forget-addr <short id> 127.0.0.1:8400
+```
+
+takes it out of the address book for good. It forgets the one address and keeps
+the peer: `hivemind peers remove` would throw away the whole trust
+relationship, which is not what one bad line deserves.

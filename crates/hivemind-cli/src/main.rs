@@ -209,6 +209,17 @@ enum PeerCommand {
         /// The peer's short id, or its full `hm1:` form.
         id: String,
     },
+    /// Forget one of a peer's addresses, keeping the peer.
+    ///
+    /// For an address that cannot work — `hivemind doctor` names one that
+    /// points at this machine — where forgetting the peer would cost the whole
+    /// trust relationship over one line.
+    ForgetAddr {
+        /// The peer's short id, or its full `hm1:` form.
+        id: String,
+        /// The address, as `hivemind peers` prints it: `host:port`.
+        addr: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -322,6 +333,9 @@ async fn main() -> Result<()> {
             None => peers::list(&cli.api, json).await,
             Some(PeerCommand::Refresh) => peers::refresh(&cli.api).await,
             Some(PeerCommand::Remove { id }) => peers::remove(&cli.api, &id).await,
+            Some(PeerCommand::ForgetAddr { id, addr }) => {
+                peers::forget_addr(&cli.api, &id, &addr).await
+            }
         },
         Command::Hook(HookCommand::Check) => {
             hooks::check::hook_check(cli.home.as_deref(), &cli.api).await;

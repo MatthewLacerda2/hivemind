@@ -54,6 +54,9 @@ pub enum ProblemType {
     BlobTooLarge,
     /// The attachment's name is not a name (SPEC §6.3).
     UnsafeAttachmentName,
+    /// The peer is known; the address asked about is not one of the ways to
+    /// reach it (SPEC §10).
+    AddrNotFound,
     /// Something went wrong that is not the caller's fault.
     Internal,
 }
@@ -77,6 +80,7 @@ impl ProblemType {
             Self::BlobNotFound => "blob-not-found",
             Self::BlobTooLarge => "blob-too-large",
             Self::UnsafeAttachmentName => "unsafe-attachment-name",
+            Self::AddrNotFound => "addr-not-found",
             Self::Internal => "internal",
         }
     }
@@ -99,6 +103,7 @@ impl ProblemType {
             Self::BlobNotFound => "No such attachment",
             Self::BlobTooLarge => "Attachment is too large",
             Self::UnsafeAttachmentName => "Attachment name is not a file name",
+            Self::AddrNotFound => "No such address",
             Self::Internal => "Internal error",
         }
     }
@@ -107,7 +112,9 @@ impl ProblemType {
     #[must_use]
     pub fn status(self) -> StatusCode {
         match self {
-            Self::MessageNotFound | Self::BlobNotFound => StatusCode::NOT_FOUND,
+            Self::MessageNotFound | Self::BlobNotFound | Self::AddrNotFound => {
+                StatusCode::NOT_FOUND
+            }
             // 413 rather than 422: the request was well formed, it is the
             // thing it carries that is too big.
             Self::BlobTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
@@ -135,7 +142,7 @@ impl ProblemType {
     }
 
     /// Every slug, for the generated documentation.
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::MessageNotFound,
         Self::AmbiguousId,
         Self::InvalidQuery,
@@ -150,6 +157,7 @@ impl ProblemType {
         Self::BlobNotFound,
         Self::BlobTooLarge,
         Self::UnsafeAttachmentName,
+        Self::AddrNotFound,
         Self::Internal,
     ];
 }
@@ -207,6 +215,7 @@ impl From<ServiceError> for Problem {
             ServiceError::NoRecipients => ProblemType::NoRecipients,
             ServiceError::BadSignature => ProblemType::BadSignature,
             ServiceError::NoSuchPeer { .. } | ServiceError::NotInGroup(_) => ProblemType::NotPaired,
+            ServiceError::NoSuchAddr { .. } => ProblemType::AddrNotFound,
             ServiceError::Peer(_) => ProblemType::PeerUnreachable,
             ServiceError::Blob(BlobError::NotFound { .. }) => ProblemType::BlobNotFound,
             ServiceError::Blob(BlobError::TooLarge { .. }) => ProblemType::BlobTooLarge,

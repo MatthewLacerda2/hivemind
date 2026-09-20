@@ -187,6 +187,14 @@ pub enum ServiceError {
         /// The id that was asked for.
         id: String,
     },
+    /// The peer is known; that address is not one of the ways to reach it.
+    #[error("{peer} has no address {addr}")]
+    NoSuchAddr {
+        /// The peer, in its short form.
+        peer: String,
+        /// The `host:port` that was asked for.
+        addr: String,
+    },
     /// The host could not be reached, or refused the handshake.
     #[error(transparent)]
     Peer(#[from] hivemind_net::client::ClientError),

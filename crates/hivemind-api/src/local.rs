@@ -155,6 +155,14 @@ pub struct JoinRequest {
     pub host: String,
 }
 
+/// Which of a peer's addresses to forget.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ForgetAddrRequest {
+    /// The address, exactly as `hivemind peers` and `doctor` print it.
+    #[schema(example = "127.0.0.1:8400")]
+    pub addr: String,
+}
+
 /// One row of a listing (SPEC §9.1).
 #[derive(Debug, Serialize, ToSchema)]
 pub struct MessageSummary {
@@ -403,6 +411,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/peers/join", post(join_peer))
         .route("/api/v1/peers/refresh", post(refresh_peers))
         .route("/api/v1/peers/{id}", axum::routing::delete(remove_peer))
+        .route("/api/v1/peers/{id}/forget-addr", post(forget_addr))
         .route("/api/v1/group", get(group::status))
         .route("/api/v1/group/create", post(group::create))
         .route("/api/v1/group/join", post(group::join))
@@ -601,6 +610,28 @@ pub(crate) async fn remove_peer(
 ) -> Result<StatusCode, Problem> {
     service.remove_peer(service.resolve_peer(&id)?)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(
+    post, path = "/api/v1/peers/{id}/forget-addr",
+    params(("id" = String, Path, description = "The peer's full or short id")),
+    request_body = ForgetAddrRequest,
+    responses(
+        (status = 200, body = PeerSummary),
+        (status = 403, body = Problem),
+        (status = 404, body = Problem)
+    ),
+    tag = "peers"
+)]
+pub(crate) async fn forget_addr(
+    State(service): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<ForgetAddrRequest>,
+) -> Result<Json<PeerSummary>, Problem> {
+    let id = service.resolve_peer(&id)?;
+    Ok(Json(PeerSummary::from(
+        service.forget_addr(id, &request.addr)?,
+    )))
 }
 
 #[utoipa::path(

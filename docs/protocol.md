@@ -366,6 +366,7 @@ Rust enum so the documentation cannot drift from the code.
 | `/problems/blob-not-found` | No such attachment | 404 |
 | `/problems/blob-too-large` | Attachment is too large | 413 |
 | `/problems/unsafe-attachment-name` | Attachment name is not a file name | 422 |
+| `/problems/addr-not-found` | No such address | 404 |
 | `/problems/internal` | Internal error | 500 |
 
 A test in `hivemind-api` reads this file and fails if a `ProblemType` variant
