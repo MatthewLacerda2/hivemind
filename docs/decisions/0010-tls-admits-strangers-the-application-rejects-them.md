@@ -3,6 +3,7 @@
 - **Status:** accepted
 - **Date:** 2026-09-17
 - **Amends:** SPEC §6.3
+- **Addendum:** 2026-09-20, "Observed in use" below
 
 ## Context
 
@@ -92,3 +93,41 @@ verification happens before the request line is read.
 it is what `--trust-network` is the opposite of. Rejected because it makes the
 common case — two laptops on one network — require copying a fingerprint over
 another medium before anything can happen at all.
+
+## Observed in use
+
+*Added 2026-09-20, from the first use outside tests, on 2026-09-18. It records
+evidence and changes nothing above.*
+
+Three machines, two operating systems, a local wifi and a tailnet, and for the
+first time a peer that belonged to somebody else. Matheus, who pays the cost of
+the extra step, on whether it earned its place — translated from the Portuguese:
+
+> the `hivemind pair key123` helped a lot, I wanted it not to be needed but it
+> was useful and ended up being more gain than headache
+
+Both sides of it turned up on the same day.
+
+**What it bought.** Leonardo's node appeared over mDNS on its own, with nobody
+doing anything. Without an admission step, every machine on an office wifi would
+take mail from every other at first contact. The extra step is what makes
+discovery that automatic acceptable at all, and it is the step this record
+argues belongs in the application rather than in TLS.
+
+**What it cost, measured.** A message sent to his node before it had admitted
+this one sat in the queue, was refused, and went through two minutes later once
+admission happened. That delay is the price, and it cleared itself.
+
+The useful finding is not that admission is worth having. It is **where it
+hurts**: the delay was invisible. The sender saw a message in the outbox and no
+reason for it being there — not "waiting to be admitted", not "refused, will
+retry". The fix for that is not in this record; it is per-recipient delivery
+state, which is #31.
+
+[0013](0013-membership-is-possession-of-a-group-key.md), written the day after,
+replaced the per-pair fingerprint confirmation that was running here with a
+group key, so the two-minute wait for a human in particular is gone. What was
+measured survives the change, because the boundary this record draws does not
+move: admission is still the application's decision rather than the transport's,
+`403 not_paired` is still the refusal, and a sender still cannot see that being
+refused is why its mail is waiting.
