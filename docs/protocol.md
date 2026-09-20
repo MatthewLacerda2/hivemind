@@ -52,7 +52,10 @@ presented:
 - **It verifies** → the receiver pins the sender's certificate in `peers.toml`
   and answers `200` with its own handshake, whose `proof` is made for the
   sender. The sender checks that one the same way and pins the receiver. Both
-  are now peers; nobody was asked anything (ADR 0013).
+  are now peers; nobody was asked anything (ADR 0013). A sender already pinned
+  has its `name` and `owner` taken again rather than kept from the first
+  meeting — a machine renamed by hand would otherwise read everywhere else
+  under the name it had then (#37).
 - **It is missing or does not verify**, or the receiver is in no group → `403
   not_paired`, with a `detail` saying which. The receiver remembers the sender
   as *seen*, in memory, so `hivemind peers` can show it.
@@ -99,8 +102,10 @@ Unlike the handshake this is **not** open to strangers. `proof` is checked
 afresh on every hello, against the current group key:
 
 - **It verifies** → the sender is marked online, its addresses are recorded,
-  its peer list is taken in, and its queued mail is sent now rather than at
-  the end of its backoff.
+  the `name` and `owner` it reports are taken, its peer list is taken in, and
+  its queued mail is sent now rather than at the end of its backoff. The answer
+  is read the same way, so whichever direction of a pair works is the one both
+  sides learn a new name from.
 - **It is missing or does not verify** → `403 not_paired`, *and the sender is
   removed from* `peers.toml`. This is what gives `hivemind group create
   --replace` an effect on a node that is already pinned: a proof offered once

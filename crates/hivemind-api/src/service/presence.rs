@@ -232,6 +232,12 @@ impl MailService {
     /// have already checked by being willing to talk to it.
     fn take_in(&self, id: NodeId, theirs: &Hello) {
         self.mark_online(id, theirs.sessions.clone());
+        // What `admit` does with an inbound hello, for a peer that answered
+        // ours: a name learned once and never revised is what #37 was, and it
+        // has to be revised from whichever direction works.
+        if let Err(error) = self.learn_identity(id, &theirs.name, theirs.owner.as_deref()) {
+            tracing::debug!(%error, "could not write down what a peer calls itself");
+        }
         self.hint(id);
         if let Err(error) = self.absorb(&theirs.peers) {
             tracing::debug!(%error, "could not take in a peer list");
@@ -523,6 +529,53 @@ fn still_here(age: std::time::Duration, interval: std::time::Duration) -> bool {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// A hello carrying nothing but what a node says about itself.
+    fn hello(id: NodeId, name: &str, owner: Option<&str>) -> Hello {
+        Hello {
+            id: id.to_string(),
+            name: name.to_owned(),
+            owner: owner.map(str::to_owned),
+            version: "0.1.0".to_owned(),
+            callback_host: "100.116.89.94".to_owned(),
+            callback_port: 8400,
+            proof: None,
+            peers: Vec::new(),
+            sessions: Vec::new(),
+            up: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_peer_answering_our_hello_with_a_new_name_is_followed() {
+        // #37, in the direction `admit` never sees. A peer behind a NAT it is
+        // the only one able to cross answers our hello and never sends one, so
+        // `answer_hello` never runs for it — and the name it had at the first
+        // handshake would be the name it kept forever.
+        let (_dir, service) = crate::service::tests::service();
+        let friend = hivemind_core::identity::Identity::from_seed([37; 32]).expect("identity");
+        let id = friend.node_id();
+        service
+            .admit(
+                id,
+                "hivemind-node",
+                None,
+                friend.certificate_der().to_vec(),
+                PeerAddr::manual("100.116.89.94", 8400),
+            )
+            .expect("admit");
+
+        service.take_in(id, &hello(id, "archlinux", Some("matthew")));
+
+        let peer = service
+            .paired_peers()
+            .expect("peers")
+            .into_iter()
+            .find(|p| p.id == id)
+            .expect("the peer");
+        assert_eq!(peer.name, "archlinux");
+        assert_eq!(peer.owner.as_deref(), Some("matthew"));
+    }
 
     #[test]
     fn a_hello_counts_for_two_intervals_and_not_a_moment_longer() {
