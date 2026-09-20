@@ -17,97 +17,112 @@ use hivemind_core::blobs::BlobError;
 
 use crate::service::ServiceError;
 
-/// The stable identity of a failure.
+/// Declare the failures the API can return, once.
 ///
-/// The slug is the API's contract — it is what a client matches on, and it does
-/// not change even if the wording of `title` does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProblemType {
+/// The enum, the slugs, the titles and [`ProblemType::ALL`] all come out of
+/// this one list, so no two of them can disagree.
+///
+/// `ALL` used to be written by hand beside the enum, and it was the one part of
+/// the enum the compiler did not hold: a new variant had to be added to `slug`,
+/// `title` and `status`, because those are exhaustive matches, and could be
+/// left out of the array in silence. Everything that documents a failure walks
+/// `ALL` — the `docs/protocol.md` table check, the `docs/openapi.json`
+/// generator, both uniqueness checks — so a variant missing from it reached
+/// clients undocumented with every one of them green (#106). Measured, not
+/// reasoned: a throwaway variant with its own slug, title and status passed the
+/// whole suite and `just openapi-check`.
+///
+/// `status` stays a hand-written match below, because its arguments are about
+/// groups of variants rather than about one — why 400 rather than 422, why 413
+/// rather than 422 — and the compiler already refuses a variant it does not
+/// answer for.
+macro_rules! problem_types {
+    (
+        $(
+            $(#[doc = $doc:literal])+
+            $variant:ident => $slug:literal, $title:literal;
+        )+
+    ) => {
+        /// The stable identity of a failure.
+        ///
+        /// The slug is the API's contract — it is what a client matches on, and
+        /// it does not change even if the wording of `title` does.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum ProblemType {
+            $(
+                $(#[doc = $doc])+
+                $variant,
+            )+
+        }
+
+        impl ProblemType {
+            /// Every problem type, for the generated documentation.
+            ///
+            /// The length is counted from the same list rather than written, so
+            /// it cannot be the thing that drifts either.
+            pub const ALL: [Self; [$(stringify!($variant)),+].len()] =
+                [$(Self::$variant),+];
+
+            /// The stable slug, used as the `type` member.
+            #[must_use]
+            pub fn slug(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $slug,)+
+                }
+            }
+
+            /// A short, human-readable summary that does not change per
+            /// occurrence.
+            #[must_use]
+            pub fn title(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $title,)+
+                }
+            }
+        }
+    };
+}
+
+problem_types! {
     /// No message with that id.
-    MessageNotFound,
+    MessageNotFound => "message-not-found", "No such message";
     /// What was typed names more than one message, and guessing which is
     /// worse than asking again (SPEC §10).
-    AmbiguousId,
+    AmbiguousId => "ambiguous-id", "Id matches more than one message";
     /// The query string asked something that makes no sense — an unknown
     /// parameter, or a value that is not one of the allowed ones (SPEC §7.1).
-    InvalidQuery,
+    InvalidQuery => "invalid-query", "Query is not one this endpoint understands";
     /// The message broke a limit in SPEC §4.1.
-    InvalidMessage,
+    InvalidMessage => "invalid-message", "Message is not acceptable";
     /// The message was not addressed to anybody.
-    NoRecipients,
+    NoRecipients => "no-recipients", "Message has no recipients";
     /// The caller has not proved the group key to this node (SPEC §6.2).
-    NotPaired,
+    NotPaired => "not-paired", "Not paired";
     /// This node is already in a group, and the request did not say to leave
     /// it (SPEC §6.2).
-    AlreadyInGroup,
+    AlreadyInGroup => "already-in-group", "Already in a group";
     /// What was pasted is not a group code (SPEC §6.2).
-    InvalidGroupCode,
+    InvalidGroupCode => "invalid-group-code", "Not a group code";
     /// What the caller claimed does not match the certificate it presented.
-    IdentityMismatch,
+    IdentityMismatch => "identity-mismatch", "Identity does not match the certificate";
     /// The message's signature did not verify.
-    BadSignature,
+    BadSignature => "bad-signature", "Signature does not verify";
     /// A host we were asked to join could not be reached, or refused us.
-    PeerUnreachable,
+    PeerUnreachable => "peer-unreachable", "Peer could not be reached";
     /// No attachment with that digest, here or at the sender.
-    BlobNotFound,
+    BlobNotFound => "blob-not-found", "No such attachment";
     /// The attachment is larger than this node accepts (SPEC §6.3).
-    BlobTooLarge,
+    BlobTooLarge => "blob-too-large", "Attachment is too large";
     /// The attachment's name is not a name (SPEC §6.3).
-    UnsafeAttachmentName,
+    UnsafeAttachmentName => "unsafe-attachment-name", "Attachment name is not a file name";
     /// The peer is known; the address asked about is not one of the ways to
     /// reach it (SPEC §10).
-    AddrNotFound,
+    AddrNotFound => "addr-not-found", "No such address";
     /// Something went wrong that is not the caller's fault.
-    Internal,
+    Internal => "internal", "Internal error";
 }
 
 impl ProblemType {
-    /// The stable slug, used as the `type` member.
-    #[must_use]
-    pub fn slug(self) -> &'static str {
-        match self {
-            Self::MessageNotFound => "message-not-found",
-            Self::AmbiguousId => "ambiguous-id",
-            Self::InvalidQuery => "invalid-query",
-            Self::InvalidMessage => "invalid-message",
-            Self::NoRecipients => "no-recipients",
-            Self::NotPaired => "not-paired",
-            Self::AlreadyInGroup => "already-in-group",
-            Self::InvalidGroupCode => "invalid-group-code",
-            Self::IdentityMismatch => "identity-mismatch",
-            Self::BadSignature => "bad-signature",
-            Self::PeerUnreachable => "peer-unreachable",
-            Self::BlobNotFound => "blob-not-found",
-            Self::BlobTooLarge => "blob-too-large",
-            Self::UnsafeAttachmentName => "unsafe-attachment-name",
-            Self::AddrNotFound => "addr-not-found",
-            Self::Internal => "internal",
-        }
-    }
-
-    /// A short, human-readable summary that does not change per occurrence.
-    #[must_use]
-    pub fn title(self) -> &'static str {
-        match self {
-            Self::MessageNotFound => "No such message",
-            Self::AmbiguousId => "Id matches more than one message",
-            Self::InvalidQuery => "Query is not one this endpoint understands",
-            Self::InvalidMessage => "Message is not acceptable",
-            Self::NoRecipients => "Message has no recipients",
-            Self::NotPaired => "Not paired",
-            Self::AlreadyInGroup => "Already in a group",
-            Self::InvalidGroupCode => "Not a group code",
-            Self::IdentityMismatch => "Identity does not match the certificate",
-            Self::BadSignature => "Signature does not verify",
-            Self::PeerUnreachable => "Peer could not be reached",
-            Self::BlobNotFound => "No such attachment",
-            Self::BlobTooLarge => "Attachment is too large",
-            Self::UnsafeAttachmentName => "Attachment name is not a file name",
-            Self::AddrNotFound => "No such address",
-            Self::Internal => "Internal error",
-        }
-    }
-
     /// The HTTP status that goes with it.
     #[must_use]
     pub fn status(self) -> StatusCode {
@@ -140,26 +155,6 @@ impl ProblemType {
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
-
-    /// Every slug, for the generated documentation.
-    pub const ALL: [Self; 16] = [
-        Self::MessageNotFound,
-        Self::AmbiguousId,
-        Self::InvalidQuery,
-        Self::InvalidMessage,
-        Self::NoRecipients,
-        Self::NotPaired,
-        Self::AlreadyInGroup,
-        Self::InvalidGroupCode,
-        Self::IdentityMismatch,
-        Self::BadSignature,
-        Self::PeerUnreachable,
-        Self::BlobNotFound,
-        Self::BlobTooLarge,
-        Self::UnsafeAttachmentName,
-        Self::AddrNotFound,
-        Self::Internal,
-    ];
 }
 
 /// An RFC 9457 problem document.
