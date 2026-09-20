@@ -259,7 +259,7 @@ fn a_large_attachment_is_fetched_on_first_access_and_resumes_after_an_interrupti
 
     // Interrupt it: put most of the file in place as a partial, exactly as a
     // transfer killed part-way would leave it, then let the fetch finish.
-    let partial = bob.home.path().join("blobs").join(format!("{sha}.part"));
+    let partial = bob.home().join("blobs").join(format!("{sha}.part"));
     std::fs::create_dir_all(partial.parent().expect("a parent")).expect("mkdir");
     std::fs::write(&partial, &content[..200_000]).expect("write a partial");
 
@@ -309,7 +309,7 @@ fn a_partial_that_does_not_match_is_not_served_as_if_it_did() {
         .to_owned();
 
     // A prefix of the wrong length, so resuming lands at the wrong offset.
-    let partial = bob.home.path().join("blobs").join(format!("{sha}.part"));
+    let partial = bob.home().join("blobs").join(format!("{sha}.part"));
     std::fs::create_dir_all(partial.parent().expect("a parent")).expect("mkdir");
     std::fs::write(&partial, vec![0u8; 200_000]).expect("write a bad partial");
 
