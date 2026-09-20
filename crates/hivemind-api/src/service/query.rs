@@ -152,6 +152,37 @@ impl MailService {
         Ok(self.index()?.unread_count()?)
     }
 
+    /// Every conversation, the one that moved last first (SPEC §7.1, #43).
+    ///
+    /// A conversation is a thread, so this is [`Self::thread`]'s list seen from
+    /// the outside: one row per `thread_id`, with the subject it opened with,
+    /// who it is with, and how much of it is unread.
+    ///
+    /// `participants` comes back as **the other machines** — who the
+    /// conversation is with — rather than everybody in it, because that is the
+    /// question a list of conversations answers. A conversation with nobody
+    /// else keeps this machine, so a note to self is not a row with an empty
+    /// space where a name goes.
+    ///
+    /// # Errors
+    /// Returns [`ServiceError::Index`] on failure.
+    pub fn conversations(
+        &self,
+        query: &ConversationQuery,
+    ) -> Result<Vec<Conversation>, ServiceError> {
+        let mut found = self.index()?.conversations(query)?;
+        for conversation in &mut found {
+            if conversation
+                .participants
+                .iter()
+                .any(|id| *id != self.identity)
+            {
+                conversation.participants.retain(|id| *id != self.identity);
+            }
+        }
+        Ok(found)
+    }
+
     /// Throw the index away and rebuild it from the mail files (SPEC §10).
     ///
     /// # Errors
@@ -170,6 +201,110 @@ impl MailService {
 mod tests {
     use super::*;
     use crate::service::tests::{draft_to_self, service};
+
+    /// A member of this node's group, keys and all.
+    fn member(service: &MailService, seed: u8, name: &str) -> hivemind_core::identity::Identity {
+        let friend = hivemind_core::identity::Identity::from_seed([seed; 32]).expect("identity");
+        service
+            .admit(
+                friend.node_id(),
+                name,
+                Some("ana"),
+                friend.certificate_der().to_vec(),
+                PeerAddr::manual("10.0.0.2", 8400),
+            )
+            .expect("admit");
+        friend
+    }
+
+    /// One message from `friend`, as its machine would have delivered it.
+    ///
+    /// `millis` is the send time and the id is derived from it, so a test says
+    /// which conversation moved last rather than hoping.
+    fn arrives(
+        service: &MailService,
+        friend: &hivemind_core::identity::Identity,
+        millis: u64,
+        subject: &str,
+    ) -> Ulid {
+        let id = Ulid::from_parts(millis, 0);
+        let mut message = Message {
+            id,
+            thread_id: id,
+            in_reply_to: None,
+            from: friend.node_id(),
+            to: vec![Recipient::Node(service.identity())],
+            subject: subject.to_owned(),
+            body: "body".to_owned(),
+            kind: Kind::Message,
+            sender_kind: SenderKind::Human,
+            attachments: Vec::new(),
+            sent_at: DateTime::from_timestamp_millis(i64::try_from(millis).expect("in range"))
+                .expect("a timestamp"),
+            received_at: None,
+            signature: Signature::from_bytes([0u8; 64]),
+        };
+        message.sign(friend.signing_key()).expect("sign");
+        service.receive(friend.node_id(), message).expect("receive")
+    }
+
+    #[test]
+    fn a_conversation_says_which_machine_it_is_with_not_which_are_in_it() {
+        // Two conversations and two machines, so "the right one" is
+        // distinguishable from "all of them" — and this machine, which is in
+        // both of them and is not who either is with.
+        let (_dir, service) = service();
+        let ana = member(&service, 51, "ana-mbp");
+        let beto = member(&service, 52, "beto-air");
+        let from_ana = arrives(&service, &ana, 100, "dashboard PR");
+        arrives(&service, &beto, 200, "lunch?");
+        service
+            .reply(from_ana, "on it".to_owned(), Vec::new(), SenderKind::Human)
+            .expect("reply");
+
+        let found = service
+            .conversations(&ConversationQuery::default())
+            .expect("a list");
+
+        assert_eq!(found.len(), 2, "two subjects, two conversations: {found:?}");
+        let dashboard = found
+            .iter()
+            .find(|c| c.subject == "dashboard PR")
+            .expect("the one we answered");
+        assert_eq!(
+            dashboard.participants,
+            vec![ana.node_id()],
+            "this machine is in it and is not who it is with"
+        );
+        assert_eq!(dashboard.messages, 2);
+
+        let lunch = found
+            .iter()
+            .find(|c| c.subject == "lunch?")
+            .expect("the other one");
+        assert_eq!(lunch.participants, vec![beto.node_id()]);
+    }
+
+    #[test]
+    fn a_conversation_with_nobody_else_still_names_this_machine() {
+        // Dropping this node unconditionally would leave a note to self as a
+        // row with an empty space where a name goes.
+        let (_dir, service) = service();
+        service
+            .send(
+                draft_to_self(&service, "note to self", "body"),
+                SenderKind::Human,
+            )
+            .expect("send");
+
+        let found = service
+            .conversations(&ConversationQuery::default())
+            .expect("a list");
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].participants, vec![service.identity()]);
+        assert_eq!(found[0].messages, 1, "one message, in two boxes");
+    }
 
     #[test]
     fn marking_a_message_read_moves_it_out_of_the_unread_count() {

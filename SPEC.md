@@ -275,6 +275,13 @@ POST   /api/v1/messages                    multipart: json part `message` + N fi
 POST   /api/v1/messages/{id}/reply         same, with in_reply_to preset
 POST   /api/v1/messages/{id}/read          move new → cur
 GET    /api/v1/messages/{id}/attachments/{sha}   streams blob; triggers fetch if not inline & not cached
+GET    /api/v1/threads?with=&limit=       conversations, the one that moved last first
+       # A conversation *is* a thread: one row per thread_id, carrying the
+       # subject it opened with, the machines it is with, the last message,
+       # and how many of it are unread — counted once each, however many
+       # boxes hold them. `with` takes a node id, whole or short, and a
+       # machine this node does not know is refused rather than answered
+       # with an empty list.
 GET    /api/v1/threads/{thread_id}
 
 GET    /api/v1/events                      SSE: message.received, message.delivered, peer.seen, peer.online, peer.offline

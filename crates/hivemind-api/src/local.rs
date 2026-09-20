@@ -31,6 +31,7 @@ use crate::service::{Draft, MailService};
 
 pub mod group;
 pub mod sessions;
+pub mod threads;
 
 /// Shared state for the loopback router.
 pub type AppState = Arc<MailService>;
@@ -451,7 +452,8 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/messages/{id}/attachments/{sha}",
             get(get_attachment),
         )
-        .route("/api/v1/threads/{thread_id}", get(get_thread))
+        .route("/api/v1/threads", get(threads::list_threads))
+        .route("/api/v1/threads/{thread_id}", get(threads::get_thread))
         .route("/api/v1/sessions", get(sessions::list_sessions))
         .route(
             "/api/v1/sessions/{id}",
@@ -818,28 +820,6 @@ pub(crate) async fn mark_read(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[utoipa::path(
-    get, path = "/api/v1/threads/{thread_id}",
-    params((
-        "thread_id" = String, Path,
-        description = "The thread id, or the id of any message in it, whole or the tail the inbox prints"
-    )),
-    responses((status = 200, body = Vec<MessageSummary>), (status = 404, body = Problem))
-)]
-pub(crate) async fn get_thread(
-    State(service): State<AppState>,
-    Path(thread_id): Path<String>,
-) -> Result<Json<Vec<MessageSummary>>, Problem> {
-    let id = service.resolve_message(&thread_id)?;
-    Ok(Json(
-        service
-            .thread_of(id)?
-            .into_iter()
-            .map(MessageSummary::from)
-            .collect(),
-    ))
-}
-
 /// The SSE stream (SPEC §7.1).
 #[utoipa::path(
     get, path = "/api/v1/events",
@@ -942,7 +922,7 @@ mod tests {
     }
 
     /// Put `friend` in the address book as a member.
-    fn admit(service: &Arc<MailService>, seed: u8) -> NodeId {
+    pub(super) fn admit(service: &Arc<MailService>, seed: u8) -> NodeId {
         let friend = hivemind_core::identity::Identity::from_seed([seed; 32]).expect("identity");
         let id = friend.node_id();
         service

@@ -834,10 +834,70 @@
         }
       }
     },
+    "/api/v1/threads": {
+      "get": {
+        "tags": [
+          "messages"
+        ],
+        "operationId": "list_threads",
+        "parameters": [
+          {
+            "name": "with",
+            "in": "path",
+            "description": "Only conversations with this machine: a node id, whole or in the short\nform `/api/v1/peers` shows.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "path",
+            "description": "How many to return.",
+            "required": true,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ConversationSummary"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/threads/{thread_id}": {
       "get": {
         "tags": [
-          "local"
+          "messages"
         ],
         "operationId": "get_thread",
         "parameters": [
@@ -956,6 +1016,67 @@
             "type": "integer",
             "format": "int64",
             "description": "Its size in bytes.",
+            "minimum": 0
+          }
+        }
+      },
+      "ConversationSummary": {
+        "type": "object",
+        "description": "One conversation, as the chat list shows it (SPEC §7.1).",
+        "required": [
+          "thread_id",
+          "subject",
+          "participants",
+          "messages",
+          "unread",
+          "last_id",
+          "last_from",
+          "last_sender_kind",
+          "last_at"
+        ],
+        "properties": {
+          "last_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it was sent. The list is ordered by this, newest first."
+          },
+          "last_from": {
+            "type": "string",
+            "description": "Who sent the most recent message."
+          },
+          "last_id": {
+            "type": "string",
+            "description": "The most recent message's id."
+          },
+          "last_sender_kind": {
+            "type": "string",
+            "description": "`human` if a person typed the most recent message, `agent` if a Claude\nsent it."
+          },
+          "messages": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many messages are in it, counted once each however many boxes hold\nthem.",
+            "minimum": 0
+          },
+          "participants": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The machines it is with — this node is left out, unless it is the only\none in the conversation."
+          },
+          "subject": {
+            "type": "string",
+            "description": "The subject it opened with. The replies are all `Re:` it."
+          },
+          "thread_id": {
+            "type": "string",
+            "description": "The thread every message in it carries, which is also the id of the\nmessage that opened it. Pass it to `GET /api/v1/threads/{thread_id}` to\nread it, or to a reply to continue it."
+          },
+          "unread": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many of those are still unread.",
             "minimum": 0
           }
         }

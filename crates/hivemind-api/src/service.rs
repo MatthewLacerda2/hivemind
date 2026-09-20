@@ -19,7 +19,7 @@ use chrono::{DateTime, SubsecRound as _, Utc};
 use hivemind_core::blobs::{BlobError, BlobStore, check_attachment_name};
 use hivemind_core::config::DEFAULT_PEER_PORT;
 use hivemind_core::crypto::{Sha256Digest, Signature, SigningKey};
-use hivemind_core::index::{Index, IndexError, Query, Summary};
+use hivemind_core::index::{Conversation, ConversationQuery, Index, IndexError, Query, Summary};
 use hivemind_core::message::{
     AttachmentRef, CanonicalError, Kind, Message, MessageError, Recipient, SenderKind,
 };
