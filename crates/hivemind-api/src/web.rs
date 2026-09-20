@@ -768,7 +768,6 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
-    use hivemind_core::crypto::SigningKey;
     use hivemind_core::peer::NodeId;
     use http_body_util::BodyExt as _;
     use tower::ServiceExt as _;
@@ -777,11 +776,15 @@ mod tests {
 
     fn app() -> (tempfile::TempDir, Router, Arc<MailService>) {
         let dir = tempfile::tempdir().expect("temp dir");
-        let identity = NodeId::from_certificate_der(b"this node");
+        // A real certificate and key. With the placeholder that stood here,
+        // anything reaching the network failed while building the TLS
+        // configuration, so a test about an address that does not answer never
+        // contacted an address at all (#57).
+        let identity = hivemind_core::identity::Identity::from_seed([3u8; 32]).expect("identity");
         let node = NodeDescription {
-            id: identity,
-            certificate: b"this node".to_vec(),
-            private_key: Vec::new(),
+            id: identity.node_id(),
+            certificate: identity.certificate_der().to_vec(),
+            private_key: identity.private_key_pkcs8().expect("key"),
             name: "test".to_owned(),
             owner: Some("tester".to_owned()),
             callback_host: "127.0.0.1".to_owned(),
@@ -793,8 +796,7 @@ mod tests {
             tailscale: hivemind_core::config::Tailscale::Auto,
         };
         let service = Arc::new(
-            MailService::open(dir.path(), node, SigningKey::from_bytes(&[11u8; 32]))
-                .expect("service"),
+            MailService::open(dir.path(), node, identity.signing_key().clone()).expect("service"),
         );
         (dir, router(Arc::clone(&service)), service)
     }
@@ -820,7 +822,14 @@ mod tests {
         (status, String::from_utf8_lossy(&bytes).into_owned())
     }
 
-    async fn post_form(router: &Router, path: &str, form: &str) -> (StatusCode, Option<String>) {
+    /// The status, any `Location`, and the body — a handler that answers 200
+    /// with nothing in it is not the same as one that re-renders the page, and
+    /// only the body tells them apart (#57).
+    async fn post_form(
+        router: &Router,
+        path: &str,
+        form: &str,
+    ) -> (StatusCode, Option<String>, String) {
         let response = router
             .clone()
             .oneshot(
@@ -839,7 +848,17 @@ mod tests {
             .get("location")
             .and_then(|v| v.to_str().ok())
             .map(ToOwned::to_owned);
-        (status, location)
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        (
+            status,
+            location,
+            String::from_utf8_lossy(&bytes).into_owned(),
+        )
     }
 
     fn send_to_self(service: &Arc<MailService>, subject: &str, body: &str) -> ulid::Ulid {
@@ -939,9 +958,21 @@ mod tests {
     async fn contacting_an_address_that_does_not_answer_stays_on_the_page_and_says_so() {
         // A redirect to the list would look as though it had worked.
         let (_dir, router, _service) = app();
-        let (status, location) = post_form(&router, "/peers/join", "host=127.0.0.1%3A1").await;
+        let (status, location, html) =
+            post_form(&router, "/peers/join", "host=127.0.0.1%3A1").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(location, None, "no redirect when nothing was reached");
+        // The status and the missing redirect are also what an empty answer
+        // looks like, so the page has to be there and has to carry the
+        // complaint.
+        assert!(
+            html.contains("<main id=\"main\">"),
+            "the peers page: {html}"
+        );
+        assert!(
+            html.contains("127.0.0.1:1"),
+            "the page should name the address that did not answer: {html}"
+        );
     }
 
     #[tokio::test]
@@ -978,7 +1009,7 @@ mod tests {
         let id = send_to_self(&service, "question", "what time?");
         let (_, message) = service.get(id).expect("get");
 
-        let (status, location) = post_form(
+        let (status, location, _) = post_form(
             &router,
             &format!("/thread/{}/reply", message.thread_id),
             "body=one+o%27clock",
