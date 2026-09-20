@@ -141,13 +141,16 @@ def verdict(
         return Outcome(label, OK, 0, seconds, [f"{head}  {' · '.join(kept)}"])
 
     if returncode == SKIPPED:
+        # One line: the reason. Anything after it is `just` reporting the 79 it
+        # was handed as a recipe failure, which is expected — nothing in the
+        # chain between here and the gate's own body knows what 79 means.
         reason = printable[0] if printable else "no reason given"
         return Outcome(
             label,
             SKIP,
             returncode,
             seconds,
-            [f"{'skip':<8}{label:<{_LABEL_WIDTH}}{stamp}  {reason}", *printable[1:]],
+            [f"{'skip':<8}{label:<{_LABEL_WIDTH}}{stamp}  {reason}"],
         )
 
     if returncode < 0:

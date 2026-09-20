@@ -239,7 +239,10 @@ _dist-check:
     #!/usr/bin/env bash
     set -euo pipefail
     if ! command -v dist >/dev/null 2>&1; then
-        echo "dist: not installed — `cargo install cargo-dist --locked` to check the release workflow"
+        # Single quotes: backticks inside a double-quoted string are command
+        # substitution, so this advice used to *run* `cargo install` on a
+        # machine that did not have dist — found while testing the skip (#71).
+        echo 'dist: not installed — cargo install cargo-dist --locked to check the release workflow'
         # 79 rather than 0: a check that declined to run has not passed (#71).
         exit 79
     fi

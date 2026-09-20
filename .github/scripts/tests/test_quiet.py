@@ -95,6 +95,19 @@ class Verdict(unittest.TestCase):
         self.assertNotIn("ok ", lines_of(out))
         self.assertIn("not installed", lines_of(out))
 
+    def test_a_skip_says_the_reason_and_nothing_else(self):
+        # What follows the reason is `just` calling the 79 a recipe failure,
+        # which it is not, and which nobody needs told.
+        out = verdict(
+            "dist-check",
+            SKIPPED,
+            0.1,
+            "dist: not installed\nerror: recipe `_dist-check` failed with exit"
+            " code 79\n",
+        )
+        self.assertEqual(len(out.lines), 1)
+        self.assertNotIn("recipe", out.lines[0])
+
     def test_a_skip_without_a_reason_admits_it_has_none(self):
         out = verdict("dist-check", SKIPPED, 0.1, "")
         self.assertIn("no reason given", lines_of(out))
