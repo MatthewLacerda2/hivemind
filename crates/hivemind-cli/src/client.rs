@@ -243,21 +243,3 @@ fn problem_error(response: &Response) -> anyhow::Error {
         .unwrap_or("the daemon rejected the request");
     anyhow::anyhow!("{detail}")
 }
-
-/// Read a body argument, falling back to stdin for `-` or nothing at all.
-pub(crate) fn body_from_arg_or_stdin(arg: Option<&str>) -> Result<String> {
-    match arg {
-        Some("-") | None => {
-            use std::io::Read as _;
-            let mut buffer = String::new();
-            std::io::stdin()
-                .read_to_string(&mut buffer)
-                .context("could not read the message body from stdin")?;
-            if buffer.trim().is_empty() {
-                bail!("the message body is empty");
-            }
-            Ok(buffer)
-        }
-        Some(text) => Ok(text.to_owned()),
-    }
-}

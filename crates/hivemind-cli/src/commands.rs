@@ -12,7 +12,8 @@ use hivemind_core::index::Index;
 use hivemind_core::store::MailStore;
 use serde::Deserialize;
 
-use crate::client::{Client, body_from_arg_or_stdin};
+use crate::body;
+use crate::client::Client;
 use crate::paths;
 
 /// Print the `OpenAPI` document (SPEC §7).
@@ -438,12 +439,13 @@ pub(crate) async fn send(
     subject: &str,
     attach: &[std::path::PathBuf],
     body: Option<&str>,
+    trailing_body: Option<&str>,
 ) -> Result<()> {
     anyhow::ensure!(
         !to.is_empty(),
         "who is this for? pass a node id, an owner name, or `everyone`"
     );
-    let body = body_from_arg_or_stdin(body)?;
+    let body = body::resolve(body, trailing_body)?;
 
     // Absolute, because the daemon reads them and it is not in this directory.
     let attachments = attach
@@ -713,8 +715,13 @@ pub(crate) async fn read(api: &str, id: &str, json: bool) -> Result<()> {
 }
 
 /// Reply to a message (SPEC §10).
-pub(crate) async fn reply(api: &str, id: &str, body: Option<&str>) -> Result<()> {
-    let body = body_from_arg_or_stdin(body)?;
+pub(crate) async fn reply(
+    api: &str,
+    id: &str,
+    body: Option<&str>,
+    trailing_body: Option<&str>,
+) -> Result<()> {
+    let body = body::resolve(body, trailing_body)?;
     let accepted: Accepted = Client::new(api)
         .post(
             &format!("/api/v1/messages/{id}/reply"),

@@ -6,6 +6,7 @@
 //! exceptions are `hook check`, which reads the index so it can answer in under
 //! 100 ms, and `reindex`, which takes the store lock (SPEC §10).
 
+mod body;
 mod client;
 mod colour;
 mod commands;
@@ -68,9 +69,13 @@ enum Command {
         /// can be moved or deleted afterwards.
         #[arg(short = 'a', long = "attach")]
         attach: Vec<std::path::PathBuf>,
-        /// The body. Omit, or pass `-`, to read it from stdin.
-        #[arg(last = true)]
+        /// The body, spelled like the subject rather than after a `--`.
+        #[arg(short = 'b', long = "body", value_name = "BODY")]
         body: Option<String>,
+        /// The body, after `--`. Omit both and it is read from stdin unless
+        /// stdin is a terminal; `-` reads stdin either way.
+        #[arg(last = true, value_name = "BODY")]
+        trailing_body: Option<String>,
     },
     /// List your mail.
     Inbox {
@@ -108,8 +113,13 @@ enum Command {
     Reply {
         /// The message being replied to.
         id: String,
-        /// The body. Omit, or pass `-`, to read it from stdin.
+        /// The body, spelled like `send`'s.
+        #[arg(short = 'b', long = "body", value_name = "BODY")]
         body: Option<String>,
+        /// The body, as a plain argument. Omit both and it is read from stdin
+        /// unless stdin is a terminal; `-` reads stdin either way.
+        #[arg(value_name = "BODY")]
+        trailing_body: Option<String>,
     },
     /// Rebuild the query index from the mail files.
     Reindex,
@@ -287,7 +297,18 @@ async fn main() -> Result<()> {
             subject,
             attach,
             body,
-        } => commands::send(&cli.api, &to, &subject, &attach, body.as_deref()).await,
+            trailing_body,
+        } => {
+            commands::send(
+                &cli.api,
+                &to,
+                &subject,
+                &attach,
+                body.as_deref(),
+                trailing_body.as_deref(),
+            )
+            .await
+        }
         Command::Inbox {
             r#box,
             unread,
@@ -296,7 +317,11 @@ async fn main() -> Result<()> {
         } => commands::inbox(&cli.api, r#box, unread, limit, json).await,
         Command::Sent { limit, json } => commands::sent(&cli.api, limit, json).await,
         Command::Read { id, json } => commands::read(&cli.api, &id, json).await,
-        Command::Reply { id, body } => commands::reply(&cli.api, &id, body.as_deref()).await,
+        Command::Reply {
+            id,
+            body,
+            trailing_body,
+        } => commands::reply(&cli.api, &id, body.as_deref(), trailing_body.as_deref()).await,
         Command::Reindex => commands::reindex(cli.home.as_deref()),
         Command::Init {
             name,

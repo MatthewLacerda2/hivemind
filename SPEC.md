@@ -360,17 +360,19 @@ hivemind group [create [--replace]]   # show the group; `create` makes a new key
 hivemind pair <code> [--replace]      # store the key; the one command a new machine runs after `init`
 hivemind join <host[:port]>           # contact a node discovery cannot find
 hivemind peers [refresh|remove <id>|forget-addr <id> <host:port>]  # online, last seen, sessions
-hivemind send <to> -s <subject> [-a file]... [body | -]   # body from arg or stdin
+hivemind send <to> -s <subject> [-a file]... [-b <body>] [-- body | -]   # body from arg or stdin
 hivemind inbox [--unread] [--box <new|cur|out|sent>] [--json]  # new + cur by default
 hivemind sent                         # out + sent: what left here, delivered or not
 hivemind read <id>
-hivemind reply <id> [body | -]
+hivemind reply <id> [-b <body>] [body | -]
 hivemind reindex
 hivemind hook check|install|uninstall
 hivemind mcp install|print
 hivemind service install|uninstall|restart|logs
 hivemind doctor                       # checks: daemon, binary, ports, tailscale, claude on PATH, hooks, mDNS, peer addresses
 ```
+
+The body of a message is taken three ways, and the rules between them are part of the contract (#38). `-b` / `--body` spells it like `--subject`, because the two are the same kind of thing and only one of them used to need a `--` in front of it. `--` still works, and is still the way to send a body starting with a hyphen from the command line. Given **both**, the CLI refuses rather than picking: two explicit bodies mean two different things and only one can be sent. Given **neither**, the body is read from stdin when stdin is not a terminal — an argument always beats the pipe, because a redirected stdin is ambient rather than a claim — and when stdin *is* a terminal the CLI says what to pass instead of waiting for a body nobody is typing. `-` in either spelling reads stdin whichever it is.
 
 `clap` with derive. `--json` on every read command. Colors via `owo-colors`, respecting `NO_COLOR`. The CLI talks to the daemon over `127.0.0.1:8401`; it never touches `mail/` directly except `hook check` (read-only index) and `reindex` (daemon must be stopped or it takes a lock).
 

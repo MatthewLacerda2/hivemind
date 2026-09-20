@@ -91,6 +91,124 @@ fn sending_the_same_message_twice_in_a_row_warns_but_still_sends_it() {
 }
 
 #[test]
+fn the_body_is_an_option_as_well_as_a_trailing_argument() {
+    // #38: subject and body are the same kind of thing, and only one of them
+    // needed a `--` in front of it. Through the real binary, because the clap
+    // wiring is the whole of what this is about.
+    let daemon = Daemon::start(NAME);
+
+    daemon.run(&["send", "everyone", "-s", "sem hifen", "-b", "o corpo"]);
+    let inbox = json(&daemon.run(&["inbox", "--json"]));
+    let id = inbox[0]["id"].as_str().expect("id").to_owned();
+    assert_eq!(
+        json(&daemon.run(&["read", &id, "--json"]))["body"],
+        "o corpo"
+    );
+
+    daemon.run(&["reply", &id, "--body", "a resposta"]);
+    let replies = json(&daemon.run(&["inbox", "--json"]));
+    let latest = replies[0]["id"].as_str().expect("id").to_owned();
+    assert_eq!(
+        json(&daemon.run(&["read", &latest, "--json"]))["body"],
+        "a resposta"
+    );
+}
+
+#[test]
+fn a_body_given_twice_is_refused_rather_than_guessed_at() {
+    // Two explicit bodies mean two different things and only one can be sent,
+    // so nothing is sent at all (#28, #69).
+    let daemon = Daemon::start(NAME);
+
+    let (ok, said) =
+        daemon.try_run(&["send", "everyone", "-s", "duas", "-b", "uma", "--", "outra"]);
+    assert!(!ok, "two bodies cannot both be sent: {said}");
+    assert!(said.contains("twice"), "unhelpful: {said}");
+
+    let inbox = json(&daemon.run(&["inbox", "--json"]));
+    assert!(
+        inbox.as_array().expect("array").is_empty(),
+        "a refused send sends nothing: {inbox}"
+    );
+}
+
+#[test]
+fn a_body_omitted_altogether_comes_off_a_pipe() {
+    // SPEC §10 has promised `[body | -]` since M1. A pipe is what a script
+    // has, and it carries a body that starts with a hyphen better than `--`
+    // does. Through a real pipe on a real process: an in-process version of
+    // this passes whether the wiring exists or not.
+    let daemon = Daemon::start(NAME);
+
+    let (ok, said) = piping(
+        &daemon,
+        &["send", "everyone", "-s", "de um cano"],
+        "-- not a flag\n",
+    );
+    assert!(ok, "a piped body is a body: {said}");
+
+    let inbox = json(&daemon.run(&["inbox", "--json"]));
+    let id = inbox[0]["id"].as_str().expect("id").to_owned();
+    assert_eq!(
+        json(&daemon.run(&["read", &id, "--json"]))["body"],
+        "-- not a flag\n"
+    );
+}
+
+#[test]
+fn a_typed_body_beats_whatever_is_on_the_pipe() {
+    // Stdin being redirected is ambient — a runner, a `< /dev/null`, a script
+    // — so it is the fallback and never overrides an argument somebody typed.
+    // Only two *explicit* bodies are a refusal.
+    let daemon = Daemon::start(NAME);
+
+    let (ok, said) = piping(
+        &daemon,
+        &["send", "everyone", "-s", "escolha", "-b", "o argumento"],
+        "o cano",
+    );
+    assert!(ok, "the argument is enough on its own: {said}");
+
+    let inbox = json(&daemon.run(&["inbox", "--json"]));
+    let id = inbox[0]["id"].as_str().expect("id").to_owned();
+    assert_eq!(
+        json(&daemon.run(&["read", &id, "--json"]))["body"],
+        "o argumento"
+    );
+}
+
+/// Run the CLI against this daemon with something on stdin.
+///
+/// The harness's `run` uses `output()`, which hands the child a closed stdin;
+/// these tests are about what happens when it is a pipe with bytes in it.
+fn piping(daemon: &Daemon, args: &[&str], stdin: &str) -> (bool, String) {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_hivemind"))
+        .args(args)
+        .env("HIVEMIND_HOME", daemon.home())
+        .env("HIVEMIND_API", daemon.api())
+        .env("NO_COLOR", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the cli runs");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(stdin.as_bytes())
+        .expect("write the body");
+
+    let output = child.wait_with_output().expect("the cli finishes");
+    let mut said = String::from_utf8_lossy(&output.stdout).into_owned();
+    said.push_str(&String::from_utf8_lossy(&output.stderr));
+    (output.status.success(), said)
+}
+
+#[test]
 fn reading_a_message_clears_it_from_the_unread_count() {
     let daemon = Daemon::start(NAME);
     daemon.run(&["send", "everyone", "-s", "unread", "--", "body"]);
