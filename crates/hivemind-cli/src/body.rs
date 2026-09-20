@@ -48,7 +48,9 @@ pub(crate) fn choose(
 ) -> Result<Source> {
     let given = match (option, positional) {
         (Some(_), Some(_)) => {
-            bail!("the body was given twice, as `--body` and after `--` — pass it once, either way")
+            bail!(
+                "the body was given twice, as `--body` and as an argument — pass it once, either way"
+            )
         }
         (Some(text), None) | (None, Some(text)) => Some(text),
         (None, None) => None,
@@ -58,7 +60,7 @@ pub(crate) fn choose(
         Some("-") => Ok(Source::Stdin),
         Some(text) => Ok(Source::Text(text.to_owned())),
         None if stdin_is_terminal => bail!(
-            "no message body — pass it with `--body`, after `--`, or pipe it in; `-` reads stdin even from a terminal"
+            "no message body — pass it with `--body`, as an argument, or pipe it in; `-` reads stdin even from a terminal"
         ),
         None => Ok(Source::Stdin),
     }
