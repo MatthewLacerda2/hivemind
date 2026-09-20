@@ -8,6 +8,10 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 # Coverage floor for the crates that carry the logic (SPEC §13.2).
 COVERAGE_MIN := "85"
 
+# What the coverage gate does not measure: the integration tests themselves,
+# and the CLI, whose behaviour the integration tests cover end to end.
+COV_IGNORE := '(tests/|crates/hivemind-cli/)'
+
 # A long recipe with nothing to say should not spend a session's context saying
 # it (#71). `quiet.py` runs a command, prints one line when it passes and the
 # whole of its output when it does not, and never touches the exit status.
@@ -65,10 +69,16 @@ test-network:
 # Coverage report plus the gate on hivemind-core and hivemind-net.
 cov:
     cargo llvm-cov nextest --workspace --all-features --no-tests=warn \
-        --ignore-filename-regex '(tests/|crates/hivemind-cli/)' \
+        --ignore-filename-regex '{{COV_IGNORE}}' \
         --lcov --output-path lcov.info
+    @just _cov-table
+
+# The per-file table, from the profile data already on disk. CI's coverage
+# summary prints the same table, and a copy of the expression there is a second
+# place for it to be wrong.
+_cov-table:
     cargo llvm-cov report --summary-only \
-        --ignore-filename-regex '(tests/|crates/hivemind-cli/)'
+        --ignore-filename-regex '{{COV_IGNORE}}'
 
 # The per-file table is `just cov`'s, where somebody has asked to read it. This
 # one is asked twenty times a session and the answer wanted is the number (#71).
@@ -77,12 +87,12 @@ cov:
 cov-gate *ARGS:
     @{{QUIET}} {{ARGS}} --label cov-gate -- \
         cargo llvm-cov nextest --workspace --all-features --no-tests=warn \
-        --ignore-filename-regex '(tests/|crates/hivemind-cli/)' \
+        --ignore-filename-regex '{{COV_IGNORE}}' \
         --lcov --output-path lcov.info \
         --fail-under-lines {{COVERAGE_MIN}}
     @python3 .github/scripts/coverage.py --floor {{COVERAGE_MIN}} -- \
         cargo llvm-cov report --json --summary-only \
-        --ignore-filename-regex '(tests/|crates/hivemind-cli/)'
+        --ignore-filename-regex '{{COV_IGNORE}}'
 
 # -------------------------------------------------------------- supply chain ----
 
