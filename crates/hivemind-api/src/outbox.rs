@@ -298,7 +298,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hivemind_core::crypto::SigningKey;
     use hivemind_core::store::Mailbox;
     use hivemind_net::discovery::Seen as _;
 
@@ -306,11 +305,14 @@ mod tests {
 
     fn service() -> (tempfile::TempDir, Arc<MailService>) {
         let dir = tempfile::tempdir().expect("temp dir");
-        let id = NodeId::from_certificate_der(b"this node");
+        // A real certificate and key, not a placeholder: without them the TLS
+        // client cannot be built, so a greeting fails before it reaches the
+        // network and no test can observe one being sent (#57).
+        let identity = hivemind_core::identity::Identity::from_seed([1u8; 32]).expect("identity");
         let node = NodeDescription {
-            id,
-            certificate: b"this node".to_vec(),
-            private_key: Vec::new(),
+            id: identity.node_id(),
+            certificate: identity.certificate_der().to_vec(),
+            private_key: identity.private_key_pkcs8().expect("key"),
             name: "test".to_owned(),
             owner: None,
             callback_host: "127.0.0.1".to_owned(),
@@ -321,8 +323,8 @@ mod tests {
             presence_interval: hivemind_core::config::DEFAULT_PRESENCE_INTERVAL,
             tailscale: hivemind_core::config::Tailscale::Auto,
         };
-        let service = MailService::open(dir.path(), node, SigningKey::from_bytes(&[11u8; 32]))
-            .expect("service");
+        let service =
+            MailService::open(dir.path(), node, identity.signing_key().clone()).expect("service");
         (dir, Arc::new(service))
     }
 
@@ -438,21 +440,23 @@ mod tests {
         );
     }
 
-    fn stranger_on_the_lan(id: NodeId) -> hivemind_net::discovery::Discovered {
+    fn stranger_on_the_lan(id: NodeId, port: u16) -> hivemind_net::discovery::Discovered {
         hivemind_net::discovery::Discovered {
             id,
             name: "their-laptop".to_owned(),
             owner: Some("ana".to_owned()),
-            // Port 1 on loopback: a greeting fails at once rather than
-            // hanging the test on an address that never answers.
             addr: hivemind_core::peerbook::PeerAddr {
                 host: "127.0.0.1".to_owned(),
-                port: 1,
+                port,
                 source: hivemind_core::peerbook::AddrSource::Mdns,
                 last_ok: None,
             },
         }
     }
+
+    /// Port 1 on loopback: nothing listens, so a greeting fails at once
+    /// rather than hanging a test on an address that never answers.
+    const NOBODY_HOME: u16 = 1;
 
     #[tokio::test]
     async fn a_stranger_on_the_lan_is_listed_but_not_greeted_by_a_node_in_no_group() {
@@ -462,7 +466,7 @@ mod tests {
         let (_dir, service) = service();
         let sink = ServiceSink::new(Arc::clone(&service));
 
-        sink.seen(stranger_on_the_lan(node(5)));
+        sink.seen(stranger_on_the_lan(node(5), NOBODY_HOME));
 
         let seen = service.seen_nodes().expect("seen");
         assert_eq!(seen.len(), 1);
@@ -475,16 +479,26 @@ mod tests {
 
     #[tokio::test]
     async fn a_stranger_on_the_lan_is_greeted_by_a_node_in_a_group() {
+        // The `greeted` map is not the greeting. `due_a_greeting` marks the
+        // node as a side effect of being asked, so a sink that returns
+        // without greeting leaves exactly the same entry behind as one that
+        // greets — which is why dropping the `!` in front of it survived a
+        // mutation sweep (#57). The greeting itself is a connection, so the
+        // test answers the door.
         let (_dir, service) = service();
         service.create_group(false).expect("create");
+        let door = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = door.local_addr().expect("local addr").port();
         let sink = ServiceSink::new(Arc::clone(&service));
 
-        sink.seen(stranger_on_the_lan(node(6)));
+        sink.seen(stranger_on_the_lan(node(6), port));
 
-        assert!(
-            sink.greeted.lock().expect("lock").contains_key(&node(6)),
-            "a node in the same group becomes a peer by being greeted"
-        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), door.accept())
+            .await
+            .expect("a node in a group greets a stranger discovered on the LAN")
+            .expect("accept the greeting");
     }
 
     #[test]
