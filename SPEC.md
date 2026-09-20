@@ -376,6 +376,7 @@ hivemind join <host[:port]>           # contact a node discovery cannot find
 hivemind peers [refresh|remove <id>|forget-addr <id> <host:port>]  # online, last seen, sessions
 hivemind send <to> -s <subject> [-a file]... [-b <body>] [-- body | -]   # body from arg or stdin
 hivemind inbox [--unread] [--box <new|cur|out|sent>] [--json]  # new + cur by default
+hivemind chats [--with <peer>] [--limit N] [--json]   # the conversations, the one that moved last first
 hivemind sent                         # out + sent: what left here, delivered or not
 hivemind wait [--from <peer>] [--thread <id>] [--timeout <30s|5m>] [--json]  # block until mail arrives; 3 if the timeout wins
 hivemind read <id>                    # says how many more are in the thread, and how to see them
@@ -387,6 +388,16 @@ hivemind mcp install|print
 hivemind service install|uninstall|restart|logs
 hivemind doctor                       # checks: daemon, binary, ports, tailscale, claude on PATH, hooks, mDNS, peer addresses
 ```
+
+`hivemind chats` lists the conversations rather than the messages: one line per
+thread, carrying the subject it opened with, the machines it is with, when it
+last moved, and how much of it is unread — counted once per message, however
+many boxes hold it. A conversation **is** a thread (#43); there is no second
+concept beside it, `hivemind thread <id>` opens one and `hivemind reply <id>`
+continues it, and both take the id this prints. A new subject with the same
+machine is a new conversation, and the way to start one is `hivemind send`.
+`--with` takes a node id, whole or short, and a machine this one does not know
+is refused rather than answered with an empty list.
 
 `hivemind wait` blocks until mail arrives and prints it exactly as `inbox` does, for somebody — or a Claude — who has decided to wait for an answer rather than ask again in a minute: `hivemind wait && notify-send 'mail'`. It is the user saying "I will wait" and never the daemon running anything because mail arrived, which stays reserved (§12). Four rules make it a door rather than another polling loop (#40): it subscribes to `/api/v1/events` **before** it looks in the box, so mail arriving between the two is still reported; **unread mail already there ends the wait at once**, rather than waiting for the next one; `--timeout` exits **3**, a status no other outcome uses, so "nothing arrived" can never be read as "something did" — and never 1, which is what anything going wrong exits with; and a daemon that goes away mid-wait, or a `--from` that names nobody this machine knows, is an error rather than a wait that can never end. `--from` takes a node id, its short form, a machine name or an owner — an owner's machines all count — and `--thread` takes any message id in the conversation, like `hivemind thread`.
 

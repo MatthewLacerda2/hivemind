@@ -102,6 +102,21 @@ run — or `everyone`.
 sits in the outbox and is retried until it lands. A laptop opened on Monday
 receives Friday's mail.
 
+**`hivemind chats` is the list of conversations.** One line each rather than
+one per message: the subject it opened with, who it is with, when it last moved
+and how much of it is unread, newest activity first. `hivemind inbox` shows six
+messages about one subject and three about another, with the same machine, as
+nine mixed lines; this shows two conversations. `--with <machine>` narrows it to
+"my conversations with that machine". A conversation is a thread, so the id it
+prints is the one `hivemind thread` opens and `hivemind reply` continues — and
+**a new subject with the same person is just `hivemind send`**, which starts a
+new conversation with them.
+
+**`hivemind reply <id>` answers a conversation or a message.** Given a
+conversation's id — the one `hivemind chats` prints — it answers whatever that
+conversation got to, so continuing a subject does not mean hunting for the id of
+its latest message. Given any other message id, it answers that message.
+
 **`hivemind thread <id>` reads a conversation as a conversation.** Any message
 in it, not only the first — the id you have to hand is the one you were just
 reading — oldest first, with who said what. `hivemind read` says how many more
