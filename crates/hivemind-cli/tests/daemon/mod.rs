@@ -181,12 +181,35 @@ impl Daemon {
     }
 
     /// Does our own loopback API answer? Only our process can.
+    ///
+    /// A request written by hand over a plain socket, rather than through an
+    /// HTTP client. This is called from inside `#[tokio::test]` as well as
+    /// outside it, and `reqwest::blocking` builds a runtime of its own that
+    /// panics when it is dropped in an async context — which is what kept
+    /// `mcp_tools.rs` on its own copy of this harness rather than on this
+    /// line. That copy reached for `curl`, which is a whole process per poll
+    /// for a request that fits on one.
     fn answers_locally(&self) -> bool {
-        reqwest::blocking::Client::new()
-            .get(format!("{}/healthz", self.api()))
-            .timeout(Duration::from_secs(2))
-            .send()
-            .is_ok_and(|response| response.status().is_success())
+        use std::io::{Read as _, Write as _};
+
+        let Ok(mut socket) = std::net::TcpStream::connect(("127.0.0.1", self.port)) else {
+            return false;
+        };
+        let _ = socket.set_read_timeout(Some(Duration::from_secs(2)));
+        let _ = socket.set_write_timeout(Some(Duration::from_secs(2)));
+        let request = format!(
+            "GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+            self.port
+        );
+        if socket.write_all(request.as_bytes()).is_err() {
+            return false;
+        }
+
+        // The status line is the whole answer, and `Connection: close` means
+        // the read ends by itself rather than on a content length.
+        let mut response = Vec::new();
+        let _ = socket.read_to_end(&mut response);
+        response.starts_with(b"HTTP/1.1 200")
     }
 
     /// Is anything listening on the peer port? By now that is us.
