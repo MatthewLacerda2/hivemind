@@ -196,6 +196,156 @@ impl Pass {
     }
 }
 
+/// How one address failed, coarsely enough to compare two of the same peer's.
+///
+/// The words are what goes in the log, so they are the ones somebody reading it
+/// has to make sense of unprompted: few, plain, and about the peer rather than
+/// about the code that reported it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Failure {
+    /// Nothing answered: a closed laptop, or an address that has moved on.
+    Unreachable,
+    /// Something answered and it was not the peer we pinned (SPEC §6.1).
+    Stranger,
+    /// The peer answered and would not take the message. Somebody has to act.
+    Refused,
+    /// The exchange broke after connecting, or the peer said it had a problem.
+    Broken,
+}
+
+impl Failure {
+    fn of(error: &ClientError) -> Self {
+        match error {
+            ClientError::Connect { .. } | ClientError::Timeout { .. } => Self::Unreachable,
+            ClientError::Handshake { .. } => Self::Stranger,
+            // A 4xx will not pass on its own — `403 not_paired` stays a 403
+            // until a human acts — and a 5xx is the peer's own trouble.
+            ClientError::Status { status, .. } => {
+                if *status >= 500 {
+                    Self::Broken
+                } else {
+                    Self::Refused
+                }
+            }
+            // A local TLS configuration failure is ours, not the peer's.
+            ClientError::Tls(_) | ClientError::Http { .. } | ClientError::Decode { .. } => {
+                Self::Broken
+            }
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Unreachable => "unreachable",
+            Self::Stranger => "stranger",
+            Self::Refused => "refused",
+            Self::Broken => "broken",
+        }
+    }
+}
+
+/// What one peer's turn in a pass did, as the log has to describe it (#32).
+///
+/// A delivery that leaves no trace is a delivery nobody can reason about: the
+/// incident this exists for was two minutes of polling the API and then the
+/// wrong conclusion — "stuck" — about a message that was merely backing off.
+struct Attempt<'a> {
+    peer: NodeId,
+    /// Every address tried that failed, in the order they were tried.
+    failures: Vec<(String, Failure)>,
+    /// The address that took the message, if one did.
+    delivered_to: Option<&'a str>,
+    /// Which attempt this was for this peer, counting from one.
+    number: u32,
+    /// The nominal wait before the next one — jitter moves the real one by up
+    /// to a quarter either way. It is the field the incident turned on, so it
+    /// is on every line that has a next attempt to describe, and on no other:
+    /// a delivered message has no next attempt and this is not read.
+    retry_in: Duration,
+}
+
+impl Attempt<'_> {
+    /// The addresses tried and how each one failed, as one field.
+    fn tried(&self) -> String {
+        self.failures
+            .iter()
+            .map(|(addr, failure)| format!("{addr} {}", failure.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// Whether this peer's addresses disagreed about what is wrong.
+    ///
+    /// One address failing the handshake while the others are merely unreachable
+    /// is the symptom of #29 — something on the network is answering on an
+    /// address we hold for this peer — and a line that names only the peer hides
+    /// it. A peer that is off fails the same way everywhere and says nothing
+    /// here, which is what keeps the warning worth reading.
+    ///
+    /// A success beside an ordinary failure is not disagreement either: a laptop
+    /// with a stale Wi-Fi address and a working Tailscale one is the normal
+    /// case. A success beside a *stranger* or a *refusal* is, because then two
+    /// machines answered the same question differently.
+    fn diverged(&self) -> bool {
+        let mut kinds = self.failures.iter().map(|(_, failure)| *failure);
+        let Some(first) = kinds.next() else {
+            return false;
+        };
+        if kinds.any(|failure| failure != first) {
+            return true;
+        }
+        self.delivered_to.is_some() && matches!(first, Failure::Stranger | Failure::Refused)
+    }
+
+    /// Say what happened, at a level the default filter passes.
+    ///
+    /// `info` for progress, because the log is the only place a human can watch
+    /// the outbox from, and `warn` for a refusal, because that is a condition
+    /// somebody has to resolve rather than one that passes on its own. Ids are
+    /// short and addresses are addresses: nothing here is a secret.
+    fn log(&self, why: &str) {
+        let peer = self.peer.short();
+        let retry_in = self.retry_in;
+        let attempt = self.number;
+
+        if let Some(addr) = self.delivered_to {
+            tracing::info!(%peer, %addr, attempt, "delivered");
+        } else if self.failures.is_empty() {
+            tracing::info!(%peer, attempt, ?retry_in, "no address known for this peer yet");
+        } else if self.failures.iter().any(|(_, f)| *f == Failure::Refused) {
+            let tried = self.tried();
+            tracing::warn!(
+                %peer,
+                %tried,
+                %why,
+                attempt,
+                ?retry_in,
+                "the peer refused the message; somebody has to resolve this"
+            );
+        } else {
+            let tried = self.tried();
+            tracing::info!(%peer, %tried, %why, attempt, ?retry_in, "not delivered yet");
+        }
+
+        if self.diverged() {
+            tracing::warn!(
+                %peer,
+                tried = %self.tried(),
+                "one address behaved differently from this peer's others; it may not be this peer"
+            );
+        }
+    }
+}
+
+/// How many attempts this recipient already has recorded against it.
+fn attempts_so_far(outbound: &Outbound, node: NodeId) -> u32 {
+    outbound
+        .recipients
+        .iter()
+        .find(|state| state.node == node)
+        .map_or(0, |state| state.attempts)
+}
+
 /// Try every outstanding recipient once, updating `outbound` in place.
 ///
 /// `addresses` returns where a peer might be, best guess first; each is tried
@@ -225,36 +375,63 @@ where
     pass.attempted = outstanding.len();
 
     for node in outstanding {
-        let known = addresses(node);
-        if known.is_empty() {
-            outbound.mark_attempted(node, now, "no known address for this peer");
-            pass.failed.push(node);
-            continue;
-        }
-
+        let mut failures = Vec::new();
         let mut last_error = None;
         let mut reached = None;
-        for addr in known {
+
+        for addr in addresses(node) {
             match transport.deliver(node, &addr, &outbound.message).await {
                 Ok(()) => {
                     reached = Some(addr);
                     break;
                 }
                 Err(error) => {
-                    tracing::debug!(%node, %addr, %error, "delivery attempt failed");
+                    // The whole error text, for the reader who has the summary
+                    // line and wants what rustls or the socket actually said.
+                    tracing::debug!(peer = %node.short(), %addr, %error, "an address failed");
+                    failures.push((addr, Failure::of(&error)));
                     last_error = Some(error);
                 }
             }
         }
 
+        let why = if let Some(error) = last_error {
+            error.to_string()
+        } else if reached.is_some() {
+            String::new()
+        } else {
+            // Not "no address could be tried": mDNS may supply one a minute
+            // from now, and SPEC §8 says delivery does not give up.
+            "no known address for this peer".to_owned()
+        };
+
         if let Some(addr) = reached {
+            // The failures recorded so far plus this, which worked.
+            let number = attempts_so_far(outbound, node).saturating_add(1);
             outbound.mark_delivered(node, now);
+            Attempt {
+                peer: node,
+                failures,
+                delivered_to: Some(&addr),
+                number,
+                retry_in: Duration::ZERO,
+            }
+            .log(&why);
             pass.delivered.push((node, addr));
         } else {
-            let why = last_error
-                .map_or_else(|| "no address could be tried".to_owned(), |e| e.to_string());
             outbound.mark_attempted(node, now, &why);
             pass.failed.push(node);
+            // After the mark, so the count and the interval are the ones the
+            // next pass will use rather than the ones the last one did.
+            let number = attempts_so_far(outbound, node);
+            Attempt {
+                peer: node,
+                failures,
+                delivered_to: None,
+                number,
+                retry_in: backoff(number, 0.5),
+            }
+            .log(&why);
         }
     }
 

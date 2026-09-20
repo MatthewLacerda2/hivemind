@@ -33,6 +33,9 @@ axum.workspace = true
 # `start_paused` lets the delivery loop be tested over simulated hours.
 tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
+# The delivery log is behaviour and is asserted on rather than hoped for (#32).
+# `fmt` with a writer of our own is how `tracing` is read back in a test.
+tracing-subscriber.workspace = true
 ulid.workspace = true
 
 [lints]
