@@ -126,14 +126,21 @@ def main(argv: list[str]) -> int:
         print("coverage.py: no report command given", file=sys.stderr)
         return 2
 
-    done = subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        errors="replace",
-        check=False,
-    )
+    try:
+        done = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
+            check=False,
+        )
+    except (FileNotFoundError, PermissionError) as exc:
+        # A report that could not be asked for is not a report.
+        print(verdict(None, floor)[1], flush=True)
+        print(f"  {command[0]}: {exc}", file=sys.stderr)
+        return 1
+
     # Both halves are needed: a process that failed has no verdict to give, and
     # neither has one that exited 0 without printing a number.
     measured = line_totals(done.stdout) if done.returncode == 0 else None

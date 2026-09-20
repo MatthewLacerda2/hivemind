@@ -259,16 +259,22 @@ web-build:
 # ------------------------------------------------------------------- all ----
 
 # What ci.yml runs, in its order — including the coverage gate, which runs as a
-# separate job there. This list and ci.yml's steps are the same list; if they
-# drift, that is the bug (SPEC §13.3).
+# separate job there. Run this before opening a PR (SPEC §16.6). This list and
+# ci.yml's steps are the same list; if they drift, that is the bug (SPEC §13.3).
 #
 # `workspace` is first and deliberately so: it is the one gate whose failure
 # makes every other gate's answer meaningless, and it costs milliseconds.
 CI_GATES := "workspace fmt-check lint size boundaries markers doc test scripts deny openapi-check web-build dist-check cov-gate"
 
+# The gates that already wrap their own work in quiet.py, because they are worth
+# running on their own too. They are streamed rather than summarised again: their
+# line carries the number — the count of tests that ran, the coverage percentage
+# — and a second `ok` printed over the top would throw that away.
+CI_REPORTING := "lint test openapi-check dist-check cov-gate"
+
 # Every gate, in ci.yml's order: one line each, everything from what failed
 ci *ARGS:
-    @{{QUIET}} {{ARGS}} --gates {{CI_GATES}}
+    @{{QUIET}} {{ARGS}} --reporting {{CI_REPORTING}} --gates {{CI_GATES}}
 
 # `ci` plus what nightly.yml runs on a schedule.
 ci-full: ci audit

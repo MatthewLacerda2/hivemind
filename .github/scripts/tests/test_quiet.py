@@ -122,6 +122,17 @@ class Running(unittest.TestCase):
         self.assertIn("out", lines_of(out))
         self.assertIn("err", lines_of(out))
 
+    def test_an_uncaptured_failure_does_not_claim_the_command_was_silent(self):
+        # Nothing was captured because nothing was captured, not because there
+        # was nothing to capture. Those are different things to somebody looking
+        # for the error, and the line has to say which. The command here is
+        # silent so this suite's own output stays quiet, which is the point of
+        # the whole change.
+        out = run("boom", [sys.executable, "-c", "raise SystemExit(4)"], verbose=True)
+        self.assertEqual(out.status, 4)
+        self.assertIn("streamed above", lines_of(out))
+        self.assertNotIn("produced no output", lines_of(out))
+
     def test_a_command_that_cannot_be_spawned_has_not_passed(self):
         out = run("ghost", ["hivemind-no-such-command-71"])
         self.assertEqual(out.state, quiet.FAIL)
@@ -157,9 +168,11 @@ class Gates(unittest.TestCase):
     def fake(self, outcomes):
         """A runner that answers from a script, recording what it was asked."""
         self.asked = []
+        self.captured = {}
 
-        def runner(label, command, verbose=False, tail=0):
+        def runner(label, command, verbose=False, tail=0, capture=True):
             self.asked.append(label)
+            self.captured[label] = capture
             return outcomes[label]
 
         return runner
@@ -211,6 +224,27 @@ class Gates(unittest.TestCase):
         self.assertIn("1 of 2 gates ok", out.getvalue())
         self.assertIn("1 skipped", out.getvalue())
 
+    def test_a_gate_that_speaks_for_itself_is_streamed_and_not_summarised(self):
+        # It has already printed its one line, with the count of tests that ran
+        # or the coverage percentage in it. Capturing that to print `ok` over the
+        # top of it would throw away the only part worth keeping.
+        outcomes = {
+            "doc": Outcome("doc", quiet.OK, 0, 1.0, ["ok doc"]),
+            "test": Outcome("test", quiet.OK, 0, 1.0, ["ok test"]),
+        }
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = run_gates(
+                ["doc", "test"], runner=self.fake(outcomes), reporting=("test",)
+            )
+        self.assertEqual(code, 0)
+        self.assertTrue(self.captured["doc"])
+        self.assertFalse(self.captured["test"])
+        printed = out.getvalue()
+        self.assertIn("ok doc", printed)
+        self.assertNotIn("ok test", printed)
+        self.assertIn("2 of 2 gates ok", printed)
+
     def test_a_gate_is_a_just_recipe(self):
         self.assertEqual(quiet.gate_command("cov-gate"), ["just", "cov-gate"])
 
@@ -234,6 +268,11 @@ class Parsing(unittest.TestCase):
         call = parse(["--gates", "lint", "test", "--verbose"])
         self.assertEqual(call.gates, ["lint", "test"])
         self.assertTrue(call.verbose)
+
+    def test_the_reporting_gates_are_a_list_of_their_own(self):
+        call = parse(["--reporting", "test", "--gates", "doc", "test"])
+        self.assertEqual(call.reporting, ["test"])
+        self.assertEqual(call.gates, ["doc", "test"])
 
     def test_tail_is_a_number(self):
         self.assertEqual(parse(["--tail", "2", "--", "true"]).tail, 2)
@@ -286,52 +325,50 @@ class Main(unittest.TestCase):
         self.assertIn("usage:", err.getvalue())
 
 
-class Nesting(unittest.TestCase):
-    """A wrapper inside a wrapper says nothing and changes nothing."""
+class Skips(unittest.TestCase):
+    """A skip is a pass to a shell and a skip to another wrapper."""
 
-    def setUp(self):
-        self.script = pathlib.Path(quiet.__file__)
+    SEVENTY_NINE = "import sys; print('dist: not installed'); sys.exit(79)"
+
+    def declined(self, env):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = main(
+                [
+                    "quiet.py",
+                    "--label",
+                    "dist-check",
+                    "--",
+                    sys.executable,
+                    "-c",
+                    self.SEVENTY_NINE,
+                ],
+                env=env,
+            )
+        return code, out.getvalue()
+
+    def test_on_its_own_a_declined_gate_exits_zero_as_it_always_did(self):
+        # CI runs `just dist-check` as its own step. Handing 79 to that step
+        # would turn a machine without `dist` into a red run.
+        code, printed = self.declined({})
+        self.assertEqual(code, 0)
+        self.assertIn("skip", printed)
+        self.assertIn("not installed", printed)
+
+    def test_inside_a_sweep_the_skip_is_handed_up_rather_than_flattened(self):
+        # The sweep counts skips apart from passes, and cannot do that if the
+        # wrapper below it has already turned the skip into a 0.
+        code, printed = self.declined({quiet.WRAPPED: "ci"})
+        self.assertEqual(code, SKIPPED)
+        self.assertIn("skip", printed)
 
     def test_the_decision_is_read_from_the_environment_it_is_given(self):
-        # The bug this argument exists for: with WRAPPED inherited from a sweep,
-        # the wrapper passed the command through and this suite's own tests
-        # judged a different code path than the one they name.
-        code = main(
-            [
-                "quiet.py",
-                "--label",
-                "inner",
-                "--",
-                sys.executable,
-                "-c",
-                "import sys; sys.exit(5)",
-            ],
-            env={quiet.WRAPPED: "outer"},
-        )
-        self.assertEqual(code, 5)
-
-    def test_an_inner_wrapper_passes_the_output_and_the_status_through(self):
-        done = subprocess.run(
-            [
-                sys.executable,
-                str(self.script),
-                "--label",
-                "inner",
-                "--",
-                sys.executable,
-                "-c",
-                "import sys; print('inner noise'); sys.exit(5)",
-            ],
-            env={**os.environ, quiet.WRAPPED: "outer"},
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            check=False,
-        )
-        self.assertEqual(done.returncode, 5)
-        self.assertIn("inner noise", done.stdout)
-        # No summary line of its own: the outer wrapper is reporting.
-        self.assertNotIn("FAILED", done.stdout)
+        # The bug this argument exists for: read from os.environ at the point of
+        # use, this choice made the suite behave differently under `just ci`
+        # than on its own, and `just scripts` passed alone and failed in the
+        # sweep.
+        self.assertEqual(self.declined({})[0], 0)
+        self.assertEqual(self.declined({quiet.WRAPPED: "ci"})[0], SKIPPED)
 
 
 if __name__ == "__main__":

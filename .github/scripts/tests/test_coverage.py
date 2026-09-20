@@ -160,6 +160,15 @@ class Main(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("FAILED", out.getvalue())
 
+    def test_a_report_command_that_is_not_there_is_not_a_pass(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            code = main(
+                ["coverage.py", "--floor", "85", "--", "hivemind-no-such-command-71"]
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("FAILED", out.getvalue())
+
     def test_no_command_is_refused(self):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(main(["coverage.py", "--floor", "85"]), 2)

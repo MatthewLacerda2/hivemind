@@ -31,24 +31,26 @@ states it therefore reports separately:
 - a command exiting `SKIPPED` (79) announces that it *declined* to check
   anything, usually because an optional tool is absent. That prints as `skipped`
   and never as `ok`, because "the tool is missing" and "the check passed" are
-  the two states this docstring is about. The wrapper exits 0 for it, so a gate
-  that was always allowed to skip still passes CI;
+  the two states this docstring is about. Run on its own the wrapper exits 0 for
+  it, so a gate that was always allowed to skip still passes CI; inside a sweep
+  it hands the 79 up, so the sweep can count it apart from a pass;
 - exit 0 is `ok`, whatever it printed or did not print.
 
-Three ways in:
+The ways in:
 
     quiet.py --label lint -- cargo clippy --workspace -- -D warnings
     quiet.py --gates fmt-check lint test        # each one as `just <gate>`
+    quiet.py --reporting test --gates …         # `test` speaks for itself
     quiet.py --verbose --label lint -- …        # stream the lot, summarise too
 
 `--gates` runs recipes in order and stops at the first failure, naming what did
 not run. An empty gate list is refused rather than reported as a clean sweep,
 for exactly the reason above: nothing ran, so nothing passed.
 
-Nesting is handled: inside a wrapper already reporting on us, a second wrapper
-passes the command through untouched rather than printing a second line. That is
-what lets `just ci` wrap `just lint` while `just lint` on its own is still
-quiet.
+Nesting is handled by `--reporting`: a gate that wraps its own work in this file
+is streamed rather than captured, so its line reaches the screen intact together
+with the number in it. That is what lets `just ci` list `test` beside `doc`
+while `just test` on its own is quiet too.
 """
 
 from __future__ import annotations
@@ -65,8 +67,9 @@ from dataclasses import dataclass, field
 # nearest thing to "this machine is not set up to run me".
 SKIPPED = 79
 
-# Set for children, so a wrapper inside a wrapper keeps quiet and lets the outer
-# one do the reporting.
+# Set for children: "your caller understands 79, so hand it up rather than
+# turning it into a 0". Without it a skip exits 0, which is what a recipe run on
+# its own has always done and what CI's own step for it expects.
 WRAPPED = "HIVEMIND_GATE_WRAPPED"
 
 # The escape hatch, as an environment variable so it reaches nested wrappers.
@@ -169,8 +172,25 @@ def _emit(lines: list[str]) -> None:
         print(line, flush=True)
 
 
-def run(label: str, command: list[str], tail: int = 0, verbose: bool = False) -> Outcome:
-    """Run `command`, capturing its output unless `verbose`."""
+# What a verbose run has instead of captured output. A failure must not claim the
+# command printed nothing when the reason is that nothing was captured.
+STREAMED = "(output streamed above rather than captured)"
+
+
+def run(
+    label: str,
+    command: list[str],
+    tail: int = 0,
+    verbose: bool = False,
+    capture: bool = True,
+) -> Outcome:
+    """Run `command`, capturing its output unless told not to.
+
+    `capture=False` is for a command that already reports itself in one line —
+    a recipe that wraps its own work in this file. Summarising a summary drops
+    the part worth keeping, which is the number in it: the count of tests that
+    ran, or the coverage percentage.
+    """
     env = dict(os.environ)
     env[WRAPPED] = label
     if verbose:
@@ -178,11 +198,12 @@ def run(label: str, command: list[str], tail: int = 0, verbose: bool = False) ->
 
     started = time.monotonic()
     try:
-        if verbose:
-            # Streamed rather than captured: whoever asked for everything wants
-            # it as it happens. The status is still ours to report.
+        if verbose or not capture:
+            # Streamed: whoever asked for everything wants it as it happens, and
+            # a command that speaks for itself should be heard. The status is
+            # still ours to judge.
             code = subprocess.call(command, env=env)
-            output = ""
+            output, tail = STREAMED, 0
         else:
             done = subprocess.run(
                 command,
@@ -206,8 +227,17 @@ def gate_command(gate: str) -> list[str]:
     return ["just", gate]
 
 
-def run_gates(gates: list[str], verbose: bool = False, runner=run) -> int:
+def run_gates(
+    gates: list[str],
+    verbose: bool = False,
+    runner=run,
+    reporting: tuple[str, ...] = (),
+) -> int:
     """Run each gate in order, one line each, stopping at the first failure.
+
+    A gate in `reporting` wraps its own work in this file and is also run on its
+    own, so it is streamed rather than captured and nothing is added to what it
+    said. Everything else is captured and gets its line from here.
 
     An empty list exits non-zero. A summary over no gates that read "all green"
     is the mistake `CLAUDE.md` records against the old wait-for-CI loop, and it
@@ -220,8 +250,12 @@ def run_gates(gates: list[str], verbose: bool = False, runner=run) -> int:
     started = time.monotonic()
     tally = {OK: 0, SKIP: 0}
     for index, gate in enumerate(gates, start=1):
-        outcome = runner(gate, gate_command(gate), verbose=verbose)
-        _emit(outcome.lines)
+        speaks = gate in reporting
+        outcome = runner(
+            gate, gate_command(gate), verbose=verbose, capture=not speaks
+        )
+        if not speaks:
+            _emit(outcome.lines)
         if outcome.state == FAIL:
             unrun = len(gates) - index
             print(
@@ -249,6 +283,7 @@ class Invocation:
     label: str = ""
     tail: int = 0
     gates: list[str] = field(default_factory=list)
+    reporting: list[str] = field(default_factory=list)
     command: list[str] = field(default_factory=list)
 
 
@@ -277,9 +312,10 @@ def parse(argv: list[str], env: dict[str, str] | None = None) -> Invocation:
             call.label = rest.pop(0) if rest else ""
         elif arg == "--tail":
             call.tail = int(rest.pop(0)) if rest else 0
-        elif arg == "--gates":
+        elif arg in ("--gates", "--reporting"):
+            into = call.gates if arg == "--gates" else call.reporting
             while rest and not rest[0].startswith("-"):
-                call.gates.append(rest.pop(0))
+                into.append(rest.pop(0))
         else:
             raise ValueError(f"quiet.py: unknown argument {arg}")
 
@@ -303,26 +339,27 @@ def main(argv: list[str], env: dict[str, str] | None = None) -> int:
         print(f"{exc}", file=sys.stderr)
         print(
             "usage: quiet.py [--verbose] --label NAME [--tail N] -- COMMAND…\n"
-            "       quiet.py [--verbose] --gates GATE…",
+            "       quiet.py [--verbose] [--reporting GATE…] --gates GATE…",
             file=sys.stderr,
         )
         return 2
 
     if call.gates:
-        return run_gates(call.gates, verbose=call.verbose)
+        return run_gates(
+            call.gates, verbose=call.verbose, reporting=tuple(call.reporting)
+        )
 
     if not call.command:
         print("quiet.py: nothing to run", file=sys.stderr)
         return 2
 
-    if env.get(WRAPPED):
-        # Something outside is already reporting on this command. Adding a
-        # second line about it would be noise, which is the thing being fixed.
-        code = subprocess.call(call.command)
-        return code
-
     outcome = run(call.label or call.command[0], call.command, call.tail, call.verbose)
     _emit(outcome.lines)
+    if outcome.state == SKIP and env.get(WRAPPED):
+        # The caller is another wrapper, which counts a skip apart from a pass.
+        # Flattening it to 0 here would lose that. On its own, the other branch
+        # exits 0, which is what this recipe has always done.
+        return outcome.code
     return outcome.status
 
 
