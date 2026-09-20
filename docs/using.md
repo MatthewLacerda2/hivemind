@@ -86,6 +86,7 @@ Through the MCP server, without leaving the conversation:
 | `send` | Send a message, with files if you want |
 | `inbox` | What has arrived — or, with `box`, what this machine sent |
 | `read` | Read one, and mark it read |
+| `thread` | Read the whole conversation one message belongs to, in order |
 | `reply` | Answer, staying in the thread |
 | `broadcast` | Send to everybody in the group this machine has met |
 | `download_attachment` | Fetch a file and get a path to open |
@@ -100,6 +101,13 @@ run — or `everyone`.
 **Sending never waits for the network.** A message to a machine that is asleep
 sits in the outbox and is retried until it lands. A laptop opened on Monday
 receives Friday's mail.
+
+**`hivemind thread <id>` reads a conversation as a conversation.** Any message
+in it, not only the first — the id you have to hand is the one you were just
+reading — oldest first, with who said what. `hivemind read` says how many more
+there are in the thread and points at it. It is the same thing the `thread` MCP
+tool answers, and the thing a Claude picking a session back up needs, because
+the thread is all it remembers of what was said.
 
 **`hivemind sent` answers "did it arrive?".** It lists what this machine sent,
 newest first, and marks what is still waiting for a recipient to take it. Any

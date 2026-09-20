@@ -582,7 +582,7 @@ impl MailService {
         Err(ServiceError::NoSuchMessage { id })
     }
 
-    /// Every message in a thread, oldest first.
+    /// Every message in a thread, oldest first, once each.
     ///
     /// # Errors
     /// Returns [`ServiceError::Index`] on failure.
@@ -593,7 +593,35 @@ impl MailService {
         })?;
         // A conversation reads forwards.
         found.reverse();
+
+        // The index holds a row per id *and* mailbox, so a message addressed to
+        // its own sender is in it twice: once as what arrived, once as what was
+        // sent. A listing should show both, because both boxes hold it. A
+        // conversation showing both reads as the same thing having been said
+        // twice, so the arrived copy wins, as it does in `get`.
+        let arrived: std::collections::HashSet<Ulid> = found
+            .iter()
+            .filter(|summary| matches!(summary.mailbox, Mailbox::New | Mailbox::Cur))
+            .map(|summary| summary.id)
+            .collect();
+        found.retain(|summary| {
+            matches!(summary.mailbox, Mailbox::New | Mailbox::Cur) || !arrived.contains(&summary.id)
+        });
         Ok(found)
+    }
+
+    /// Every message in the conversation `id` belongs to, oldest first.
+    ///
+    /// The id of **any** message in the thread, not only its root: nobody knows
+    /// by heart which one was first, and the id somebody has to hand is the one
+    /// they were just reading (#34).
+    ///
+    /// # Errors
+    /// [`ServiceError::NoSuchMessage`] if no mailbox holds `id`. A conversation
+    /// nobody has is absent rather than empty, and an empty list would read as
+    /// the second (#28).
+    pub fn thread_of(&self, id: Ulid) -> Result<Vec<Summary>, ServiceError> {
+        self.thread(self.thread_id_of(id)?)
     }
 
     /// Turn what somebody typed into a message id (SPEC §10).

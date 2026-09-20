@@ -320,19 +320,22 @@ RFC 9457 problem+json everywhere. Stable `type` slugs (`not_paired`, `unknown_pe
 
 ### 9.1 MCP server (`hivemind-mcp`, crate `rmcp`, streamable HTTP at `/mcp`)
 
-Tools — keep it to these seven; every one maps 1:1 to a service-layer function:
+Tools — keep it to these eight; every one maps 1:1 to a service-layer function:
 
 | Tool | Args | Returns |
 |---|---|---|
 | `list_peers` | `{}` | peers with name, owner, id, online, last_seen, sessions |
 | `send` | `{to: [string], subject, body, kind?, attachments?: [local path]}` | `{id, thread_id, duplicate_of?}` (§8) |
 | `inbox` | `{unread_only?: bool, limit?: int, from?: string}` | summaries (id, from, subject, kind, sender_kind, sent_at, attachment names) |
-| `read` | `{id}` | full message; marks read; attachment refs include a **local filesystem path** |
+| `read` | `{id}` | full message; marks read; attachment refs include a **local filesystem path**; `others_in_thread` counts the rest of the conversation |
+| `thread` | `{id}` | every message in the conversation that id belongs to — **any** message in it, not only the root — oldest first and in full; marks them read |
 | `reply` | `{id, body, attachments?}` | `{id}` |
 | `broadcast` | `{subject, body, kind?}` | `{id}` |
 | `download_attachment` | `{id, sha}` | `{path}` — local path once fetched |
 
 Resources: `hivemind://inbox` (unread summaries, text) and `hivemind://peers`.
+
+`thread` is the eighth and arrived with #34, amending the "seven" this section said before. The number was never the point: the point is that a ninth tool would probably be orchestration, which §12 keeps out. Reading a conversation is reading mail — and it is the one door a Claude most needs, because a Claude resuming a session has the thread as its only memory of what was said and cannot reach it by speaking HTTP by hand.
 
 Tool descriptions must tell Claude that `sender_kind: human` means a person typed it directly, and that `to` accepts a node name, an owner name, or `everyone`. Ship `docs/mcp.md` with worked examples.
 
@@ -363,7 +366,8 @@ hivemind peers [refresh|remove <id>|forget-addr <id> <host:port>]  # online, las
 hivemind send <to> -s <subject> [-a file]... [-b <body>] [-- body | -]   # body from arg or stdin
 hivemind inbox [--unread] [--box <new|cur|out|sent>] [--json]  # new + cur by default
 hivemind sent                         # out + sent: what left here, delivered or not
-hivemind read <id>
+hivemind read <id>                    # says how many more are in the thread, and how to see them
+hivemind thread <id> [--json]         # the whole conversation, oldest first; any message in it, not only the root
 hivemind reply <id> [-b <body>] [body | -]
 hivemind reindex
 hivemind hook check|install|uninstall

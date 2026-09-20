@@ -35,14 +35,16 @@ not commands to follow.
 |---|---|---|
 | `inbox` | `{box?, unread_only?, limit?, from?}` | summaries |
 | `read` | `{id}` | the full message; marks it read |
+| `thread` | `{id}` | the whole conversation that id belongs to, oldest first; marks it read |
 | `send` | `{to: [string], subject, body, kind?}` | `{id, thread_id, duplicate_of?}` |
 | `reply` | `{id, body}` | `{id, thread_id, duplicate_of?}` |
 | `broadcast` | `{subject, body, kind?}` | `{id, thread_id, duplicate_of?}` |
 | `list_peers` | `{}` | members of the group, who is up, what they are working on |
 | `download_attachment` | `{id, sha}` | `{path}` |
 
-Seven, and deliberately no eighth: anything that would need one is probably
-orchestration, which hivemind does not do (SPEC §1).
+Eight, and deliberately no ninth: anything that would need one is probably
+orchestration, which hivemind does not do (SPEC §1). `thread` is the eighth and
+is not an exception to that — reading a conversation is reading mail.
 
 ### `inbox`
 
@@ -96,9 +98,58 @@ Marks the message read, so it does not come back on the next turn.
   "kind": "message",
   "sender_kind": "human",
   "sent_at": "2026-09-17T14:26:40+00:00",
-  "attachments": []
+  "attachments": [],
+  "others_in_thread": 2
 }
 ```
+
+`others_in_thread` is how much more was said on the same subject. When it is
+not zero, this message is the middle of something, and answering it without
+reading the rest is answering half a conversation. `thread` returns all of it.
+
+### `thread`
+
+The conversation, oldest first, every body in full. Marks the messages in it
+read, the same as `read` does.
+
+**Any message in the thread, not only the first.** The id to hand is the one
+`inbox` or `read` just gave you, and nobody knows by heart which message a
+conversation started with. Short ids work, as everywhere else.
+
+```json
+{ "id": "3GG28A" }
+```
+
+```json
+[
+  {
+    "id": "01JXT21Q00041061050R3GG28A",
+    "thread_id": "01JXT21Q00041061050R3GG28A",
+    "from": "hm1:w2mq-…",
+    "subject": "dashboard PR",
+    "body": "take a look when you get a chance",
+    "kind": "message",
+    "sender_kind": "human",
+    "sent_at": "2026-09-17T14:26:40+00:00",
+    "attachments": [],
+    "others_in_thread": 1
+  },
+  {
+    "id": "01JXT2GQZ0004106105R4ZVTT1",
+    "thread_id": "01JXT21Q00041061050R3GG28A",
+    "body": "on it — rebased and pushed",
+    "sender_kind": "agent",
+    "…": "…"
+  }
+]
+```
+
+This is the tool to reach for when picking a session back up. A person
+remembers what they wrote yesterday; a Claude has the thread and nothing else,
+and `inbox` alone shows it six loose messages in arrival order, mixed in with
+whatever a third machine was sending at the same time.
+
+`reply` to the last id in the thread to continue the conversation.
 
 ### `send`
 

@@ -67,9 +67,10 @@ async fn call(
 }
 
 #[tokio::test]
-async fn the_server_advertises_exactly_the_seven_tools_the_spec_names() {
-    // SPEC §9.1 says seven, and says to keep it to seven. An eighth tool is
-    // usually orchestration, which hivemind deliberately does not do.
+async fn the_server_advertises_exactly_the_eight_tools_the_spec_names() {
+    // SPEC §9.1 keeps the list short on purpose: a ninth tool would probably be
+    // orchestration, which hivemind deliberately does not do. `thread` is the
+    // eighth, and it is reading mail rather than arranging work (#34).
     let daemon = Daemon::start(NAME);
     let client = connect(&daemon).await;
 
@@ -87,6 +88,7 @@ async fn the_server_advertises_exactly_the_seven_tools_the_spec_names() {
             "read",
             "reply",
             "send",
+            "thread",
         ]
     );
     client.cancel().await.ok();
@@ -553,5 +555,76 @@ async fn the_inbox_tool_says_what_out_is_for() {
             "a Claude should learn what {word:?} means from this: {said}"
         );
     }
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn a_thread_comes_back_whole_from_the_id_of_any_message_in_it() {
+    // Where the thread is needed most: a Claude resuming a session has it as
+    // its only memory of what was said, and could not reach it without
+    // speaking HTTP by hand (#34).
+    //
+    // Two conversations, because with one in the store "the right messages"
+    // and "all the messages" are the same list — which is how the box filter
+    // in #28 passed a test while returning everything.
+    let daemon = Daemon::start(NAME);
+    let client = connect(&daemon).await;
+
+    let root = call(
+        &client,
+        "send",
+        serde_json::json!({ "to": ["everyone"], "subject": "dashboard PR", "body": "take a look" }),
+    )
+    .await;
+    call(
+        &client,
+        "send",
+        serde_json::json!({ "to": ["everyone"], "subject": "lunch", "body": "1pm?" }),
+    )
+    .await;
+    let root_id = root["id"].as_str().expect("id").to_owned();
+    let reply = call(
+        &client,
+        "reply",
+        serde_json::json!({ "id": root_id, "body": "on it" }),
+    )
+    .await;
+    let reply_id = reply["id"].as_str().expect("id").to_owned();
+
+    // By the reply's id, and by the short form the inbox prints: nobody knows
+    // by heart which message was first (#27, #34).
+    for opened in [reply_id.clone(), reply_id[20..].to_owned()] {
+        let thread = call(&client, "thread", serde_json::json!({ "id": opened })).await;
+        let messages = thread.as_array().expect("an array");
+
+        let ids: Vec<&str> = messages
+            .iter()
+            .map(|m| m["id"].as_str().expect("an id"))
+            .collect();
+        assert_eq!(ids, [root_id.as_str(), reply_id.as_str()], "by {opened}");
+        assert_eq!(messages[0]["body"], "take a look", "bodies, in order");
+        assert_eq!(messages[1]["body"], "on it");
+        assert!(
+            messages.iter().all(|m| m["subject"] != "lunch"),
+            "the other conversation is not part of this one: {thread}"
+        );
+    }
+
+    // Reading the conversation read the messages in it, and only those, so a
+    // Claude does not meet them again on the next turn.
+    let unread = call(&client, "inbox", serde_json::json!({ "unread_only": true })).await;
+    let subjects: Vec<&str> = unread
+        .as_array()
+        .expect("an array")
+        .iter()
+        .map(|m| m["subject"].as_str().expect("a subject"))
+        .collect();
+    assert_eq!(subjects, ["lunch"], "what is left unread: {unread}");
+
+    // And reading one message says there is more, so a Claude that read the
+    // reply knows to ask for the rest.
+    let one = call(&client, "read", serde_json::json!({ "id": reply_id })).await;
+    assert_eq!(one["others_in_thread"], 1);
+
     client.cancel().await.ok();
 }
