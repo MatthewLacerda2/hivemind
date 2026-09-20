@@ -86,6 +86,7 @@ Through the MCP server, without leaving the conversation:
 | `send` | Send a message, with files if you want |
 | `inbox` | What has arrived — or, with `box`, what this machine sent |
 | `read` | Read one, and mark it read |
+| `thread` | Read the whole conversation one message belongs to, in order |
 | `reply` | Answer, staying in the thread |
 | `broadcast` | Send to everybody in the group this machine has met |
 | `download_attachment` | Fetch a file and get a path to open |

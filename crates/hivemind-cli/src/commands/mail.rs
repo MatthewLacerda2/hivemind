@@ -457,7 +457,6 @@ pub(crate) async fn reply(
     Ok(())
 }
 
-
 /// ULIDs are long and the first characters are the timestamp, so the tail is
 /// what actually distinguishes two messages sent in the same millisecond.
 fn short_id(id: &str) -> String {

@@ -1,4 +1,4 @@
-//! The seven tools and the two resources (SPEC §9.1).
+//! The eight tools and the two resources (SPEC §9.1).
 //!
 //! Tool descriptions are part of the product: they are what tells Claude that
 //! `sender_kind: human` means a person typed the message, and that `to` accepts
@@ -43,6 +43,48 @@ fn mcp_error(error: &ServiceError) -> McpError {
 }
 
 impl HivemindMcp {
+    /// One message as `read` and `thread` both report it.
+    ///
+    /// `others_in_thread` is passed in rather than counted here: `thread`
+    /// already knows the answer for every message it is about to return, and
+    /// counting it again per message would be a query each.
+    fn full(
+        &self,
+        message: hivemind_core::message::Message,
+        others_in_thread: usize,
+    ) -> FullMessage {
+        FullMessage {
+            id: message.id.to_string(),
+            thread_id: message.thread_id.to_string(),
+            from: message.from.to_string(),
+            subject: message.subject,
+            body: message.body,
+            kind: message.kind.as_str().to_owned(),
+            sender_kind: message.sender_kind.as_str().to_owned(),
+            sent_at: message.sent_at.to_rfc3339(),
+            attachments: message
+                .attachments
+                .iter()
+                .map(|a| AttachmentInfo {
+                    name: a.name.clone(),
+                    sha: a.sha256.to_string(),
+                    size: a.size,
+                    // A path only when the bytes are actually here. Handing
+                    // back a path to a file that does not exist would send a
+                    // Claude off to open nothing (SPEC §9.1).
+                    path: self.service.blobs().has(&a.sha256).then(|| {
+                        self.service
+                            .blobs()
+                            .path_of(&a.sha256)
+                            .to_string_lossy()
+                            .into_owned()
+                    }),
+                })
+                .collect(),
+            others_in_thread,
+        }
+    }
+
     /// Turn what an agent passed into a message id.
     ///
     /// Through the service, so `read` accepts exactly what `inbox` printed —
@@ -136,6 +178,14 @@ impl InboxParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct MessageIdParams {
     /// The message id, as shown by `inbox`.
+    pub id: String,
+}
+
+/// Arguments for `thread`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ThreadParams {
+    /// The id of **any** message in the conversation, not only the first one:
+    /// whatever `inbox` or `read` handed you, whole or shortened.
     pub id: String,
 }
 
@@ -241,6 +291,9 @@ pub struct FullMessage {
     pub sent_at: String,
     /// Attachments, each with a local filesystem path once downloaded.
     pub attachments: Vec<AttachmentInfo>,
+    /// How many **other** messages are in this thread. When it is not zero,
+    /// `thread` with this id returns the whole conversation in order.
+    pub others_in_thread: usize,
 }
 
 /// An attachment, and where to find it on disk.
@@ -331,8 +384,10 @@ impl HivemindMcp {
     #[tool(
         name = "read",
         description = "Read one message in full and mark it as read. Use the id from \
-                       `inbox`. The reply you send back should go through `reply` so it \
-                       stays in the same thread."
+                       `inbox`. `others_in_thread` says how much more was said on the \
+                       same subject; `thread` with this id returns all of it. The reply \
+                       you send back should go through `reply` so it stays in the same \
+                       thread."
     )]
     async fn read(
         &self,
@@ -344,35 +399,56 @@ impl HivemindMcp {
         // does not see it again on the next turn.
         self.service.mark_read(id).map_err(|e| mcp_error(&e))?;
 
-        Ok(Json(FullMessage {
-            id: message.id.to_string(),
-            thread_id: message.thread_id.to_string(),
-            from: message.from.to_string(),
-            subject: message.subject,
-            body: message.body,
-            kind: message.kind.as_str().to_owned(),
-            sender_kind: message.sender_kind.as_str().to_owned(),
-            sent_at: message.sent_at.to_rfc3339(),
-            attachments: message
-                .attachments
-                .iter()
-                .map(|a| AttachmentInfo {
-                    name: a.name.clone(),
-                    sha: a.sha256.to_string(),
-                    size: a.size,
-                    // A path only when the bytes are actually here. Handing
-                    // back a path to a file that does not exist would send a
-                    // Claude off to open nothing (SPEC §9.1).
-                    path: self.service.blobs().has(&a.sha256).then(|| {
-                        self.service
-                            .blobs()
-                            .path_of(&a.sha256)
-                            .to_string_lossy()
-                            .into_owned()
-                    }),
-                })
-                .collect(),
-        }))
+        // What else was said on this subject. A message answered on its own is
+        // how a Claude replies to the middle of a conversation it has not read
+        // (#34).
+        let others = self
+            .service
+            .thread(message.thread_id)
+            .map_err(|e| mcp_error(&e))?
+            .len()
+            .saturating_sub(1);
+
+        Ok(Json(self.full(message, others)))
+    }
+
+    #[tool(
+        name = "thread",
+        description = "Read a whole conversation, oldest first, and mark it read. Pass the \
+                       id of ANY message in the thread — whatever `inbox` or `read` handed \
+                       you, short or whole — not only the first one, which nobody knows by \
+                       heart. Call this when you are picking a session back up, or before \
+                       answering something that has been going on for a while: `read` gives \
+                       you one message, this gives you the exchange it belongs to, every \
+                       body in full, with who sent each one and when. `sender_kind` is \
+                       `human` where a person typed it and `agent` where another Claude \
+                       did, so you can see which turns were yours. To continue the \
+                       conversation, `reply` to the last id in it."
+    )]
+    async fn thread(
+        &self,
+        Parameters(params): Parameters<ThreadParams>,
+    ) -> Result<Json<Vec<FullMessage>>, McpError> {
+        let id = self.resolve(&params.id)?;
+        let summaries = self.service.thread_of(id).map_err(|e| mcp_error(&e))?;
+        let others = summaries.len().saturating_sub(1);
+
+        let mut messages = Vec::with_capacity(summaries.len());
+        for summary in &summaries {
+            let (_, message) = self.service.get(summary.id).map_err(|e| mcp_error(&e))?;
+            // Reading the conversation is reading the messages in it, which is
+            // what the web UI's thread view already decided (SPEC §11). Only
+            // what arrived and is unread: our own sent mail is in neither box
+            // `mark_read` moves anything between.
+            if summary.mailbox.is_unread() {
+                self.service
+                    .mark_read(summary.id)
+                    .map_err(|e| mcp_error(&e))?;
+            }
+            messages.push(self.full(message, others));
+        }
+
+        Ok(Json(messages))
     }
 
     #[tool(

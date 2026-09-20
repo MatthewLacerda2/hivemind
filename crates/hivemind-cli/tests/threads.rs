@@ -34,7 +34,14 @@ fn short(id: &str) -> &str {
 
 /// Two conversations on one machine: a thread of two, and a message alone.
 fn two_threads(daemon: &Daemon) -> (String, String) {
-    daemon.run(&["send", "everyone", "-s", "dashboard PR", "-b", "take a look"]);
+    daemon.run(&[
+        "send",
+        "everyone",
+        "-s",
+        "dashboard PR",
+        "-b",
+        "take a look",
+    ]);
     daemon.run(&["send", "everyone", "-s", "lunch", "-b", "1pm?"]);
     let root = id_of(daemon, "dashboard PR");
     daemon.run(&["reply", &root, "-b", "on it"]);
@@ -84,7 +91,14 @@ fn a_thread_between_two_machines_says_who_said_what() {
     let bob = Daemon::start("bob");
     pair(&alice, &bob);
 
-    alice.run(&["send", &bob.node_id(), "-s", "a question", "-b", "what time?"]);
+    alice.run(&[
+        "send",
+        &bob.node_id(),
+        "-s",
+        "a question",
+        "-b",
+        "what time?",
+    ]);
     let question = bob.wait_for("a question");
     let question_id = question["id"].as_str().expect("an id").to_owned();
     bob.run(&["reply", &question_id, "-b", "one o'clock"]);

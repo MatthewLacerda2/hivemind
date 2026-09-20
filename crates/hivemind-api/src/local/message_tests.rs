@@ -7,9 +7,9 @@
 //! current — and what the node carries.
 
 use axum::http::StatusCode;
+use hivemind_core::peer::NodeId;
 use http_body_util::BodyExt as _;
 use tower::ServiceExt as _;
-use hivemind_core::peer::NodeId;
 use ulid::Ulid;
 
 use super::tests::{app, app_with_service, call, get, post_json};
