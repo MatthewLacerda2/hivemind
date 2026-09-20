@@ -165,9 +165,10 @@ impl MailService {
 
     /// Pin a node that has proved the group key (SPEC §6.2).
     ///
-    /// A node already pinned gets its address refreshed and nothing else. Its
-    /// certificate needs no comparing: the id is that certificate's
-    /// fingerprint, so the same id is the same certificate.
+    /// A node already pinned gets its address refreshed, and the name and
+    /// owner it has just reported taken again rather than kept from the first
+    /// meeting (#37). Its certificate needs no comparing: the id is that
+    /// certificate's fingerprint, so the same id is the same certificate.
     ///
     /// # Errors
     /// [`ServiceError::PeerBook`] if the book cannot be written.
@@ -181,6 +182,7 @@ impl MailService {
     ) -> Result<Peer, ServiceError> {
         let mut peers = self.peers()?;
         if let Some(peer) = peers.peer_mut(id) {
+            revise(peer, name, owner);
             peer.learn_addr(addr);
             peer.last_seen = Some(Utc::now());
             let peer = peer.clone();
@@ -203,6 +205,40 @@ impl MailService {
 
         self.forget_seen(id);
         Ok(peer)
+    }
+
+    /// Take the name and owner a peer reports about itself, nothing else
+    /// (SPEC §5.5).
+    ///
+    /// Separate from [`Self::admit`] because the answer to *our* hello brings
+    /// neither a proof to check nor an address to learn — we chose the address,
+    /// and the connection was pinned to the peer's certificate before it was
+    /// sent. The name in it is as fresh as the one in a hello we answer, and
+    /// without this a peer that can be reached but cannot reach back would keep
+    /// the name it had at the first handshake forever. That asymmetry is the
+    /// case presence is shaped for: whichever direction works is the one both
+    /// sides learn from.
+    ///
+    /// A node that is not pinned is not an error and not admitted: nothing here
+    /// creates trust (ADR 0013).
+    ///
+    /// # Errors
+    /// [`ServiceError::PeerBook`] if the book cannot be written.
+    pub(crate) fn learn_identity(
+        &self,
+        id: NodeId,
+        name: &str,
+        owner: Option<&str>,
+    ) -> Result<(), ServiceError> {
+        let mut peers = self.peers()?;
+        let Some(peer) = peers.peer_mut(id) else {
+            return Ok(());
+        };
+        if !revise(peer, name, owner) {
+            return Ok(());
+        }
+        peers.save()?;
+        Ok(())
     }
 
     /// Turn what a human typed into a node id.
@@ -400,6 +436,25 @@ impl MailService {
     }
 }
 
+/// Follow what a node now says about itself, saying so when it has changed.
+///
+/// The one place a revision happens, so that "learned once and never revised"
+/// cannot come back in one path and not the other (#37). A rename is rare and
+/// a person who renamed a machine wants to see it land, so it is worth a line;
+/// the unchanged case is every hello of every minute and is worth none.
+fn revise(peer: &mut Peer, name: &str, owner: Option<&str>) -> bool {
+    if !peer.relabel(name, owner) {
+        return false;
+    }
+    tracing::info!(
+        peer = %peer.id.short(),
+        name = %peer.name,
+        owner = ?peer.owner,
+        "a peer revised what it calls itself"
+    );
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use hivemind_core::peer::NodeId;
@@ -430,6 +485,71 @@ mod tests {
             )
             .expect("admit again");
         id
+    }
+
+    #[test]
+    fn a_second_handshake_revises_the_name_and_the_owner() {
+        // #37: the Arch machine renamed itself from `hivemind-node` to
+        // `archlinux` and confirmed it in its own `status`; every machine that
+        // had already met it went on saying `hivemind-node` through several
+        // handshakes and deliveries. The name exists so a person knows which
+        // machine they are talking to, and one learned once is one that stops
+        // being true the first time somebody edits their config.
+        let (_dir, service) = crate::service::tests::service();
+        let friend = hivemind_core::identity::Identity::from_seed([37; 32]).expect("identity");
+        let id = friend.node_id();
+        let addr = PeerAddr::manual("100.116.89.94", 8400);
+
+        service
+            .admit(
+                id,
+                "hivemind-node",
+                None,
+                friend.certificate_der().to_vec(),
+                addr.clone(),
+            )
+            .expect("the first handshake");
+        let peer = service
+            .admit(
+                id,
+                "archlinux",
+                Some("matthew"),
+                friend.certificate_der().to_vec(),
+                addr,
+            )
+            .expect("the second one");
+
+        assert_eq!(peer.name, "archlinux");
+        assert_eq!(peer.owner.as_deref(), Some("matthew"));
+    }
+
+    #[test]
+    fn admitting_a_node_never_leaves_last_seen_empty() {
+        // The other half of #37, and the reason it is here rather than in the
+        // issue: the reporter saw a node's `last_seen` filled while it was
+        // merely seen, `null` the moment it was paired, and filled again on
+        // the next contact. That was the pairing of the day rewriting the
+        // record from scratch — the confirm step, which ADR 0013 deleted
+        // along with the whole two-sided confirmation. Admission has built the
+        // record since, and this is what stops the field being dropped again.
+        // The *first* admission, deliberately: it is the one that builds the
+        // record, and a second one through the already-pinned branch would
+        // fill the field back in and assert nothing.
+        let (_dir, service) = crate::service::tests::service();
+        let friend = hivemind_core::identity::Identity::from_seed([38; 32]).expect("identity");
+        let peer = service
+            .admit(
+                friend.node_id(),
+                "leonardos-macbook-air",
+                Some("leonardo"),
+                friend.certificate_der().to_vec(),
+                PeerAddr::manual("10.1.101.30", 8400),
+            )
+            .expect("admit");
+        assert!(
+            peer.last_seen.is_some(),
+            "a node that has just proved the key was heard from a moment ago"
+        );
     }
 
     #[test]

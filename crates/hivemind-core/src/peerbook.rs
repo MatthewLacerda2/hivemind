@@ -161,6 +161,29 @@ impl Peer {
         self.last_seen = Some(at);
     }
 
+    /// Take the name and owner a node reports for itself, and say whether
+    /// either moved (SPEC §5.5, §6.2).
+    ///
+    /// A node is the only authority on what it is called, so this follows it
+    /// exactly — including an owner it has stopped claiming, which is dropped
+    /// rather than kept. Following it halfway would make `owner` a field that
+    /// can be set and never unset, which is a second kind of stale on top of
+    /// the one #37 was: a name learned at the first handshake and never
+    /// revised, so a machine renamed by hand went on reading as
+    /// `hivemind-node` on every other machine.
+    ///
+    /// The answer is whether anything changed, so a caller can leave
+    /// `peers.toml` alone in the ordinary case — presence revisits every peer
+    /// every minute and almost never has news.
+    pub fn relabel(&mut self, name: &str, owner: Option<&str>) -> bool {
+        if self.name == name && self.owner.as_deref() == owner {
+            return false;
+        }
+        name.clone_into(&mut self.name);
+        self.owner = owner.map(str::to_owned);
+        true
+    }
+
     /// Add an address we did not already know, or refresh how we learned it.
     pub fn learn_addr(&mut self, addr: PeerAddr) {
         match self
@@ -491,6 +514,35 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let book = PeerBook::load(dir.path(), OWN_PORT).expect("load");
         assert_eq!(book.peers().count(), 0);
+    }
+
+    #[test]
+    fn a_node_that_renamed_itself_is_followed() {
+        // #37: the name is how a person knows which machine they are talking
+        // to, and this one was learned at the first handshake and never
+        // revised.
+        let mut peer = peer(b"their certificate", None);
+        assert!(peer.relabel("archlinux", Some("matthew")));
+        assert_eq!(peer.name, "archlinux");
+        assert_eq!(peer.owner.as_deref(), Some("matthew"));
+    }
+
+    #[test]
+    fn an_owner_a_node_has_stopped_claiming_is_dropped() {
+        // Following a node halfway would leave `owner` settable and never
+        // unsettable, which is a second kind of stale on top of #37's.
+        let mut peer = peer(b"their certificate", Some("matthew"));
+        assert!(peer.relabel("archlinux", None));
+        assert_eq!(peer.owner, None);
+    }
+
+    #[test]
+    fn a_name_that_has_not_moved_is_not_worth_a_write() {
+        // Presence revisits every peer every minute. Reporting a change each
+        // time would rewrite `peers.toml` sixty times an hour for no news.
+        let mut peer = peer(b"their certificate", Some("matthew"));
+        let name = peer.name.clone();
+        assert!(!peer.relabel(&name, Some("matthew")));
     }
 
     #[test]

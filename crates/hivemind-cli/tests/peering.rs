@@ -147,6 +147,47 @@ fn one_address_can_be_forgotten_without_forgetting_the_peer() {
 }
 
 #[test]
+fn a_peer_that_renamed_itself_is_not_remembered_by_the_old_name() {
+    // #37, as it happened: the Arch machine corrected its name by hand from
+    // `hivemind-node` to `archlinux` and confirmed it in its own `status`, and
+    // the other machine went on reading `hivemind-node` through several
+    // handshakes and deliveries. The name is the whole way a person knows
+    // which machine they are talking to.
+    //
+    // Two real daemons, because what is being fixed is what one side writes
+    // down about the other on the second meeting rather than the first.
+    let alice = Daemon::start("alice");
+    let mut bob = Daemon::start("bob");
+    pair(&alice, &bob);
+
+    let peers = json(&alice.run(&["peers", "--json"]));
+    assert_eq!(
+        peers[0]["name"], "bob",
+        "the first handshake teaches a name"
+    );
+
+    // Renamed the way a person renames a machine: the setting changes and the
+    // daemon comes back — same identity, same ports, same group.
+    bob.stop();
+    bob.restart("archlinux");
+    assert!(
+        bob.run(&["status"]).contains("archlinux"),
+        "bob should agree about his own name first"
+    );
+
+    alice.run(&["join", &format!("127.0.0.1:{}", bob.peer_port)]);
+    let peers = json(&alice.run(&["peers", "--json"]));
+    assert_eq!(
+        peers[0]["name"], "archlinux",
+        "a second handshake revises the name: {peers}"
+    );
+    // The harness gives a daemon its name as its owner too, so the same
+    // handshake carries a changed owner — the other field learned once and
+    // then frozen.
+    assert_eq!(peers[0]["owner"], "archlinux", "and the owner with it");
+}
+
+#[test]
 fn a_machine_with_another_groups_code_is_seen_and_never_admitted() {
     // The peer port is reachable by anyone (ADR 0010); being reachable is not
     // being trusted. Both sides see the other, and neither can mail it.
