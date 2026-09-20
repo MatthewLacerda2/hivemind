@@ -26,6 +26,11 @@ pub(crate) fn openapi() -> Result<()> {
 
 /// Run the daemon in the foreground (SPEC §10).
 pub(crate) async fn daemon(home: Option<&Path>, port: u16) -> Result<()> {
+    // First, before the store is opened or a directory is created: a
+    // reinstall replaces this file while the daemon runs, and the mtime read
+    // afterwards would be the new one (#36).
+    hivemind_api::freshness::remember();
+
     let home = paths::home(home)?;
     std::fs::create_dir_all(&home)
         .with_context(|| format!("could not create {}", home.display()))?;

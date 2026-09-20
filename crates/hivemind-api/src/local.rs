@@ -39,6 +39,12 @@ pub struct Me {
     pub short_id: String,
     /// The running version.
     pub version: String,
+    /// When the binary this daemon is running was last written, RFC 3339.
+    ///
+    /// `null` when it could not be read. The version cannot answer "is this
+    /// daemon the code that is installed" — it does not move between two builds
+    /// of one release — and this can (#36).
+    pub binary_modified_at: Option<String>,
     /// How many unread messages there are.
     pub unread: u64,
     /// The display name peers see.
@@ -401,7 +407,7 @@ fn local_paths(paths: Option<Vec<String>>) -> Vec<std::path::PathBuf> {
 pub fn router(state: AppState) -> Router {
     use utoipa::OpenApi as _;
 
-    Router::new()
+    let router = Router::new()
         .merge(
             utoipa_swagger_ui::SwaggerUi::new("/docs")
                 .url("/openapi.json", crate::openapi::ApiDoc::openapi()),
@@ -434,7 +440,32 @@ pub fn router(state: AppState) -> Router {
         .with_state(Arc::clone(&state))
         // Merged after the API's state is applied: the web router carries its
         // own, so the two cannot share one `with_state` call (SPEC §11).
-        .merge(crate::web::router(state))
+        .merge(crate::web::router(state));
+
+    stamp_binary(router)
+}
+
+/// Say on every response when the running daemon's binary was written (#36).
+///
+/// A header rather than only the field on `/api/v1/me`, because the command
+/// somebody is running when it matters is `hivemind inbox`, not `status` — and
+/// a warning worth having is one that costs no extra round-trip to earn.
+fn stamp_binary(router: Router) -> Router {
+    let stamp = crate::freshness::started_from()
+        .and_then(|when| axum::http::HeaderValue::from_str(&when.to_rfc3339()).ok());
+    let name = axum::http::HeaderName::from_static(crate::freshness::BINARY_MODIFIED);
+
+    router.layer(axum::middleware::map_response(
+        move |mut response: axum::response::Response| {
+            let (name, stamp) = (name.clone(), stamp.clone());
+            async move {
+                if let Some(stamp) = stamp {
+                    response.headers_mut().insert(name, stamp);
+                }
+                response
+            }
+        },
+    ))
 }
 
 /// Liveness. Deliberately says nothing about the network.
@@ -453,6 +484,7 @@ pub(crate) async fn me(State(service): State<AppState>) -> Result<Json<Me>, Prob
         id: id.to_string(),
         short_id: id.short(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
+        binary_modified_at: crate::freshness::started_from().map(|when| when.to_rfc3339()),
         unread: service.unread_count()?,
         name: service.name().to_owned(),
         owner: service.owner().map(ToOwned::to_owned),
@@ -1088,6 +1120,33 @@ mod tests {
         let (_dir, router, _) = app();
         let response = router.oneshot(get("/healthz")).await.expect("respond");
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn every_response_says_when_the_running_binary_was_written() {
+        // #36: reinstalling leaves the daemon serving the code it loaded, and
+        // the version reads `v0.1.0` either way. Remembered first, because the
+        // router reads it as it is built.
+        crate::freshness::remember();
+        let (_dir, router, _) = app();
+
+        // `/healthz` and not `/api/v1/me`: the point of the header is that a
+        // command which never asks about the daemon still finds out.
+        let response = router
+            .clone()
+            .oneshot(get("/healthz"))
+            .await
+            .expect("respond");
+        let stamped = response
+            .headers()
+            .get(crate::freshness::BINARY_MODIFIED)
+            .expect("every response carries it")
+            .to_str()
+            .expect("an RFC 3339 timestamp is ascii")
+            .to_owned();
+
+        let (_, body) = call(&router, get("/api/v1/me")).await;
+        assert_eq!(body["binary_modified_at"], stamped, "one fact, one source");
     }
 
     #[tokio::test]

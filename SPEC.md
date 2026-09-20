@@ -250,7 +250,7 @@ Use `utoipa` for OpenAPI; serve Swagger UI at `http://127.0.0.1:8401/docs`. **Ch
 ### 7.1 Local API (`127.0.0.1:8401`)
 
 ```
-GET    /api/v1/me                          node identity, addresses, version
+GET    /api/v1/me                          node identity, addresses, version, binary_modified_at
 GET    /api/v1/peers                       members + seen-not-in-the-group, with online, last_seen, sessions
 POST   /api/v1/peers/join      {host}      contact a node discovery cannot find
 DELETE /api/v1/peers/{id}
@@ -281,6 +281,8 @@ GET    /docs, /openapi.json
 GET    /                                   web UI
 POST   /mcp                                MCP streamable HTTP
 ```
+
+Every response on this listener carries `x-hivemind-binary-modified`: when the binary the running daemon was started from was last written, RFC 3339. `binary_modified_at` on `/api/v1/me` is the same fact, for anything that asks outright. Reinstalling replaces the file and leaves the daemon serving the code it loaded, and the version does not move between two builds of one release — so the modification time is the only thing that says so. A client that sees one older than its own binary says so in one line and points at a restart; `doctor` reports it as a check (§10).
 
 ### 7.2 Peer API (`0.0.0.0:8400`, mTLS)
 
@@ -364,7 +366,7 @@ hivemind reindex
 hivemind hook check|install|uninstall
 hivemind mcp install|print
 hivemind service install|uninstall|restart|logs
-hivemind doctor                       # checks: daemon, ports, tailscale, claude on PATH, hooks, mDNS, peer addresses
+hivemind doctor                       # checks: daemon, binary, ports, tailscale, claude on PATH, hooks, mDNS, peer addresses
 ```
 
 `clap` with derive. `--json` on every read command. Colors via `owo-colors`, respecting `NO_COLOR`. The CLI talks to the daemon over `127.0.0.1:8401`; it never touches `mail/` directly except `hook check` (read-only index) and `reindex` (daemon must be stopped or it takes a lock).
