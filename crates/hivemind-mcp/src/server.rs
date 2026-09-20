@@ -204,27 +204,64 @@ impl ServerHandler for HivemindMcp {
     }
 }
 
+/// The streamable-HTTP transport for a `tower` service to nest at `/mcp`.
+type HttpTransport = rmcp::transport::streamable_http_server::StreamableHttpService<
+    HivemindMcp,
+    rmcp::transport::streamable_http_server::session::local::LocalSessionManager,
+>;
+
+/// A handle on the daemon's MCP sessions, for ending them at shutdown.
+///
+/// It exists because a streamable-HTTP session holds an SSE stream open for as
+/// long as the client keeps it, exactly as `/api/v1/events` does — so a
+/// graceful shutdown waits on a connection that never drains, and the process
+/// only stops when something kills it (#108). `rmcp` offers no shutdown of its
+/// own, so the daemon keeps this and ends the sessions on the way out.
+#[derive(Clone, Debug)]
+pub struct McpSessions(
+    Arc<rmcp::transport::streamable_http_server::session::local::LocalSessionManager>,
+);
+
+impl McpSessions {
+    /// End every open session, so the streams they hold drain (#108).
+    ///
+    /// Best effort throughout: this runs while the daemon is going away, and a
+    /// session whose worker has already exited is the outcome being asked for
+    /// rather than a failure.
+    pub async fn close_all(&self) {
+        use rmcp::transport::streamable_http_server::session::SessionManager as _;
+
+        // Collected first, because closing a session takes the write lock this
+        // read would still be holding.
+        let open: Vec<_> = self.0.sessions.read().await.keys().cloned().collect();
+        for id in open {
+            let _ = self.0.close_session(&id).await;
+        }
+    }
+}
+
 /// A `tower` service that speaks MCP over streamable HTTP, ready to nest at
-/// `/mcp` on the loopback router (SPEC §7.1).
+/// `/mcp` on the loopback router (SPEC §7.1), and a handle on its sessions.
 ///
 /// Sessions are kept in memory: they last as long as the daemon, and a Claude
 /// that reconnects simply starts a new one. Nothing about a session is worth
-/// persisting — the mail is the state.
+/// persisting — the mail is the state. The handle comes back beside the
+/// service because the daemon has to close them itself to stop; see
+/// [`McpSessions`].
 #[must_use]
-pub fn http_service(
-    service: Arc<MailService>,
-) -> rmcp::transport::streamable_http_server::StreamableHttpService<
-    HivemindMcp,
-    rmcp::transport::streamable_http_server::session::local::LocalSessionManager,
-> {
+pub fn http_service(service: Arc<MailService>) -> (HttpTransport, McpSessions) {
     use rmcp::transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
     };
 
-    StreamableHttpService::new(
-        move || Ok(HivemindMcp::new(service.clone())),
-        Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default(),
+    let sessions = Arc::new(LocalSessionManager::default());
+    (
+        StreamableHttpService::new(
+            move || Ok(HivemindMcp::new(service.clone())),
+            Arc::clone(&sessions),
+            StreamableHttpServerConfig::default(),
+        ),
+        McpSessions(sessions),
     )
 }
 

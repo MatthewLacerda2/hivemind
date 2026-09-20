@@ -10,4 +10,4 @@
 pub mod server;
 pub mod tools;
 
-pub use server::{HivemindMcp, INBOX_URI, PEERS_URI, http_service};
+pub use server::{HivemindMcp, INBOX_URI, McpSessions, PEERS_URI, http_service};
