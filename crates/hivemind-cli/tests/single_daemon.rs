@@ -505,3 +505,83 @@ fn a_tail_that_names_nothing_says_so_rather_than_guessing() {
         "it should echo what was typed: {said}"
     );
 }
+
+#[test]
+fn the_inbox_keeps_a_message_after_it_is_read_and_one_box_can_be_asked_for() {
+    // `hivemind inbox` used to ask for `new/` alone, so reading a message made
+    // it disappear from the only listing the CLI had and `--unread` did
+    // nothing at all (#26). The inbox is both boxes of what arrived; `--box`
+    // is how to look at exactly one.
+    let daemon = Daemon::start(NAME);
+    daemon.run(&["send", "everyone", "-s", "read me", "--", "body"]);
+
+    let id = daemon.inbox()[0]["id"].as_str().expect("an id").to_owned();
+    daemon.run(&["read", &id]);
+
+    let listed = daemon.inbox();
+    assert_eq!(
+        listed[0]["subject"], "read me",
+        "a read message is still mail"
+    );
+    assert_eq!(listed[0]["mailbox"], "cur");
+    assert_eq!(
+        json(&daemon.run(&["inbox", "--unread", "--json"]))
+            .as_array()
+            .expect("an array")
+            .len(),
+        0,
+        "`--unread` should now mean something"
+    );
+    assert_eq!(
+        json(&daemon.run(&["inbox", "--box", "new", "--json"]))
+            .as_array()
+            .expect("an array")
+            .len(),
+        0,
+        "and `new` is the box it has left"
+    );
+}
+
+#[test]
+fn asking_for_unread_mail_in_a_box_that_holds_none_is_refused() {
+    // Only `new/` holds unread mail, so `--unread --box sent` can only ever
+    // answer with nothing — and nothing looks exactly like an empty box. That
+    // reading is what made `out/` look broken in #28.
+    let daemon = Daemon::start(NAME);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_hivemind"))
+        .args(["inbox", "--box", "sent", "--unread"])
+        .env("HIVEMIND_HOME", daemon.home())
+        .env("HIVEMIND_API", daemon.api())
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("the cli runs");
+
+    assert!(!output.status.success(), "it should have refused");
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        said.contains("unread") && said.contains("sent"),
+        "it should say what cannot be both: {said}"
+    );
+}
+
+#[test]
+fn a_box_that_is_not_one_is_refused_before_a_request_is_made() {
+    // The CLI knows the four names, so it refuses before it opens a socket.
+    // Pointed at a port nobody is listening on for that reason: the only way
+    // to hear about the boxes from here is clap, and a `--box` that took any
+    // string would fail with "no daemon" instead.
+    let output = Command::new(env!("CARGO_BIN_EXE_hivemind"))
+        .args(["inbox", "--box", "banana"])
+        .env("HIVEMIND_API", format!("http://127.0.0.1:{}", free_port()))
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("the cli runs");
+
+    assert!(!output.status.success(), "it should have refused");
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        said.contains("new") && said.contains("out"),
+        "it should name the boxes there are: {said}"
+    );
+}
