@@ -123,17 +123,13 @@ impl Daemon {
 
         let stdout = process.stdout.take().expect("stdout");
         let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        let read = reader.read_line(&mut line).unwrap_or(0);
-        if read == 0 || !line.contains("listening") {
-            // It died before saying anything, which is what binding a taken
-            // local API port looks like from here.
+        if let Err(why) = wait_for_listening(&mut reader) {
+            // It died before saying it, which is what binding a taken local
+            // API port looks like from here.
             let _ = process.kill();
             let _ = process.wait();
             let said = complaint(&errors);
-            return Err(format!(
-                "it never said it was listening (said {line:?}){said}"
-            ));
+            return Err(format!("{why}{said}"));
         }
 
         let mut daemon = Self {
@@ -239,6 +235,18 @@ impl Daemon {
     }
 
     pub(crate) fn run(&self, args: &[&str]) -> String {
+        let (ok, said) = self.try_run(args);
+        assert!(ok, "`hivemind {}` failed: {said}", args.join(" "));
+        said
+    }
+
+    /// The same, for a command whose non-zero exit is the point rather than a
+    /// failure: `doctor` says so when it has found something to fix.
+    ///
+    /// Returns whether it succeeded, and everything it said — stdout and
+    /// stderr together, because which stream a complaint came out of is not
+    /// what any test here is about.
+    pub(crate) fn try_run(&self, args: &[&str]) -> (bool, String) {
         let output = Command::new(env!("CARGO_BIN_EXE_hivemind"))
             .args(args)
             .env("HIVEMIND_HOME", self.home())
@@ -247,13 +255,9 @@ impl Daemon {
             .output()
             .expect("the cli runs");
 
-        assert!(
-            output.status.success(),
-            "`hivemind {}` failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).expect("utf-8 output")
+        let mut said = String::from_utf8_lossy(&output.stdout).into_owned();
+        said.push_str(&String::from_utf8_lossy(&output.stderr));
+        (output.status.success(), said)
     }
 
     /// Run a hook against this daemon, feeding it what Claude Code would.
@@ -456,13 +460,9 @@ impl Daemon {
 
         let stdout = process.stdout.take().expect("stdout");
         let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        let read = reader.read_line(&mut line).unwrap_or(0);
-        assert!(
-            read > 0 && line.contains("listening"),
-            "it never said it was listening (said {line:?}){}",
-            complaint(&self.errors)
-        );
+        if let Err(why) = wait_for_listening(&mut reader) {
+            panic!("{why}{}", complaint(&self.errors));
+        }
 
         self.process = process;
         self.stdout = reader;
@@ -513,6 +513,28 @@ impl Drop for Daemon {
 /// for the sake of the tests. `start_retrying` absorbs it instead,
 /// and a start that fails three times over quotes the daemon's stderr so the
 /// next occurrence names itself rather than being guessed at.
+/// Read the daemon's stdout until it says it is listening.
+///
+/// Not "the first line it prints": a warning on the way up arrives before the
+/// greeting — a `peers.toml` holding an address that points at this node logs
+/// one (#29) — and reading a single line turned that into "it never said it
+/// was listening", which is the same thing a taken port says. Bounded, so a
+/// daemon that talks without ever coming up still fails rather than hanging.
+fn wait_for_listening(reader: &mut BufReader<std::process::ChildStdout>) -> Result<(), String> {
+    let mut said = String::new();
+    for _ in 0..20 {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            break;
+        }
+        if line.contains("listening") {
+            return Ok(());
+        }
+        said.push_str(&line);
+    }
+    Err(format!("it never said it was listening (said {said:?})"))
+}
+
 pub(crate) fn free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     listener.local_addr().expect("addr").port()
