@@ -52,7 +52,12 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 # largest of each kind is a file it did not reclassify, and a limit is lowered
 # by the branch that splits that file, not by one that stops miscounting
 # others.
-SOURCE_LIMIT = 660
+#
+# #112 deleted `local.rs`'s dead `serve`, taking it to 644, so the source limit
+# comes down with it. A deletion is a split's smaller cousin: it frees lines in
+# the file that was the standing answer to `--report`, and the branch that frees
+# them is the branch that pays them forward.
+SOURCE_LIMIT = 645
 TEST_LIMIT = 560
 
 SEARCHED = ("crates",)

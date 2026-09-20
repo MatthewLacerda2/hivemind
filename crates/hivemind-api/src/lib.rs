@@ -18,7 +18,7 @@ pub mod problem;
 pub mod service;
 pub mod web;
 
-pub use local::{router, serve};
+pub use local::router;
 pub use openapi::ApiDoc;
 pub use outbox::{ServiceOutbox, ServiceSink};
 pub use service::{Draft, Event, MailService, NodeDescription, ServiceError};
