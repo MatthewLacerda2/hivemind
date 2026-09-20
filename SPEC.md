@@ -412,7 +412,7 @@ The body of a message is taken three ways, and the rules between them are part o
 
 ## 11. Web UI
 
-One page at `http://127.0.0.1:8401/`, no framework, no build step beyond esbuild for TypeScript, assets embedded in the binary with `include_dir`. Views: inbox (live via SSE), thread, compose (with drag-drop attachments), peers (online, last seen, sessions; join by address). Show `sender_kind` as a small badge ("human" / "agent"). It must be usable without JavaScript for reading (server-rendered list via `askama`); JS enhances it. Accessibility: keyboard navigable, semantic HTML, `prefers-color-scheme`.
+One page at `http://127.0.0.1:8401/`, no framework, no build step beyond esbuild for TypeScript, assets embedded in the binary with `include_dir`. Views: inbox (live via SSE), conversations, thread, compose (with drag-drop attachments), peers (online, last seen, sessions; join by address). The conversations view is the inbox by thread rather than by message — one row per conversation, the one that moved last first, carrying the subject it opened with, the machines it is with and how much of it is unread — and each row opens the thread it belongs to (#43). Show `sender_kind` as a small badge ("human" / "agent"). It must be usable without JavaScript for reading (server-rendered list via `askama`); JS enhances it. Accessibility: keyboard navigable, semantic HTML, `prefers-color-scheme`.
 
 ---
 

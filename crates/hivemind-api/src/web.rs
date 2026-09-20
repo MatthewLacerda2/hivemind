@@ -29,6 +29,8 @@ use serde::Deserialize;
 
 use crate::service::{Draft, MailService};
 
+mod chats;
+
 /// Everything the layout needs, on every page.
 struct Chrome {
     here: &'static str,
@@ -159,6 +161,7 @@ struct PeersPage {
 pub fn router(state: Arc<MailService>) -> Router {
     Router::new()
         .route("/", get(inbox))
+        .route("/chats", get(chats::chats))
         .route("/sent", get(sent))
         .route("/thread/{id}", get(thread))
         .route("/thread/{id}/reply", post(reply))

@@ -14,6 +14,7 @@
     <a href="/" class="brand">hivemind</a>
     <ul>
       <li><a href="/"{% if here == "inbox" %} aria-current="page"{% endif %}>Inbox{% if unread > 0 %} <span class="count">{{ unread }}</span>{% endif %}</a></li>
+      <li><a href="/chats"{% if here == "chats" %} aria-current="page"{% endif %}>Conversations</a></li>
       <li><a href="/sent"{% if here == "sent" %} aria-current="page"{% endif %}>Sent</a></li>
       <li><a href="/compose"{% if here == "compose" %} aria-current="page"{% endif %}>Compose</a></li>
       <li><a href="/peers"{% if here == "peers" %} aria-current="page"{% endif %}>Peers</a></li>

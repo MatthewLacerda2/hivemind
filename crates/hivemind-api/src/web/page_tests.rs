@@ -17,7 +17,7 @@ use tower::ServiceExt as _;
 
 use crate::service::NodeDescription;
 
-fn app() -> (tempfile::TempDir, Router, Arc<MailService>) {
+pub(super) fn app() -> (tempfile::TempDir, Router, Arc<MailService>) {
     let dir = tempfile::tempdir().expect("temp dir");
     // A real certificate and key. With the placeholder that stood here,
     // anything reaching the network failed while building the TLS
@@ -59,7 +59,7 @@ fn app() -> (tempfile::TempDir, Router, Arc<MailService>) {
 /// a check. A sweep of this module found thirteen survivors in sixty-two
 /// mutants living in that gap (#101), because the only thing asserted about
 /// most pages was that they had a `<main>`, and an empty peers table has one.
-struct Page {
+pub(super) struct Page {
     status: StatusCode,
     headers: axum::http::HeaderMap,
     html: String,
@@ -95,7 +95,7 @@ impl Page {
     }
 
     #[track_caller]
-    fn says(&self, text: &str) -> &Self {
+    pub(super) fn says(&self, text: &str) -> &Self {
         assert!(
             self.content().contains(text),
             "the page should say {text:?} and says: {}",
@@ -105,7 +105,7 @@ impl Page {
     }
 
     #[track_caller]
-    fn does_not_say(&self, text: &str) -> &Self {
+    pub(super) fn does_not_say(&self, text: &str) -> &Self {
         assert!(
             !self.content().contains(text),
             "the page should not say {text:?} and says: {}",
@@ -142,7 +142,7 @@ async fn fetch(router: &Router, request: Request<Body>) -> Page {
     }
 }
 
-async fn get(router: &Router, path: &str) -> Page {
+pub(super) async fn get(router: &Router, path: &str) -> Page {
     let request = Request::builder()
         .uri(path)
         .body(Body::empty())
