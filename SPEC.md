@@ -178,8 +178,9 @@ rather than taken from the message, so a peer cannot nominate its own key.
 ├── mail/
 │   ├── new/<ulid>.json     # unread, received
 │   ├── cur/<ulid>.json     # read
-│   ├── out/<ulid>.json     # pending delivery (per recipient state inside the file)
-│   └── sent/<ulid>.json    # fully delivered
+│   ├── out/<ulid>.json     # pending delivery (per-recipient state inside the file)
+│   └── sent/<ulid>.json    # delivered to everyone (per-recipient state inside the file)
+├── receipts/<ulid>.json    # read receipts owed to other nodes, until taken (§8)
 ├── blobs/<sha256-hex>      # content-addressed attachments, deduplicated
 ├── index.db                # SQLite cache — derived, deletable, rebuilt on startup if missing/stale
 └── daemon.log
@@ -303,6 +304,7 @@ Every response on this listener carries `x-hivemind-binary-modified`: when the b
 POST /peer/v1/handshake        exchange name/owner/version/id + proof of the group key (§6.2)
 POST /peer/v1/hello            presence (§5.5): proof, addresses, peer list, sessions; answered in kind
 POST /peer/v1/messages         deliver one signed message (+ inline blobs as multipart); idempotent on id
+POST /peer/v1/receipts         "I have read these messages of yours" (§8); members only, idempotent
 HEAD /peer/v1/blobs/{sha}      does the sender still have it
 GET  /peer/v1/blobs/{sha}      range requests supported (resume)
 ```
@@ -323,7 +325,9 @@ RFC 9457 problem+json everywhere. Stable `type` slugs (`not_paired`, `unknown_pe
 - Idempotency: recipients dedupe on message id; re-delivery is always safe.
 - Idempotency is the **recipient's**, and it cannot cover a sender that sent twice: two presses make two ids, and the far end has no way to tell them from two deliberate messages. So a send whose recipients, subject, body, kind and `in_reply_to` all repeat one this node sent in the last **two minutes** comes back with `duplicate_of` naming it — in the `202`, in the MCP result, and as a warning line from the CLI. A **notice, not a refusal**: the message is queued either way, because asking somebody the same thing again is a real message (#33).
 - Inline attachments: any single file ≤ `inline_max` (default 8 MiB) ships in the delivery multipart. Larger ones ship as refs; the recipient fetches lazily on first access or eagerly if `prefetch = true` in config.
-- Delivered messages move `out/` → `sent/` only when all recipients are delivered.
+- Delivered messages move `out/` → `sent/` only when all recipients are delivered. **Both directories hold the delivery envelope**: the signed message plus one record per recipient, so promotion moves the record rather than dropping it (ADR 0015).
+- **Per-recipient state is `queued` → `delivered` → `read`, with the time of each transition** (#31). `delivered` is set when the recipient's own daemon answers `202` to `POST /peer/v1/messages`, never by the sender assuming: the distinction is the whole value, because a sender otherwise has only its own daemon's word for it. None of it is held in `index.db` — it is read from the envelope, so deleting the index loses nothing (ADR 0002).
+- **`read` travels back as a receipt** (ADR 0016). Marking a message read queues one for the node that sent it under `receipts/`, and a courier posts it to `POST /peer/v1/receipts` with the same jittered backoff, forever, until that node takes it. It is **off by default** and turned on per node with `read_receipts = true`: that a daemon accepted a message is a fact about a machine, and that somebody opened it is a fact about a person. Sending is what the switch governs; a receipt that arrives is always recorded. The reader is the authenticated caller and never anything in the body, so a member can only ever report on its own reading. A receipt is also proof of delivery, since nobody can read what never arrived. Nothing is run because one arrived — a field is written and `202` is answered (§12).
 
 ---
 
@@ -401,6 +405,8 @@ continues it, and both take the id this prints. A new subject with the same
 machine is a new conversation, and the way to start one is `hivemind send`.
 `--with` takes a node id, whole or short, and a machine this one does not know
 is refused rather than answered with an empty list.
+
+`hivemind sent` and `hivemind inbox --box out|sent` carry a mark per message — `·` queued, `✓` delivered, `✓✓` read — and the mark is the **weakest** claim the message supports, so one recipient that is off holds the whole row at `·`; a row showing the best of its recipients would say a message had arrived when half of it had not. `hivemind read` on a message this machine sent prints a line per recipient: when each took it, when each read it, and for the ones that have not, how many attempts and what the last one said (#31).
 
 `hivemind wait` blocks until mail arrives and prints it exactly as `inbox` does, for somebody — or a Claude — who has decided to wait for an answer rather than ask again in a minute: `hivemind wait && notify-send 'mail'`. It is the user saying "I will wait" and never the daemon running anything because mail arrived, which stays reserved (§12). Four rules make it a door rather than another polling loop (#40): it subscribes to `/api/v1/events` **before** it looks in the box, so mail arriving between the two is still reported; **unread mail already there ends the wait at once**, rather than waiting for the next one; `--timeout` exits **3**, a status no other outcome uses, so "nothing arrived" can never be read as "something did" — and never 1, which is what anything going wrong exits with; and a daemon that goes away mid-wait, or a `--from` that names nobody this machine knows, is an error rather than a wait that can never end. `--from` takes a node id, its short form, a machine name or an owner — an owner's machines all count — and `--thread` takes any message id in the conversation, like `hivemind thread`.
 

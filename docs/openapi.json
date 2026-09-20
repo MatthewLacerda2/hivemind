@@ -1105,6 +1105,37 @@
           }
         }
       },
+      "DeliverySummary": {
+        "type": "object",
+        "description": "How a message's recipients are getting on, for one row of a listing.",
+        "required": [
+          "state",
+          "recipients",
+          "delivered",
+          "read"
+        ],
+        "properties": {
+          "delivered": {
+            "type": "integer",
+            "description": "How many of them confirmed taking it.",
+            "minimum": 0
+          },
+          "read": {
+            "type": "integer",
+            "description": "How many of them said they read it.",
+            "minimum": 0
+          },
+          "recipients": {
+            "type": "integer",
+            "description": "How many machines it was addressed to, after expansion at send time.",
+            "minimum": 0
+          },
+          "state": {
+            "type": "string",
+            "description": "How far the message as a whole has got: the **weakest** claim any of its\nrecipients supports. One machine that is off holds the whole message at\n`queued`, which is what makes a mark in a listing worth reading."
+          }
+        }
+      },
       "ForgetAddrRequest": {
         "type": "object",
         "description": "Which of a peer's addresses to forget.",
@@ -1271,7 +1302,8 @@
           "sender_kind",
           "sent_at",
           "mailbox",
-          "attachments"
+          "attachments",
+          "recipients"
         ],
         "properties": {
           "attachments": {
@@ -1316,6 +1348,13 @@
             "format": "date-time",
             "description": "When this node received it, if it did."
           },
+          "recipients": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RecipientDelivery"
+            },
+            "description": "One line per recipient, for a message this node sent (SPEC §8): who has\nit, who has read it, and what is holding up the rest. Empty for\nreceived mail."
+          },
           "sender_kind": {
             "type": "string",
             "description": "`human` if a person typed it, `agent` if a Claude sent it."
@@ -1357,6 +1396,17 @@
               "type": "string"
             },
             "description": "The names of its attachments."
+          },
+          "delivery": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DeliverySummary",
+                "description": "How its recipients are getting on, for a message this node sent\n(SPEC §8). Absent for received mail, and for one whose only recipient\nwas this machine."
+              }
+            ]
           },
           "from": {
             "type": "string",
@@ -1495,6 +1545,62 @@
             "type": "string",
             "description": "A relative URI reference identifying the problem type, stable across\nreleases: `/problems/<slug>`.",
             "example": "/problems/message-not-found"
+          }
+        }
+      },
+      "RecipientDelivery": {
+        "type": "object",
+        "description": "What one recipient has done with a message, and what is holding it up.",
+        "required": [
+          "node",
+          "state",
+          "attempts"
+        ],
+        "properties": {
+          "attempts": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many times delivery has been attempted.",
+            "minimum": 0
+          },
+          "delivered_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When that machine's daemon confirmed taking it."
+          },
+          "last_attempt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the last attempt was made."
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the last attempt failed. The answer to \"why has this not arrived\",\nwhich was two minutes of guessing the first time it was asked (#31)."
+          },
+          "node": {
+            "type": "string",
+            "description": "The machine this copy is for."
+          },
+          "read_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When it said the message had been read (SPEC §8)."
+          },
+          "state": {
+            "type": "string",
+            "description": "`queued`, `delivered` or `read`."
           }
         }
       },

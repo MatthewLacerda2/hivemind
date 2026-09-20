@@ -80,6 +80,48 @@ impl Outbox for ServiceOutbox {
     }
 }
 
+/// Gives the receipt courier what it needs from a [`MailService`] (ADR 0016).
+///
+/// Separate from [`ServiceOutbox`] because what it carries is not mail: a
+/// receipt cannot be redelivered as a message, and one seam doing both would
+/// have to say which of the two every failure belonged to.
+#[derive(Debug, Clone)]
+pub struct ServiceCourier {
+    service: Arc<MailService>,
+}
+
+impl ServiceCourier {
+    /// Wrap a service.
+    #[must_use]
+    pub fn new(service: Arc<MailService>) -> Self {
+        Self { service }
+    }
+}
+
+impl hivemind_net::receipts::Courier for ServiceCourier {
+    fn owed(&self) -> Vec<hivemind_core::receipts::OwedReceipt> {
+        self.service.owed_receipts().unwrap_or_else(|error| {
+            // The disk is unreadable. Nothing the courier can do about it, and
+            // stopping would strand every receipt rather than this one.
+            tracing::warn!(%error, "could not read the receipt queue");
+            Vec::new()
+        })
+    }
+
+    fn addresses(&self, node: NodeId) -> Vec<String> {
+        self.service.peer_addresses(node).unwrap_or_default()
+    }
+
+    fn settled(&self, receipts: &[hivemind_core::receipts::OwedReceipt]) {
+        let messages: Vec<ulid::Ulid> = receipts.iter().map(|receipt| receipt.message).collect();
+        self.service.settle_receipts(&messages);
+    }
+
+    fn failed(&self, receipts: &[hivemind_core::receipts::OwedReceipt]) {
+        self.service.save_receipts(receipts);
+    }
+}
+
 /// Delivers over mutual TLS to the peer's `/peer/v1/messages` (SPEC §7.2).
 #[derive(Debug, Clone)]
 pub struct PeerTransport {
@@ -92,6 +134,19 @@ impl PeerTransport {
     #[must_use]
     pub fn new(service: Arc<MailService>, identity: hivemind_net::tls::LocalIdentity) -> Self {
         Self { service, identity }
+    }
+
+    /// The trust set for one peer, rebuilt per attempt.
+    ///
+    /// A client trusting every paired peer would let one of them collect
+    /// another's mail by answering on its address; a cached per-peer client
+    /// would go on trusting a certificate after the peer was removed.
+    fn trusting(&self, node: NodeId) -> hivemind_net::tls::TrustedPeers {
+        self.service
+            .certificate_of(node)
+            .map_or_else(hivemind_net::tls::TrustedPeers::default, |certificate| {
+                hivemind_net::tls::TrustedPeers::new(vec![(node, certificate)])
+            })
     }
 
     /// The attachments that travel with the message (SPEC §8).
@@ -149,22 +204,38 @@ impl hivemind_net::delivery::Transport for PeerTransport {
         );
         let _entered = span.enter();
 
-        // Pinned to this one recipient, rebuilt per attempt. A client trusting
-        // every paired peer would let one of them collect another's mail by
-        // answering on its address; a cached per-peer client would go on
-        // trusting a certificate after the peer was removed.
-        let trusted = self
-            .service
-            .certificate_of(node)
-            .map_or_else(hivemind_net::tls::TrustedPeers::default, |certificate| {
-                hivemind_net::tls::TrustedPeers::new(vec![(node, certificate)])
-            });
-
-        let client = hivemind_net::client::PeerClient::pinned(&self.identity, trusted)?;
+        let client = hivemind_net::client::PeerClient::pinned(&self.identity, self.trusting(node))?;
         let parts = self.inline_parts(message);
         let _: hivemind_net::client::PeerResponse<crate::peer::Delivered> = client
             .post_multipart(addr, "/peer/v1/messages", message, &parts)
             .await?;
+        Ok(())
+    }
+}
+
+impl hivemind_net::receipts::Transport for PeerTransport {
+    async fn confirm_read(
+        &self,
+        node: NodeId,
+        addr: &str,
+        read: &[hivemind_core::receipts::ReadNote],
+    ) -> Result<(), hivemind_net::client::ClientError> {
+        // The same span shape delivery carries (SPEC §13.1), minus the message:
+        // a batch is about several, and the count is what says how big it was.
+        let span = tracing::info_span!(
+            "confirm_read",
+            peer = %node.short(),
+            receipts = read.len(),
+            %addr
+        );
+        let _entered = span.enter();
+
+        let client = hivemind_net::client::PeerClient::pinned(&self.identity, self.trusting(node))?;
+        let body = hivemind_core::receipts::ReadReceipts {
+            read: read.to_vec(),
+        };
+        let _: hivemind_net::client::PeerResponse<hivemind_core::receipts::Recorded> =
+            client.post(addr, "/peer/v1/receipts", &body).await?;
         Ok(())
     }
 }
@@ -320,6 +391,7 @@ mod tests {
             max_attachment_bytes: hivemind_core::config::DEFAULT_MAX_ATTACHMENT_BYTES,
             inline_max_bytes: hivemind_core::config::DEFAULT_INLINE_MAX_BYTES,
             prefetch: false,
+            read_receipts: false,
             presence_interval: hivemind_core::config::DEFAULT_PRESENCE_INTERVAL,
             tailscale: hivemind_core::config::Tailscale::Auto,
         };

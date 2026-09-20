@@ -120,6 +120,14 @@ impl<'de> Deserialize<'de> for Tailscale {
 }
 
 /// Everything `config.toml` can say.
+///
+/// `struct_excessive_bools` fires here and is wrong about it: the lint is
+/// aimed at a struct whose booleans encode a state better named by an enum,
+/// and this is a mapping of a file whose keys a person writes by hand. Each
+/// flag is independent and each is spelled `true` or `false` in the TOML, so
+/// folding any pair of them into a variant would make the file harder to write
+/// to make the type look tidier.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
@@ -144,6 +152,23 @@ pub struct Config {
     /// Fetch non-inline attachments as soon as a message arrives, rather than
     /// on first access (SPEC §8).
     pub prefetch: bool,
+    /// Tell a sender when their message has been read here (SPEC §8).
+    ///
+    /// **Off by default, and deliberately** (ADR 0016). That a node accepted a
+    /// message is information about a daemon; that somebody opened it is
+    /// information about a person, and it is what people turn off in other
+    /// messengers. The safe direction is recoverable: somebody who wants it
+    /// switches it on, where somebody who did not want it has already been
+    /// reported on.
+    ///
+    /// This governs what leaves this machine. A receipt that arrives here is
+    /// always recorded — that is the other person's choice, already made.
+    ///
+    /// Turning it off does not recall a receipt already queued: it describes a
+    /// read that happened while it was on, and it goes when the node it is for
+    /// comes back. `~/.hivemind/receipts/` is one file per receipt, so
+    /// "not that one either" is a deletion.
+    pub read_receipts: bool,
     /// Largest attachment this node will accept.
     pub max_attachment_bytes: u64,
     /// Attachments at or below this size ship with the message.
@@ -172,6 +197,7 @@ impl Default for Config {
             notifications: true,
             discovery: true,
             prefetch: false,
+            read_receipts: false,
             max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
             inline_max_bytes: DEFAULT_INLINE_MAX_BYTES,
             presence_interval: DEFAULT_PRESENCE_INTERVAL,
@@ -325,6 +351,11 @@ impl Config {
             && let Some(flag) = parse_bool(&value)
         {
             self.prefetch = flag;
+        }
+        if let Ok(value) = std::env::var("HIVEMIND_READ_RECEIPTS")
+            && let Some(flag) = parse_bool(&value)
+        {
+            self.read_receipts = flag;
         }
     }
 
@@ -539,6 +570,21 @@ mod tests {
                 "`{field}` has no row in the README's configuration table"
             );
         }
+    }
+
+    #[test]
+    fn read_receipts_are_off_until_somebody_turns_them_on() {
+        // ADR 0016. A default that quietly reports when a colleague read
+        // something is the kind of thing nobody notices until they mind, and
+        // the safe direction is the recoverable one.
+        assert!(!Config::default().read_receipts);
+
+        let on: Config = toml::from_str("read_receipts = true").expect("parses");
+        assert!(on.read_receipts);
+        assert!(
+            !on.prefetch,
+            "an unset field should keep its default, not become true"
+        );
     }
 
     #[test]

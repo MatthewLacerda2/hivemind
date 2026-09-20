@@ -84,10 +84,26 @@ so asking for one machine's mail was answered with everybody's.
     "sender_kind": "human",
     "sent_at": "2026-09-17T14:26:40+00:00",
     "unread": true,
-    "attachment_names": []
+    "attachment_names": [],
+    "delivery": null
   }
 ]
 ```
+
+`delivery` is `null` for mail that arrived here, and for something this machine
+sent it says how far it has got:
+
+```json
+{ "state": "queued", "recipients": 2, "delivered": 1, "read": 0 }
+```
+
+`state` is the **weakest** of what its recipients support, so one machine that is
+off holds the whole message at `queued`. **Check it before telling the user
+something was sent**: `send` returning means the message is queued, and
+`delivered` is the recipient's own machine saying it took it. `read` only counts
+the machines that chose to send a receipt, which is off by default, so `read: 0`
+never means "they have not read it". `read` on one message lists the same thing
+per recipient, with what the last failed attempt said.
 
 ### `chats`
 

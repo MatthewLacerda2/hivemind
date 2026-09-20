@@ -135,10 +135,35 @@ already sitting unread ends it at once rather than waiting for the next one, and
 a daemon that stops answering is an error rather than a wait with no end. It
 never runs anything itself: waiting is your decision, not the mail's.
 
-**`hivemind sent` answers "did it arrive?".** It lists what this machine sent,
-newest first, and marks what is still waiting for a recipient to take it. Any
-one box on its own is `hivemind inbox --box new|cur|out|sent`, and `hivemind
-status` says how many messages are still going out.
+**`hivemind sent` answers "did it arrive?", per recipient.** It lists what this
+machine sent, newest first, with a mark on each: `·` still queued, `✓` the
+recipient's machine has taken it, `✓✓` they have read it. The mark is the
+**weakest** of what its recipients support, so a message to two machines with one
+of them asleep reads `✓ delivered to 1 of 2` until the other wakes up — a mark
+showing the best of them would say a message had arrived when half of it had not.
+
+`hivemind read <id>` on something you sent adds a line per recipient, which is
+where "why has this not arrived" is answered:
+
+```
+delivery
+  ·  lubr  queued · 4 attempts · could not reach 10.0.0.9:8400
+  ✓  teif  delivered 2026-09-20 11:34
+```
+
+`✓` is the recipient's own machine saying it took the message, not this one
+assuming it did. Any one box on its own is
+`hivemind inbox --box new|cur|out|sent`, and `hivemind status` says how many
+messages are still going out.
+
+**Nobody is told you read something unless you say so.** `✓✓` only ever appears
+because the machine at the other end chose to send a receipt, and that is off
+until somebody turns it on with `read_receipts = true` in
+`~/.hivemind/config.toml`. That a machine took a message is a fact about a
+daemon; that you opened it is a fact about you. Turning it on affects what leaves
+*your* machine — a receipt somebody else sends you is always recorded, because
+they already decided to send it — and a message can sit at `✓ delivered` for ever
+because the person at the other end has receipts off, which is not a fault.
 
 **Every message says whether a person or an agent wrote it.** You cannot claim
 otherwise: it is decided by which door the message came through, not by what

@@ -60,6 +60,18 @@ impl Mailbox {
     pub fn is_unread(self) -> bool {
         matches!(self, Self::New)
     }
+
+    /// Whether the files here are [`Outbound`] envelopes rather than bare
+    /// messages (SPEC §4.3).
+    ///
+    /// Both outgoing boxes are. `out/` always was; `sent/` became one with #31,
+    /// because dropping the envelope on promotion threw away the only record of
+    /// which recipient had taken the message and which had read it — and a
+    /// message everybody has is exactly the one somebody asks about.
+    #[must_use]
+    pub fn holds_envelopes(self) -> bool {
+        matches!(self, Self::Out | Self::Sent)
+    }
 }
 
 /// Why a store operation failed.
@@ -84,9 +96,9 @@ pub enum StoreError {
     },
     /// An operation was asked for on a mailbox that cannot support it.
     ///
-    /// `out/` holds [`Outbound`] envelopes rather than bare messages, so it
-    /// takes [`MailStore::put_outbound`] and leaves by
-    /// [`MailStore::promote_to_sent`]; the generic operations refuse it.
+    /// `out/` and `sent/` hold [`Outbound`] envelopes rather than bare
+    /// messages, so they take [`MailStore::put_outbound`] and `out/` leaves by
+    /// [`MailStore::promote_to_sent`]; the generic operations refuse both.
     #[error("{mailbox}/ holds delivery envelopes, not plain messages")]
     WrongMailbox {
         /// The mailbox that was asked for.
@@ -103,11 +115,49 @@ pub enum StoreError {
     },
 }
 
-/// A message in the outbox, with what we still owe each recipient.
+/// How far one recipient's copy has got (SPEC §8, #31).
+///
+/// Three states and no more, because each is a different *kind* of claim.
+/// `Queued` is what this node knows on its own; `Delivered` is what the far
+/// node asserted when it accepted the bytes; `Read` is what the person at the
+/// far end chose to tell us. A sender who cannot tell the three apart is left
+/// with their own daemon's word for it, which is what #31 found to be wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Delivery {
+    /// Written here, and nobody has confirmed taking it.
+    Queued,
+    /// The recipient's node accepted it.
+    Delivered,
+    /// The recipient opened it, and their node said so (SPEC §8).
+    Read,
+}
+
+impl Delivery {
+    /// Every state, weakest claim first.
+    pub const ALL: [Self; 3] = [Self::Queued, Self::Delivered, Self::Read];
+
+    /// The stable string used by the API and the CLI.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Delivered => "delivered",
+            Self::Read => "read",
+        }
+    }
+
+    /// Parse [`Delivery::as_str`].
+    #[must_use]
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|state| state.as_str() == s)
+    }
+}
+
+/// A message on its way out, with what each recipient has done with it.
 ///
 /// SPEC §4.3 puts per-recipient delivery state "inside the file". It cannot go
 /// inside `Message`: those fields are signed, and delivery state changes after
-/// signing. So the outbox file holds an envelope — the signed message exactly
+/// signing. So the outgoing file holds an envelope — the signed message exactly
 /// as it will be sent, plus our own bookkeeping alongside it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Outbound {
@@ -122,6 +172,19 @@ impl Outbound {
     #[must_use]
     pub fn is_complete(&self) -> bool {
         self.recipients.iter().all(|r| r.delivered_at.is_some())
+    }
+
+    /// How far one recipient has got, or `None` if this is not for them.
+    ///
+    /// Absent rather than [`Delivery::Queued`]: "I am not on the list" and
+    /// "nobody has taken it yet" are different answers, and a caller told the
+    /// second would go looking for a delivery that was never owed.
+    #[must_use]
+    pub fn state_of(&self, node: NodeId) -> Option<Delivery> {
+        self.recipients
+            .iter()
+            .find(|r| r.node == node)
+            .map(RecipientState::state)
     }
 
     /// Recipients still owed a copy.
@@ -144,6 +207,29 @@ impl Outbound {
         }
     }
 
+    /// Record that a recipient read it. Returns whether anything changed.
+    ///
+    /// A receipt is also proof of delivery, so it stamps `delivered_at` if
+    /// nothing else has: a recipient cannot read what never reached them, and
+    /// our own record of the delivery can be lost between the far node's
+    /// `202` and the write that follows it.
+    ///
+    /// The first receipt wins. A second one is not new information — that is
+    /// still when they read it — and redelivery of a receipt is as safe as
+    /// redelivery of mail (SPEC §8).
+    pub fn mark_read(&mut self, by: NodeId, at: chrono::DateTime<chrono::Utc>) -> bool {
+        let Some(state) = self
+            .recipients
+            .iter_mut()
+            .find(|r| r.node == by && r.read_at.is_none())
+        else {
+            return false;
+        };
+        state.read_at = Some(at);
+        state.delivered_at = state.delivered_at.or(Some(at));
+        true
+    }
+
     /// Record a failed attempt, so backoff can be computed from it.
     pub fn mark_attempted(&mut self, to: NodeId, at: chrono::DateTime<chrono::Utc>, why: &str) {
         if let Some(state) = self.recipients.iter_mut().find(|r| r.node == to) {
@@ -163,6 +249,12 @@ pub struct RecipientState {
     pub node: NodeId,
     /// When it was accepted, if it has been.
     pub delivered_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// When they read it, if their node said so (SPEC §8).
+    ///
+    /// Defaulted, so an envelope written before #31 reads back as one nobody
+    /// has told us about rather than not reading back at all.
+    #[serde(default)]
+    pub read_at: Option<chrono::DateTime<chrono::Utc>>,
     /// How many times we have tried.
     pub attempts: u32,
     /// When we last tried.
@@ -178,11 +270,57 @@ impl RecipientState {
         Self {
             node,
             delivered_at: None,
+            read_at: None,
             attempts: 0,
             last_attempt: None,
             last_error: None,
         }
     }
+
+    /// How far this recipient's copy has got.
+    #[must_use]
+    pub fn state(&self) -> Delivery {
+        if self.read_at.is_some() {
+            Delivery::Read
+        } else if self.delivered_at.is_some() {
+            Delivery::Delivered
+        } else {
+            Delivery::Queued
+        }
+    }
+}
+
+/// Write a JSON body to `path` by writing a temporary file and renaming it.
+///
+/// The rename is the only step visible to a reader, and it is atomic: the file
+/// is either absent or complete, never half-written (ADR 0002). The temporary
+/// file is in the same directory so the rename cannot cross a filesystem
+/// boundary and stop being atomic, and its suffix keeps it out of every
+/// listing here, which only accept `.json`.
+///
+/// Shared with the receipt queue, which is a directory of small JSON files
+/// with the same durability requirement and no reason to write them a second
+/// way.
+pub(crate) fn write_atomic<T: serde::Serialize>(
+    path: &std::path::Path,
+    body: &T,
+) -> Result<(), StoreError> {
+    let temp_path = path.with_extension("json.tmp");
+
+    let json = serde_json::to_vec_pretty(body).map_err(|source| StoreError::Io {
+        context: format!("could not encode {}", path.display()),
+        source: std::io::Error::other(source),
+    })?;
+
+    fs::write(&temp_path, &json).map_err(|source| StoreError::Io {
+        context: format!("could not write {}", temp_path.display()),
+        source,
+    })?;
+
+    fs::rename(&temp_path, path).map_err(|source| StoreError::Io {
+        context: format!("could not move {} into place", temp_path.display()),
+        source,
+    })
 }
 
 /// The on-disk mail store.
@@ -218,11 +356,11 @@ impl MailStore {
     /// the same id.
     ///
     /// # Errors
-    /// Returns [`StoreError::WrongMailbox`] for `out/`, which holds
+    /// Returns [`StoreError::WrongMailbox`] for `out/` and `sent/`, which hold
     /// [`Outbound`] envelopes — use [`MailStore::put_outbound`]. Returns
     /// [`StoreError::Io`] if the write or rename fails.
     pub fn put(&self, mailbox: Mailbox, message: &Message) -> Result<(), StoreError> {
-        Self::refuse_outbox(mailbox)?;
+        Self::refuse_envelopes(mailbox)?;
         self.write_json(mailbox, message.id, message)
     }
 
@@ -244,9 +382,9 @@ impl MailStore {
         }
     }
 
-    /// `out/` is the one mailbox whose files are not bare messages.
-    fn refuse_outbox(mailbox: Mailbox) -> Result<(), StoreError> {
-        if mailbox == Mailbox::Out {
+    /// The outgoing mailboxes' files are not bare messages.
+    fn refuse_envelopes(mailbox: Mailbox) -> Result<(), StoreError> {
+        if mailbox.holds_envelopes() {
             return Err(StoreError::WrongMailbox {
                 mailbox: mailbox.as_str(),
             });
@@ -261,28 +399,7 @@ impl MailStore {
         id: Ulid,
         body: &T,
     ) -> Result<(), StoreError> {
-        let final_path = self.path_of(mailbox, id);
-        // Same directory as the destination, so the rename below cannot cross a
-        // filesystem boundary and stop being atomic. The suffix keeps it out of
-        // `list`, which only accepts `.json`.
-        let temp_path = final_path.with_extension("json.tmp");
-
-        let json = serde_json::to_vec_pretty(body).map_err(|source| StoreError::Io {
-            context: format!("could not encode {id}"),
-            source: std::io::Error::other(source),
-        })?;
-
-        fs::write(&temp_path, &json).map_err(|source| StoreError::Io {
-            context: format!("could not write {}", temp_path.display()),
-            source,
-        })?;
-
-        // The only step that is visible to a reader, and it is atomic: the
-        // message is either absent or complete, never half-written (ADR 0002).
-        fs::rename(&temp_path, &final_path).map_err(|source| StoreError::Io {
-            context: format!("could not move {} into place", temp_path.display()),
-            source,
-        })
+        write_atomic(&self.path_of(mailbox, id), body)
     }
 
     /// Read a message out of a mailbox.
@@ -291,6 +408,9 @@ impl MailStore {
     /// [`StoreError::NotFound`] if it is not there, [`StoreError::Corrupt`] if
     /// the file will not parse.
     pub fn get(&self, mailbox: Mailbox, id: Ulid) -> Result<Message, StoreError> {
+        if mailbox.holds_envelopes() {
+            return self.get_outbound(mailbox, id).map(|out| out.message);
+        }
         self.read_json(mailbox, id)
     }
 
@@ -355,20 +475,49 @@ impl MailStore {
     ///
     /// # Errors
     /// [`StoreError::NotFound`] if it is not in `from`.
-    /// Write an outbox entry, replacing any entry with the same id.
+    /// Write an outgoing entry, replacing any entry with the same id.
     ///
     /// # Errors
-    /// Returns [`StoreError::Io`] if the write or rename fails.
-    pub fn put_outbound(&self, outbound: &Outbound) -> Result<(), StoreError> {
-        self.write_json(Mailbox::Out, outbound.message.id, outbound)
+    /// Returns [`StoreError::WrongMailbox`] for a mailbox that holds received
+    /// mail, or [`StoreError::Io`] if the write or rename fails.
+    pub fn put_outbound(&self, mailbox: Mailbox, outbound: &Outbound) -> Result<(), StoreError> {
+        if !mailbox.holds_envelopes() {
+            return Err(StoreError::WrongMailbox {
+                mailbox: mailbox.as_str(),
+            });
+        }
+        self.write_json(mailbox, outbound.message.id, outbound)
     }
 
-    /// Read an outbox entry.
+    /// Read an outgoing entry, from `out/` or `sent/`.
+    ///
+    /// A `sent/` file written before #31 is a bare message, so one that will
+    /// not parse as an envelope is tried as a message and reported as an
+    /// envelope nobody has told us anything about. The fallback is second, not
+    /// first: a genuinely broken file must stay [`StoreError::Corrupt`] rather
+    /// than become "nobody has it".
     ///
     /// # Errors
-    /// [`StoreError::NotFound`] or [`StoreError::Corrupt`].
-    pub fn get_outbound(&self, id: Ulid) -> Result<Outbound, StoreError> {
-        self.read_json(Mailbox::Out, id)
+    /// [`StoreError::WrongMailbox`] for a mailbox that holds received mail,
+    /// [`StoreError::NotFound`], or [`StoreError::Corrupt`].
+    pub fn get_outbound(&self, mailbox: Mailbox, id: Ulid) -> Result<Outbound, StoreError> {
+        if !mailbox.holds_envelopes() {
+            return Err(StoreError::WrongMailbox {
+                mailbox: mailbox.as_str(),
+            });
+        }
+        match self.read_json::<Outbound>(mailbox, id) {
+            Err(StoreError::Corrupt { path, source }) => {
+                match self.read_json::<Message>(mailbox, id) {
+                    Ok(message) => Ok(Outbound {
+                        message,
+                        recipients: Vec::new(),
+                    }),
+                    Err(_) => Err(StoreError::Corrupt { path, source }),
+                }
+            }
+            other => other,
+        }
     }
 
     /// Every outbox entry, oldest first.
@@ -382,14 +531,14 @@ impl MailStore {
         Ok(self
             .list(Mailbox::Out)?
             .into_iter()
-            .filter_map(|id| self.get_outbound(id).ok())
+            .filter_map(|id| self.get_outbound(Mailbox::Out, id).ok())
             .collect())
     }
 
-    /// Finish delivery: write the message to `sent/` and drop the envelope.
+    /// Finish delivery: write the envelope to `sent/` and clear `out/`.
     ///
-    /// `sent/` is read like any other mailbox, so the per-recipient delivery
-    /// state is left behind rather than renamed along with the message.
+    /// The envelope travels rather than the bare message, so which recipient
+    /// took it and which has read it outlives the queue (#31).
     ///
     /// The order is deliberate. `sent/` is written first and `out/` cleared
     /// after, so a crash between the two leaves the message in both — and
@@ -398,20 +547,21 @@ impl MailStore {
     /// # Errors
     /// Returns [`StoreError::Io`] if either step fails.
     pub fn promote_to_sent(&self, outbound: &Outbound) -> Result<(), StoreError> {
-        self.put(Mailbox::Sent, &outbound.message)?;
+        self.put_outbound(Mailbox::Sent, outbound)?;
         self.remove(Mailbox::Out, outbound.message.id)
     }
 
     /// Move a message between mailboxes, leaving its bytes untouched.
     ///
     /// # Errors
-    /// Returns [`StoreError::WrongMailbox`] if either side is `out/`, whose
-    /// files are envelopes rather than messages — delivery leaves it through
-    /// [`MailStore::promote_to_sent`]. Returns [`StoreError::NotFound`] if the
-    /// message is not in `from`, or [`StoreError::Io`] if the rename fails.
+    /// Returns [`StoreError::WrongMailbox`] if either side is an outgoing
+    /// mailbox, whose files are envelopes rather than messages — delivery
+    /// leaves `out/` through [`MailStore::promote_to_sent`]. Returns
+    /// [`StoreError::NotFound`] if the message is not in `from`, or
+    /// [`StoreError::Io`] if the rename fails.
     pub fn move_to(&self, from: Mailbox, to: Mailbox, id: Ulid) -> Result<(), StoreError> {
-        Self::refuse_outbox(from)?;
-        Self::refuse_outbox(to)?;
+        Self::refuse_envelopes(from)?;
+        Self::refuse_envelopes(to)?;
         if from == to {
             return Ok(());
         }
@@ -452,6 +602,10 @@ mod tests {
         (dir, store)
     }
 
+    fn at(secs: i64) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::from_timestamp(secs, 0).expect("in range")
+    }
+
     #[test]
     fn opening_a_store_creates_the_four_mailboxes() {
         let (dir, _store) = store();
@@ -474,8 +628,8 @@ mod tests {
     fn a_message_written_to_a_mailbox_reads_back_identical() {
         let (_dir, store) = store();
         let message = fixture();
-        store.put(Mailbox::Sent, &message).expect("put");
-        assert_eq!(store.get(Mailbox::Sent, message.id).expect("get"), message);
+        store.put(Mailbox::Cur, &message).expect("put");
+        assert_eq!(store.get(Mailbox::Cur, message.id).expect("get"), message);
     }
 
     #[test]
@@ -494,9 +648,9 @@ mod tests {
     #[test]
     fn writing_leaves_no_temporary_files_behind() {
         let (dir, store) = store();
-        store.put(Mailbox::Sent, &fixture()).expect("put");
+        store.put(Mailbox::Cur, &fixture()).expect("put");
 
-        let entries: Vec<_> = fs::read_dir(dir.path().join("mail").join("sent"))
+        let entries: Vec<_> = fs::read_dir(dir.path().join("mail").join("cur"))
             .expect("read dir")
             .filter_map(Result::ok)
             .map(|e| e.file_name().to_string_lossy().into_owned())
@@ -636,16 +790,21 @@ mod tests {
     }
 
     #[test]
-    fn a_delivered_message_is_promoted_to_sent_as_a_plain_message() {
-        // `sent/` is read like any other mailbox, so the delivery bookkeeping
-        // must be dropped on the way rather than renamed along with it.
+    fn a_delivered_message_keeps_its_per_recipient_state_in_sent() {
+        // The bookkeeping used to be dropped here, which is why "did it
+        // arrive, and to whom" had no answer once the last recipient took it
+        // (#31). `sent/` holds the envelope too, and the message inside it is
+        // still the signed one.
         let (_dir, store) = store();
         let message = fixture();
-        let outbound = Outbound {
+        let mut outbound = Outbound {
             recipients: vec![RecipientState::pending(message.from)],
             message: message.clone(),
         };
-        store.put_outbound(&outbound).expect("put_outbound");
+        store
+            .put_outbound(Mailbox::Out, &outbound)
+            .expect("put_outbound");
+        assert!(outbound.mark_delivered(message.from, at(1_000)));
 
         store.promote_to_sent(&outbound).expect("promote");
 
@@ -655,13 +814,181 @@ mod tests {
                 .expect("read as a message"),
             message
         );
+        assert_eq!(
+            store
+                .get_outbound(Mailbox::Sent, message.id)
+                .expect("read as an envelope")
+                .recipients,
+            outbound.recipients,
+            "what each recipient did outlives the outbox"
+        );
         assert!(
             matches!(
-                store.get_outbound(message.id),
+                store.get_outbound(Mailbox::Out, message.id),
                 Err(StoreError::NotFound { .. })
             ),
             "the outbox copy should be gone"
         );
+    }
+
+    #[test]
+    fn a_read_receipt_names_one_recipient_and_leaves_the_others_alone() {
+        // Two recipients, so "the right one" is distinguishable from "all of
+        // them" — which is the whole point of per-recipient state.
+        let one = NodeId::from_certificate_der(b"one");
+        let two = NodeId::from_certificate_der(b"two");
+        let mut outbound = Outbound {
+            recipients: vec![RecipientState::pending(one), RecipientState::pending(two)],
+            message: fixture(),
+        };
+
+        assert_eq!(outbound.state_of(one), Some(Delivery::Queued));
+        assert!(outbound.mark_delivered(one, at(1_000)));
+        assert!(outbound.mark_delivered(two, at(1_000)));
+        assert!(outbound.mark_read(one, at(2_000)));
+
+        assert_eq!(outbound.state_of(one), Some(Delivery::Read));
+        assert_eq!(outbound.state_of(two), Some(Delivery::Delivered));
+        assert_eq!(outbound.recipients[0].read_at, Some(at(2_000)));
+        assert_eq!(outbound.recipients[1].read_at, None);
+        assert_eq!(outbound.state_of(fixture().from), None, "not a recipient");
+    }
+
+    #[test]
+    fn a_second_read_receipt_for_the_same_recipient_changes_nothing() {
+        // Redelivery of a receipt is as safe as redelivery of mail (SPEC §8),
+        // and the time kept is the first one: that is when they read it.
+        let one = NodeId::from_certificate_der(b"one");
+        let mut outbound = Outbound {
+            recipients: vec![RecipientState::pending(one)],
+            message: fixture(),
+        };
+        assert!(outbound.mark_read(one, at(2_000)));
+        assert!(!outbound.mark_read(one, at(3_000)));
+        assert_eq!(outbound.recipients[0].read_at, Some(at(2_000)));
+    }
+
+    #[test]
+    fn a_read_receipt_is_itself_proof_of_delivery() {
+        // A recipient cannot read what never reached it, and our own record of
+        // the delivery can be lost — a crash between the accepted response and
+        // the write is exactly what #31's third incident is about.
+        let one = NodeId::from_certificate_der(b"one");
+        let mut outbound = Outbound {
+            recipients: vec![RecipientState::pending(one)],
+            message: fixture(),
+        };
+        assert!(outbound.mark_read(one, at(2_000)));
+        assert_eq!(outbound.recipients[0].delivered_at, Some(at(2_000)));
+        assert!(outbound.is_complete());
+    }
+
+    #[test]
+    fn a_sent_file_written_before_delivery_state_moved_there_still_reads() {
+        // `sent/` held a bare message until #31, and that file is what
+        // somebody upgrading brings with them. It reads, with nothing claimed
+        // about who took it — the honest answer for a file that never said.
+        let (dir, store) = store();
+        let message = fixture();
+        fs::write(
+            dir.path()
+                .join("mail")
+                .join("sent")
+                .join(format!("{}.json", message.id)),
+            serde_json::to_vec_pretty(&message).expect("encode"),
+        )
+        .expect("write");
+
+        assert_eq!(store.get(Mailbox::Sent, message.id).expect("get"), message);
+        assert!(
+            store
+                .get_outbound(Mailbox::Sent, message.id)
+                .expect("envelope")
+                .recipients
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_unreadable_envelope_is_corrupt_rather_than_an_empty_one() {
+        // The fallback above must not swallow a genuinely broken file: that
+        // would turn "this will not parse" into "nobody has it".
+        let (dir, store) = store();
+        fs::write(
+            dir.path()
+                .join("mail")
+                .join("sent")
+                .join(format!("{}.json", fixture().id)),
+            b"{ this is not json",
+        )
+        .expect("write");
+
+        assert!(matches!(
+            store.get_outbound(Mailbox::Sent, fixture().id),
+            Err(StoreError::Corrupt { .. })
+        ));
+    }
+
+    #[test]
+    fn the_three_delivery_states_round_trip_through_their_names() {
+        // The names are what the API and the CLI print and what the index would
+        // store if it ever stored them, so they are a contract rather than a
+        // debug rendering.
+        assert_eq!(Delivery::Queued.as_str(), "queued");
+        assert_eq!(Delivery::Delivered.as_str(), "delivered");
+        assert_eq!(Delivery::Read.as_str(), "read");
+        for state in Delivery::ALL {
+            assert_eq!(Delivery::from_str_opt(state.as_str()), Some(state));
+        }
+        assert_eq!(Delivery::from_str_opt("opened"), None);
+        assert_eq!(Delivery::from_str_opt(""), None);
+    }
+
+    #[test]
+    fn the_states_order_from_the_weakest_claim_to_the_strongest() {
+        // A listing shows the weakest state any recipient supports, so the
+        // ordering is behaviour rather than a derive nobody reads.
+        assert!(Delivery::Queued < Delivery::Delivered);
+        assert!(Delivery::Delivered < Delivery::Read);
+        assert_eq!(Delivery::ALL.iter().copied().min(), Some(Delivery::Queued));
+    }
+
+    #[test]
+    fn the_outbox_lists_every_entry_in_it_oldest_first() {
+        let (_dir, store) = store();
+        let mut ids = Vec::new();
+        for millis in [300_u64, 100, 200] {
+            let mut message = fixture();
+            message.id = Ulid::from_parts(millis, 0);
+            ids.push(message.id);
+            store
+                .put_outbound(
+                    Mailbox::Out,
+                    &Outbound {
+                        recipients: vec![RecipientState::pending(message.from)],
+                        message,
+                    },
+                )
+                .expect("put_outbound");
+        }
+
+        let listed: Vec<Ulid> = store
+            .list_outbound()
+            .expect("list")
+            .into_iter()
+            .map(|outbound| outbound.message.id)
+            .collect();
+
+        ids.sort_unstable();
+        assert_eq!(listed, ids, "the worker walks the outbox oldest first");
+    }
+
+    #[test]
+    fn only_the_two_outgoing_mailboxes_hold_envelopes() {
+        assert!(!Mailbox::New.holds_envelopes());
+        assert!(!Mailbox::Cur.holds_envelopes());
+        assert!(Mailbox::Out.holds_envelopes());
+        assert!(Mailbox::Sent.holds_envelopes());
     }
 
     #[test]
@@ -674,7 +1001,9 @@ mod tests {
             recipients: vec![RecipientState::pending(message.from)],
             message: message.clone(),
         };
-        store.put_outbound(&outbound).expect("put_outbound");
+        store
+            .put_outbound(Mailbox::Out, &outbound)
+            .expect("put_outbound");
         store.promote_to_sent(&outbound).expect("promote");
 
         // Promoting again is a no-op rather than an error, because that is
@@ -704,12 +1033,12 @@ mod tests {
         let (_dir, store) = store();
         let message = fixture();
         store.put(Mailbox::New, &message).expect("put");
-        store.put(Mailbox::Sent, &message).expect("put");
+        store.put(Mailbox::Cur, &message).expect("put");
 
         store.remove(Mailbox::New, message.id).expect("remove");
 
         assert!(store.get(Mailbox::New, message.id).is_err());
-        assert!(store.get(Mailbox::Sent, message.id).is_ok());
+        assert!(store.get(Mailbox::Cur, message.id).is_ok());
     }
 
     #[test]

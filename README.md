@@ -104,6 +104,7 @@ startup with messages that say what to fix.
 | `notifications` | `true` | A desktop notification when mail arrives |
 | `discovery` | `true` | Advertise and browse over mDNS. Off for a network you would rather not announce yourself on |
 | `prefetch` | `false` | Fetch large attachments on arrival rather than on first read |
+| `read_receipts` | `false` | Tell a sender when you have read their message. Off by default: that a machine took a message is a fact about a daemon, that somebody opened it is a fact about a person. Receipts sent **to** this node are always recorded |
 | `max_attachment_bytes` | `2 GiB` | The largest attachment this node accepts |
 | `inline_max_bytes` | `8 MiB` | At or below this, a file travels with its message |
 | `presence_interval` | `60` | Seconds between saying hello to every peer. `0` turns presence off |
@@ -119,6 +120,7 @@ missing from it — the alternative is a second place to be wrong.
 | `~/.hivemind/identity/` | Your node's Ed25519 key and certificate |
 | `~/.hivemind/peers.toml` | The address book — source of truth for peers |
 | `~/.hivemind/mail/` | Your mail, one JSON file per message |
+| `~/.hivemind/receipts/` | Read receipts this machine owes, until the node they are for takes them |
 | `~/.hivemind/blobs/` | Attachments, content-addressed and deduplicated |
 | `~/.hivemind/index.db` | Query cache. Derived, deletable, rebuilt on startup |
 | `~/.hivemind/daemon.log` | Logs |

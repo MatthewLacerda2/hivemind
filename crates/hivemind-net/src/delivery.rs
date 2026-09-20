@@ -15,7 +15,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use hivemind_core::message::Message;
 use hivemind_core::peer::NodeId;
-use hivemind_core::store::{MailStore, Outbound, RecipientState};
+use hivemind_core::store::{MailStore, Mailbox, Outbound, RecipientState};
 
 use crate::client::ClientError;
 
@@ -70,18 +70,33 @@ pub fn backoff(attempts: u32, jitter: f64) -> Duration {
 /// message.
 #[must_use]
 pub fn is_due(state: &RecipientState, now: DateTime<Utc>, jitter: f64) -> bool {
-    let Some(last) = state.last_attempt else {
+    due_after(state.attempts, state.last_attempt, now, jitter)
+}
+
+/// [`is_due`] for anything that retries on the same schedule.
+///
+/// Read receipts are the second such thing (ADR 0016): they are retried until
+/// the node they are for takes them, and one backoff written twice is one no
+/// test can tell from one.
+#[must_use]
+pub fn due_after(
+    attempts: u32,
+    last_attempt: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+    jitter: f64,
+) -> bool {
+    let Some(last) = last_attempt else {
         return true;
     };
     let waited = now.signed_duration_since(last).to_std().unwrap_or_default();
-    waited >= backoff(state.attempts, jitter)
+    waited >= backoff(attempts, jitter)
 }
 
 /// A jitter value in `[0, 1)`.
 ///
 /// Drawn from the same source as everything else random here (SPEC §6.1) so
 /// there is one place to look when asking where randomness comes from.
-fn jitter() -> f64 {
+pub(crate) fn jitter() -> f64 {
     let mut bytes = [0u8; 4];
     // A failure here is not worth taking delivery down for; the midpoint is a
     // sound delay, just an unjittered one.
@@ -452,11 +467,11 @@ pub fn persist(
     outbound: &Outbound,
 ) -> Result<(), hivemind_core::store::StoreError> {
     if outbound.is_complete() {
-        // Drops the delivery bookkeeping: `sent/` is read like any other
-        // mailbox, so what lands there is the plain signed message.
+        // The envelope travels with it, so which recipient took the message —
+        // and which has read it — outlives the queue (#31).
         store.promote_to_sent(outbound)
     } else {
-        store.put_outbound(outbound)
+        store.put_outbound(Mailbox::Out, outbound)
     }
 }
 
@@ -552,7 +567,6 @@ mod pass_tests {
     use super::*;
     use hivemind_core::crypto::SigningKey;
     use hivemind_core::message::{Kind, Recipient, SenderKind};
-    use hivemind_core::store::Mailbox;
     use hivemind_core::store::RecipientState;
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -791,19 +805,22 @@ mod pass_tests {
         let mut outbound = outbound_to(&[a, b]);
         let id = outbound.message.id;
         persist(&store, &outbound).expect("persist");
-        assert!(store.get_outbound(id).is_ok(), "still owed to somebody");
+        assert!(
+            store.get_outbound(Mailbox::Out, id).is_ok(),
+            "still owed to somebody"
+        );
 
         outbound.mark_delivered(a, at(1));
         persist(&store, &outbound).expect("persist");
         assert!(
-            store.get_outbound(id).is_ok(),
+            store.get_outbound(Mailbox::Out, id).is_ok(),
             "one of two is not everybody"
         );
 
         outbound.mark_delivered(b, at(2));
         persist(&store, &outbound).expect("persist");
         assert!(
-            store.get_outbound(id).is_err(),
+            store.get_outbound(Mailbox::Out, id).is_err(),
             "out/ should be empty once everyone has it"
         );
         assert!(

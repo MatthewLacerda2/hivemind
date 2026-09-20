@@ -32,4 +32,5 @@ pub mod index;
 pub mod message;
 pub mod peer;
 pub mod peerbook;
+pub mod receipts;
 pub mod store;

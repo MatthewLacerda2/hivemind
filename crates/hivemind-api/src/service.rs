@@ -27,6 +27,7 @@ use hivemind_core::peer::NodeId;
 use hivemind_core::peerbook::{
     AddrSource, CertificateDer, Peer, PeerAddr, PeerBook, PeerBookError,
 };
+use hivemind_core::receipts::ReceiptBook;
 use hivemind_core::store::{MailStore, Mailbox, Outbound, RecipientState, StoreError};
 use tokio::sync::{broadcast, watch};
 use ulid::Ulid;
@@ -223,6 +224,7 @@ mod group;
 mod peering;
 mod presence;
 mod query;
+mod receipts;
 mod receive;
 mod recipients;
 mod send;
@@ -239,6 +241,9 @@ pub use sessions::{SESSION_TTL, Session};
 pub struct MailService {
     store: MailStore,
     blobs: BlobStore,
+    /// Read receipts this node owes other nodes (ADR 0016). A queue of files
+    /// beside `mail/`, retried until the node each is for takes it.
+    receipts: ReceiptBook,
     index: Mutex<Index>,
     peers: Mutex<PeerBook>,
     /// The group key, if this node is in a group (ADR 0013).
@@ -284,6 +289,9 @@ pub struct MailService {
     max_attachment_bytes: u64,
     inline_max_bytes: u64,
     prefetch: bool,
+    /// Whether to tell a sender when their message has been read here
+    /// (SPEC §8). Off unless the person whose reading it describes said so.
+    read_receipts: bool,
     signing_key: SigningKey,
     events: broadcast::Sender<Event>,
     closing: watch::Sender<bool>,
@@ -314,6 +322,8 @@ pub struct NodeDescription {
     /// Fetch lazy attachments as soon as a message arrives, rather than on
     /// first access (SPEC §8).
     pub prefetch: bool,
+    /// Tell a sender when their message has been read here (SPEC §8).
+    pub read_receipts: bool,
     /// Seconds between presence rounds (SPEC §5.5), and half the window a
     /// hello keeps a peer looking online for.
     pub presence_interval: u64,
@@ -335,6 +345,7 @@ impl MailService {
     ) -> Result<Self, ServiceError> {
         let store = MailStore::open(root.join("mail"))?;
         let blobs = BlobStore::open(root.join("blobs"))?;
+        let receipts = ReceiptBook::open(root.join("receipts"))?;
         let mut index = Index::open(&root.join("index.db"))?;
         // Cheap when the index was already current, because it is only the
         // files that exist; correct when it was not.
@@ -358,6 +369,7 @@ impl MailService {
         Ok(Self {
             store,
             blobs,
+            receipts,
             index: Mutex::new(index),
             peers: Mutex::new(peers),
             group: Mutex::new(group),
@@ -381,6 +393,7 @@ impl MailService {
             max_attachment_bytes: node.max_attachment_bytes,
             inline_max_bytes: node.inline_max_bytes,
             prefetch: node.prefetch,
+            read_receipts: node.read_receipts,
             signing_key,
             events,
             closing,
@@ -536,7 +549,7 @@ pub(crate) mod tests {
     }
 
     /// The bits of a node description the store tests do not care about.
-    pub(super) fn describe(id: NodeId) -> NodeDescription {
+    pub(crate) fn describe(id: NodeId) -> NodeDescription {
         NodeDescription {
             id,
             certificate: b"this node".to_vec(),
@@ -548,6 +561,7 @@ pub(crate) mod tests {
             max_attachment_bytes: hivemind_core::config::DEFAULT_MAX_ATTACHMENT_BYTES,
             inline_max_bytes: hivemind_core::config::DEFAULT_INLINE_MAX_BYTES,
             prefetch: false,
+            read_receipts: false,
             presence_interval: hivemind_core::config::DEFAULT_PRESENCE_INTERVAL,
             tailscale: hivemind_core::config::Tailscale::Auto,
         }
@@ -580,7 +594,7 @@ pub(crate) mod tests {
         (dir, service)
     }
 
-    pub(super) fn draft_to_self(service: &MailService, subject: &str, body: &str) -> Draft {
+    pub(crate) fn draft_to_self(service: &MailService, subject: &str, body: &str) -> Draft {
         Draft {
             to: vec![Recipient::Node(service.identity())],
             subject: subject.to_owned(),
@@ -646,5 +660,92 @@ pub(crate) mod tests {
         let service = MailService::open(dir.path(), describe(identity), key).expect("reopen");
         assert_eq!(service.unread_count().expect("count"), 1);
         assert_eq!(service.get(sent.id).expect("get").1.subject, "survives");
+    }
+
+    #[test]
+    fn per_recipient_delivery_state_survives_deleting_the_index() {
+        // ADR 0002 again, for what #31 added. Per-recipient state is read from
+        // the envelope in `out/` and `sent/` and never from `index.db`, which
+        // is what makes this pass: a column only the live path fills is a
+        // cache that cannot be rebuilt, and there is no such column.
+        //
+        // Two recipients, one of them never reached, so "the right one's
+        // state" is distinguishable from "all of them".
+        let dir = tempfile::tempdir().expect("temp dir");
+        let key = SigningKey::from_bytes(&[11u8; 32]);
+        let identity = NodeId::from_certificate_der(b"this node");
+
+        let (id, ana, beto) = {
+            let service =
+                MailService::open(dir.path(), describe(identity), key.clone()).expect("open");
+            let ana = hivemind_core::identity::Identity::from_seed([71u8; 32]).expect("identity");
+            let beto = hivemind_core::identity::Identity::from_seed([72u8; 32]).expect("identity");
+            for who in [&ana, &beto] {
+                service
+                    .admit(
+                        who.node_id(),
+                        "machine",
+                        None,
+                        who.certificate_der().to_vec(),
+                        PeerAddr::manual("10.0.0.2", 8400),
+                    )
+                    .expect("admit");
+            }
+
+            let sent = service
+                .send(
+                    Draft {
+                        to: vec![
+                            Recipient::Node(ana.node_id()),
+                            Recipient::Node(beto.node_id()),
+                        ],
+                        subject: "two recipients".to_owned(),
+                        body: "body".to_owned(),
+                        kind: Kind::Message,
+                        in_reply_to: None,
+                        attachments: Vec::new(),
+                    },
+                    SenderKind::Human,
+                )
+                .expect("send")
+                .message;
+
+            // Ana took it and read it; Beto's machine is off.
+            let mut outbound = service
+                .store
+                .get_outbound(Mailbox::Out, sent.id)
+                .expect("envelope");
+            assert!(outbound.mark_delivered(ana.node_id(), Utc::now()));
+            assert!(outbound.mark_read(ana.node_id(), Utc::now()));
+            service.save_outbound(&outbound).expect("save");
+
+            (sent.id, ana.node_id(), beto.node_id())
+        };
+
+        std::fs::remove_file(dir.path().join("index.db")).expect("delete the index");
+
+        let service = MailService::open(dir.path(), describe(identity), key).expect("reopen");
+        let recipients = service
+            .delivery_of(id)
+            .expect("read the envelope")
+            .expect("this node sent it");
+
+        let state_of = |who: NodeId| {
+            recipients
+                .iter()
+                .find(|r| r.node == who)
+                .map(RecipientState::state)
+        };
+        assert_eq!(state_of(ana), Some(hivemind_core::store::Delivery::Read));
+        assert_eq!(
+            state_of(beto),
+            Some(hivemind_core::store::Delivery::Queued),
+            "the machine that is off is still owed a copy"
+        );
+        assert_eq!(
+            service.get(id).expect("get").0,
+            Mailbox::Out,
+            "and the rebuilt index still has it in the right box"
+        );
     }
 }

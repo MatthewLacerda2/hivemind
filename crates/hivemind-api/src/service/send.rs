@@ -88,7 +88,7 @@ impl MailService {
         // Always through the outbox, even when there is nothing to deliver.
         // One path means a crash anywhere in it leaves the same recoverable
         // state, and the sender can see their own message either way.
-        self.store.put_outbound(&outbound)?;
+        self.store.put_outbound(Mailbox::Out, &outbound)?;
         self.index()?.upsert(Mailbox::Out, &message)?;
 
         if outbound.is_complete() {
@@ -196,7 +196,7 @@ impl MailService {
         if outbound.is_complete() {
             self.complete_delivery(outbound)
         } else {
-            self.store.put_outbound(outbound)?;
+            self.store.put_outbound(Mailbox::Out, outbound)?;
             Ok(())
         }
     }
