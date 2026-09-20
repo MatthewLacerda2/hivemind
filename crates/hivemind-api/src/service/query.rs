@@ -159,11 +159,20 @@ impl MailService {
                 Ok(())
             }
             Err(StoreError::NotFound { .. }) => {
-                // Already read is success; never received is not.
-                match self.store.get(Mailbox::Cur, id) {
-                    Ok(_) => Ok(()),
-                    Err(_) => Err(ServiceError::NoSuchMessage { id }),
+                // Already read is success. So is one of our own sends, which
+                // has no read state on this machine: `hivemind read` on
+                // something this node sent *is* reading it, and answering "no
+                // message with id …" made the per-recipient lines #31 asks for
+                // unreachable by the command that shows them.
+                //
+                // Never received is still an error, which is the distinction
+                // this arm exists for.
+                for mailbox in [Mailbox::Cur, Mailbox::Out, Mailbox::Sent] {
+                    if self.store.get(mailbox, id).is_ok() {
+                        return Ok(());
+                    }
                 }
+                Err(ServiceError::NoSuchMessage { id })
             }
             Err(other) => Err(other.into()),
         }
@@ -388,6 +397,49 @@ mod tests {
         service
             .mark_read(sent.id)
             .expect("a second click is not a failure");
+    }
+
+    #[test]
+    fn reading_one_of_our_own_sends_is_not_an_error() {
+        // `hivemind read` marks what it reads, and our own mail is in neither
+        // box that moves anything — so it answered "no message with id …" for
+        // every message this machine had sent, which is the one command the
+        // per-recipient delivery lines live on (#31).
+        let (_dir, service) = service();
+        let ana = member(&service, 55, "ana-mbp");
+        let queued = service
+            .send(
+                Draft {
+                    to: vec![Recipient::Node(ana.node_id())],
+                    subject: "on its way".to_owned(),
+                    body: "body".to_owned(),
+                    kind: Kind::Message,
+                    in_reply_to: None,
+                    attachments: Vec::new(),
+                },
+                SenderKind::Human,
+            )
+            .expect("send")
+            .message;
+
+        service
+            .mark_read(queued.id)
+            .expect("reading our own outgoing message is reading it");
+        assert_eq!(
+            service.get(queued.id).expect("get").0,
+            Mailbox::Out,
+            "and it has not moved anywhere"
+        );
+
+        // The same once it has reached everybody.
+        let mut outbound = service
+            .store
+            .get_outbound(Mailbox::Out, queued.id)
+            .expect("envelope");
+        assert!(outbound.mark_delivered(ana.node_id(), Utc::now()));
+        service.save_outbound(&outbound).expect("save");
+        service.mark_read(queued.id).expect("still not an error");
+        assert_eq!(service.get(queued.id).expect("get").0, Mailbox::Sent);
     }
 
     #[test]
