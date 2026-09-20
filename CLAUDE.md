@@ -200,6 +200,20 @@ match, so a filter looking for one finds a clean run. The three states are kept
 apart on purpose — `ok`, `FAILED`, and `skip` for a gate that declined because
 an optional tool is absent, which is neither.
 
+### Coverage measures nothing quietly, twice over
+
+Both of these produce a report with no files in it, and a floor check passes on
+an empty report because a percentage of nothing is not below the floor. The
+`HINT` on `coverage.py`'s failure names them; this is why it is there.
+
+- **`--ignore-filename-regex` is matched against the *absolute* path.** A
+  worktree directory whose name contains `tests` therefore excluded the whole
+  tree (#91). The expression lives in one place now, `COV_IGNORE`, anchored to
+  `/crates/`, and a test runs it against worktree-shaped paths.
+- **A plain `cargo test` before `cargo llvm-cov report` in the same worktree**
+  leaves stale profile data behind. `cargo llvm-cov clean --workspace` clears
+  it.
+
 ## Merging
 
 **`just mergeable N` before `gh pr merge`, always.** It asks GitHub whether
