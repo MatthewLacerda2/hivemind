@@ -891,7 +891,6 @@ mod tests {
     use hivemind_core::peer::NodeId;
     use http_body_util::BodyExt as _;
     use tower::ServiceExt as _;
-    use ulid::Ulid;
 
     pub(super) fn app() -> (tempfile::TempDir, Router, NodeId) {
         let dir = tempfile::tempdir().expect("temp dir");

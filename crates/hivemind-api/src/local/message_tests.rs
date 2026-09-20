@@ -6,8 +6,7 @@
 //! between the node's own surface — who am I, who can I see, is this daemon
 //! current — and what the node carries.
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::StatusCode;
 use http_body_util::BodyExt as _;
 use tower::ServiceExt as _;
 use ulid::Ulid;
