@@ -11,7 +11,13 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from size import ROOT, count, declared_test_files, read_sources  # noqa: E402
+from size import (  # noqa: E402
+    ROOT,
+    count,
+    declared_test_files,
+    measure,
+    read_sources,
+)
 
 
 class Counting(unittest.TestCase):
@@ -171,11 +177,13 @@ class DeclaredTestModules(unittest.TestCase):
 
     def test_a_module_of_a_test_module_is_test_code_too(self):
         # Inside a file that is already test-only, a plain `mod z;` needs no
-        # `#[cfg(test)]` of its own — and gets none.
+        # `#[cfg(test)]` of its own — and gets none. Deepest first, because that
+        # is the order in which one pass over the tree is not enough: nothing
+        # knows `page_tests.rs` is test code until `web.rs` has been read.
         sources = {
-            at("crates/a/src/web.rs"): "#[cfg(test)]\nmod page_tests;\n",
-            at("crates/a/src/web/page_tests.rs"): "mod fixtures;\n",
             at("crates/a/src/web/page_tests/fixtures.rs"): "pub fn page() {}\n",
+            at("crates/a/src/web/page_tests.rs"): "mod fixtures;\n",
+            at("crates/a/src/web.rs"): "#[cfg(test)]\nmod page_tests;\n",
         }
         self.assertEqual(
             declared_test_files(sources),
@@ -185,9 +193,28 @@ class DeclaredTestModules(unittest.TestCase):
             },
         )
 
-    def test_a_commented_out_declaration_is_not_one(self):
+    def test_a_comment_does_not_spend_the_attribute(self):
+        # Anything that is not an attribute consumes a pending `#[cfg(test)]`,
+        # and the house style puts prose between the two often enough.
         sources = {
-            at("crates/a/src/web.rs"): "#[cfg(test)]\n// mod page_tests;\n",
+            at("crates/a/src/web.rs"): (
+                "#[cfg(test)]\n// Why these live in a file of their own.\n"
+                "mod page_tests;\n"
+            ),
+            at("crates/a/src/web/page_tests.rs"): "#[test]\nfn it_works() {}\n",
+        }
+        self.assertEqual(
+            declared_test_files(sources), {at("crates/a/src/web/page_tests.rs")}
+        )
+
+    def test_a_mention_of_a_declaration_is_not_a_declaration(self):
+        # The pattern is anchored to the line, not searched within it.
+        # `boundaries.py`'s network rule was anchored as if it were reading
+        # `Cargo.toml` and would never have fired; this is the same family.
+        sources = {
+            at("crates/a/src/web.rs"): (
+                '#[cfg(test)]\nconst SAMPLE: &str = "mod page_tests;";\n'
+            ),
             at("crates/a/src/web/page_tests.rs"): "#[test]\nfn it_works() {}\n",
         }
         self.assertEqual(declared_test_files(sources), set())
@@ -213,6 +240,22 @@ class AgainstTheRepository(unittest.TestCase):
         self.assertTrue(declared, "and at least one of them resolves")
         for path in declared:
             self.assertTrue(path.exists(), path)
+
+    def test_the_gate_counts_a_declared_file_as_test_code(self):
+        """The walk is wired into what the limits are applied to.
+
+        Without this, `measure` could ignore the walk entirely and every test
+        above would still pass.
+        """
+        declared = {
+            path.relative_to(ROOT).as_posix()
+            for path in declared_test_files(read_sources())
+        }
+        counted = {name: c for name, c in measure() if name in declared}
+        self.assertEqual(len(counted), len(declared))
+        for name, c in counted.items():
+            self.assertEqual(c.source, 0, name)
+            self.assertGreater(c.test, 0, name)
 
 
 if __name__ == "__main__":
