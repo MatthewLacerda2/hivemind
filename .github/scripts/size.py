@@ -29,15 +29,19 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 # Where the ratchet stands. Lower these as files are split; never raise them.
 #
-# Measured, not chosen. The largest today are 816 source (`commands.rs`) and
-# 609 test (`peer.rs`), so these sit just under both: two files need a small
-# trim to land this, and nothing else has to move.
+# Measured, not chosen. They landed at 800/600 against an 816-source
+# `commands.rs` and a 609-test `peer.rs`, just under both, so two small trims
+# paid for the gate rather than a refactor — a gate that passes on the day it
+# arrives is a gate nobody knows works.
 #
-# Just under rather than just over, deliberately. A gate that passes on the day
-# it arrives is a gate nobody knows works, and the two trims are minutes. From
-# here it only comes down.
-SOURCE_LIMIT = 800
-TEST_LIMIT = 600
+# These come down with #100, which split `service.rs` from 791 source into a
+# `service/` folder of which the largest part is 182. The largest left are 651
+# source (`hivemind-api/src/local.rs`) and 558 test
+# (`hivemind-cli/tests/single_daemon.rs`), and the numbers sit just above each:
+# the split that lowers a limit is not also the branch that has to split the
+# next file down the list.
+SOURCE_LIMIT = 660
+TEST_LIMIT = 560
 
 SEARCHED = ("crates",)
 
