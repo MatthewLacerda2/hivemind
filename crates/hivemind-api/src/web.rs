@@ -581,17 +581,10 @@ async fn asset(Path(file): Path<String>) -> Response {
         return not_found("no such asset");
     };
 
-    let content_type = match file.rsplit_once('.').map(|(_, ext)| ext) {
-        Some("css") => "text/css; charset=utf-8",
-        Some("js") => "text/javascript; charset=utf-8",
-        Some("svg") => "image/svg+xml",
-        _ => "application/octet-stream",
-    };
-
     (
         StatusCode::OK,
         [
-            (axum::http::header::CONTENT_TYPE, content_type),
+            (axum::http::header::CONTENT_TYPE, content_type_of(&file)),
             // Assets change only when the binary does, and a stale stylesheet
             // against new markup looks like a bug in the UI.
             (axum::http::header::CACHE_CONTROL, "no-cache"),
@@ -599,6 +592,23 @@ async fn asset(Path(file): Path<String>) -> Response {
         entry.contents(),
     )
         .into_response()
+}
+
+/// What an asset is served as, by extension.
+///
+/// A lookup rather than a `match` inside the handler, because the arms have to
+/// be testable from anywhere: `assets/` carries no `.svg` today, so deleting
+/// that arm survived a sweep with nothing able to reach it (#101). A stylesheet
+/// served as `application/octet-stream` is one no browser applies, which is a
+/// page that looks broken rather than an error anybody sees. The same split
+/// `doctor`'s optional tools needed — a judgement apart from a lookup.
+fn content_type_of(file: &str) -> &'static str {
+    match file.rsplit_once('.').map(|(_, ext)| ext) {
+        Some("css") => "text/css; charset=utf-8",
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        _ => "application/octet-stream",
+    }
 }
 
 /// Render a template, or say plainly that rendering failed.
@@ -764,394 +774,28 @@ impl Post {
 }
 
 #[cfg(test)]
+mod page_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::Body;
-    use axum::http::Request;
-    use hivemind_core::peer::NodeId;
-    use http_body_util::BodyExt as _;
-    use tower::ServiceExt as _;
 
-    use crate::service::NodeDescription;
-
-    fn app() -> (tempfile::TempDir, Router, Arc<MailService>) {
-        let dir = tempfile::tempdir().expect("temp dir");
-        // A real certificate and key. With the placeholder that stood here,
-        // anything reaching the network failed while building the TLS
-        // configuration, so a test about an address that does not answer never
-        // contacted an address at all (#57).
-        let identity = hivemind_core::identity::Identity::from_seed([3u8; 32]).expect("identity");
-        let node = NodeDescription {
-            id: identity.node_id(),
-            certificate: identity.certificate_der().to_vec(),
-            private_key: identity.private_key_pkcs8().expect("key"),
-            name: "test".to_owned(),
-            owner: Some("tester".to_owned()),
-            callback_host: "127.0.0.1".to_owned(),
-            peer_port: 8400,
-            max_attachment_bytes: hivemind_core::config::DEFAULT_MAX_ATTACHMENT_BYTES,
-            inline_max_bytes: hivemind_core::config::DEFAULT_INLINE_MAX_BYTES,
-            prefetch: false,
-            presence_interval: hivemind_core::config::DEFAULT_PRESENCE_INTERVAL,
-            tailscale: hivemind_core::config::Tailscale::Auto,
-        };
-        let service = Arc::new(
-            MailService::open(dir.path(), node, identity.signing_key().clone()).expect("service"),
-        );
-        (dir, router(Arc::clone(&service)), service)
-    }
-
-    async fn get(router: &Router, path: &str) -> (StatusCode, String) {
-        let response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(path)
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        let status = response.status();
-        let bytes = response
-            .into_body()
-            .collect()
-            .await
-            .expect("body")
-            .to_bytes();
-        (status, String::from_utf8_lossy(&bytes).into_owned())
-    }
-
-    /// The status, any `Location`, and the body — a handler that answers 200
-    /// with nothing in it is not the same as one that re-renders the page, and
-    /// only the body tells them apart (#57).
-    async fn post_form(
-        router: &Router,
-        path: &str,
-        form: &str,
-    ) -> (StatusCode, Option<String>, String) {
-        let response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(path)
-                    .header("content-type", "application/x-www-form-urlencoded")
-                    .body(Body::from(form.to_owned()))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        let status = response.status();
-        let location = response
-            .headers()
-            .get("location")
-            .and_then(|v| v.to_str().ok())
-            .map(ToOwned::to_owned);
-        let bytes = response
-            .into_body()
-            .collect()
-            .await
-            .expect("body")
-            .to_bytes();
-        (
-            status,
-            location,
-            String::from_utf8_lossy(&bytes).into_owned(),
-        )
-    }
-
-    /// A POST with no body, for the routes whose whole input is the path.
-    async fn post(router: &Router, path: &str) -> (StatusCode, String) {
-        let response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(path)
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        let status = response.status();
-        let bytes = response
-            .into_body()
-            .collect()
-            .await
-            .expect("body")
-            .to_bytes();
-        (status, String::from_utf8_lossy(&bytes).into_owned())
-    }
-
-    async fn content_type(router: &Router, path: &str) -> Option<String> {
-        let response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(path)
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        response
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .map(ToOwned::to_owned)
-    }
-
-    fn send_to_self(service: &Arc<MailService>, subject: &str, body: &str) -> ulid::Ulid {
-        service
-            .send(
-                Draft {
-                    to: vec![Recipient::Node(service.identity())],
-                    subject: subject.to_owned(),
-                    body: body.to_owned(),
-                    kind: Kind::Message,
-                    in_reply_to: None,
-                    attachments: Vec::new(),
-                },
-                SenderKind::Human,
-            )
-            .expect("send")
-            .message
-            .id
-    }
-
-    #[tokio::test]
-    async fn the_inbox_reads_without_any_javascript() {
-        // SPEC §11. Not a box-tick: this is what makes the UI usable when the
-        // daemon is up and something in the page is broken.
-        let (_dir, router, service) = app();
-        send_to_self(&service, "a subject", "a body");
-
-        let (status, html) = get(&router, "/").await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert!(html.contains("a subject"), "the mail should be in the HTML");
-        // The one <script> is deferred and optional; nothing above depends on
-        // it. If the list ever moves into JS, this fails.
-        let without_scripts = html
-            .split("<script")
-            .next()
-            .expect("there is always a first part");
-        assert!(
-            without_scripts.contains("a subject"),
-            "the list must be rendered before any script tag"
-        );
-    }
-
-    #[tokio::test]
-    async fn every_page_renders() {
-        let (_dir, router, service) = app();
-        let id = send_to_self(&service, "rendered", "body");
-        let (_, message) = service.get(id).expect("get");
-
-        for path in [
-            "/",
-            "/sent",
-            "/compose",
-            "/peers",
-            &format!("/thread/{}", message.thread_id),
+    #[test]
+    fn an_asset_is_typed_by_its_extension() {
+        // A stylesheet served as `application/octet-stream` is a stylesheet no
+        // browser applies, and the page tests never looked at the header:
+        // deleting each arm of the match survived (#57), and the `svg` arm
+        // survives even now against the two files `assets/` carries — which is
+        // why the lookup is a function of its own (#101).
+        for (file, expected) in [
+            ("hivemind.css", "text/css; charset=utf-8"),
+            ("hivemind.js", "text/javascript; charset=utf-8"),
+            ("logo.svg", "image/svg+xml"),
+            ("hivemind.wasm", "application/octet-stream"),
+            ("LICENSE", "application/octet-stream"),
         ] {
-            let (status, html) = get(&router, path).await;
-            assert_eq!(status, StatusCode::OK, "{path} should render");
-            assert!(html.contains("<main id=\"main\">"), "{path} needs a main");
-            assert!(html.contains("lang=\"en\""), "{path} needs a language");
+            assert_eq!(content_type_of(file), expected, "{file}");
         }
-    }
-
-    #[tokio::test]
-    async fn the_peers_page_says_what_to_do_when_this_node_is_in_no_group() {
-        // Without a group this machine can reach nobody, which is the first
-        // thing somebody opening the page needs to know (ADR 0013).
-        let (_dir, router, service) = app();
-        let (_, html) = get(&router, "/peers").await;
-        assert!(html.contains("Not in a group yet"), "{html}");
-        assert!(html.contains("hivemind group create"));
-
-        service.create_group(false).expect("create");
-        let (_, html) = get(&router, "/peers").await;
-        assert!(!html.contains("Not in a group yet"));
-    }
-
-    #[tokio::test]
-    async fn a_node_seen_outside_the_group_is_listed_apart_from_members() {
-        let (_dir, router, service) = app();
-        service.record_seen(
-            NodeId::from_certificate_der(b"somebody else"),
-            Some("their-laptop".to_owned()),
-            None,
-            hivemind_core::peerbook::PeerAddr::manual("10.0.0.9", 8400),
-        );
-
-        let (_, html) = get(&router, "/peers").await;
-        let seen = html
-            .split("Seen, not in the group")
-            .nth(1)
-            .expect("a section for nodes only seen");
-        assert!(seen.contains("their-laptop"), "{html}");
-    }
-
-    #[tokio::test]
-    async fn contacting_an_address_that_does_not_answer_stays_on_the_page_and_says_so() {
-        // A redirect to the list would look as though it had worked.
-        let (_dir, router, _service) = app();
-        let (status, location, html) =
-            post_form(&router, "/peers/join", "host=127.0.0.1%3A1").await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(location, None, "no redirect when nothing was reached");
-        // The status and the missing redirect are also what an empty answer
-        // looks like, so the page has to be there and has to carry the
-        // complaint.
-        assert!(
-            html.contains("<main id=\"main\">"),
-            "the peers page: {html}"
-        );
-        assert!(
-            html.contains("127.0.0.1:1"),
-            "the page should name the address that did not answer: {html}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_sender_kind_shows_as_a_badge() {
-        // SPEC §11: "human" or "agent", so a reader can tell at a glance
-        // whether a person typed it.
-        let (_dir, router, service) = app();
-        service
-            .send(
-                Draft {
-                    to: vec![Recipient::Node(service.identity())],
-                    subject: "from a claude".to_owned(),
-                    body: "x".to_owned(),
-                    kind: Kind::Message,
-                    in_reply_to: None,
-                    attachments: Vec::new(),
-                },
-                SenderKind::Agent,
-            )
-            .expect("send");
-
-        let (_, html) = get(&router, "/").await;
-        assert!(
-            html.contains("<span class=\"badge agent\">agent</span>"),
-            "the badge should be in the markup: {html}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_reply_posted_from_a_form_redirects_back_to_the_thread() {
-        // No JavaScript means post-and-redirect, so reloading the page does
-        // not send the reply twice.
-        let (_dir, router, service) = app();
-        let id = send_to_self(&service, "question", "what time?");
-        let (_, message) = service.get(id).expect("get");
-
-        let (status, location, _) = post_form(
-            &router,
-            &format!("/thread/{}/reply", message.thread_id),
-            "body=one+o%27clock",
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::SEE_OTHER);
-        assert_eq!(
-            location.as_deref(),
-            Some(format!("/thread/{}", message.thread_id).as_str())
-        );
-
-        let (_, html) = get(&router, &format!("/thread/{}", message.thread_id)).await;
-        assert!(
-            html.contains("one o") && html.contains("clock"),
-            "the reply should be there: {html}"
-        );
-    }
-
-    #[tokio::test]
-    async fn opening_a_thread_marks_it_read() {
-        let (_dir, router, service) = app();
-        let id = send_to_self(&service, "unread", "body");
-        let (_, message) = service.get(id).expect("get");
-        assert_eq!(service.unread_count().expect("count"), 1);
-
-        get(&router, &format!("/thread/{}", message.thread_id)).await;
-
-        assert_eq!(
-            service.unread_count().expect("count"),
-            0,
-            "a page that renders the body has been read"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_subject_cannot_smuggle_markup_into_the_page() {
-        // The subject came from another machine.
-        let (_dir, router, service) = app();
-        send_to_self(&service, "<script>alert(1)</script>", "body");
-
-        let (_, html) = get(&router, "/").await;
-
-        assert!(
-            !html.contains("<script>alert(1)</script>"),
-            "askama should have escaped it"
-        );
-        assert!(
-            html.contains("&#60;script&#62;"),
-            "and it should still be readable: {html}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_body_cannot_smuggle_markup_into_a_thread() {
-        let (_dir, router, service) = app();
-        let id = send_to_self(&service, "innocent", "<img src=x onerror=alert(1)>");
-        let (_, message) = service.get(id).expect("get");
-
-        let (_, html) = get(&router, &format!("/thread/{}", message.thread_id)).await;
-
-        assert!(!html.contains("<img src=x"), "escaped: {html}");
-        assert!(
-            html.contains("&#60;img src=x"),
-            "and still readable: {html}"
-        );
-    }
-
-    #[tokio::test]
-    async fn the_stylesheet_is_served_from_the_binary() {
-        let (_dir, router, _) = app();
-        let (status, css) = get(&router, "/assets/hivemind.css").await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert!(css.contains("prefers-color-scheme"), "SPEC §11 asks for it");
-        assert!(css.contains(":focus-visible"), "and keyboard navigation");
-    }
-
-    #[tokio::test]
-    async fn an_error_page_escapes_what_it_quotes() {
-        // The error pages are built by hand rather than by askama, so the
-        // escaping is this module's own and nothing was asserting it: a sweep
-        // replaced `escape` with the empty string and with "xyzzy", and both
-        // survived (#57). The id in the path reaches the page through the
-        // error's detail, so it is attacker-controlled text.
-        let (_dir, router, _service) = app();
-
-        let (status, html) =
-            post(&router, "/peers/%3Cscript%3Ealert(1)%3C%2Fscript%3E/remove").await;
-
-        // 403, because an id this node does not know is an id it is not
-        // paired with (SPEC §7.3).
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        assert!(
-            !html.contains("<script>"),
-            "the id must not reach the page as markup: {html}"
-        );
-        assert!(
-            html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
-            "and it should still say which id was asked for: {html}"
-        );
     }
 
     #[test]
@@ -1173,49 +817,6 @@ mod tests {
             (2560 * 1024 * 1024, "2.5 GiB"),
         ] {
             assert_eq!(human_size(bytes), expected, "{bytes} bytes");
-        }
-    }
-
-    #[tokio::test]
-    async fn an_asset_is_served_as_the_type_it_is() {
-        // A stylesheet served as `application/octet-stream` is a stylesheet no
-        // browser applies, and the page tests never looked at the header:
-        // deleting each arm of the content-type match survived (#57).
-        let (_dir, router, _) = app();
-
-        assert_eq!(
-            content_type(&router, "/assets/hivemind.css")
-                .await
-                .as_deref(),
-            Some("text/css; charset=utf-8")
-        );
-        assert_eq!(
-            content_type(&router, "/assets/hivemind.js")
-                .await
-                .as_deref(),
-            Some("text/javascript; charset=utf-8")
-        );
-    }
-
-    #[tokio::test]
-    async fn an_asset_path_cannot_escape_the_bundle() {
-        let (_dir, router, _) = app();
-        for attempt in [
-            "/assets/..%2f..%2fpeers.toml",
-            "/assets/../../peers.toml",
-            "/assets/nothing.css",
-        ] {
-            let (status, _) = get(&router, attempt).await;
-            assert_eq!(status, StatusCode::NOT_FOUND, "{attempt} should be refused");
-        }
-    }
-
-    #[tokio::test]
-    async fn a_thread_that_does_not_exist_is_a_404_not_a_500() {
-        let (_dir, router, _) = app();
-        for path in ["/thread/not-a-ulid", "/thread/01JXT2ZZZZZZZZZZZZZZZZZZZZ"] {
-            let (status, _) = get(&router, path).await;
-            assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
         }
     }
 
