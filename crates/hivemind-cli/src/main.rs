@@ -10,6 +10,7 @@ mod client;
 mod colour;
 mod commands;
 mod doctor;
+mod freshness;
 mod hooks;
 mod notify;
 mod paths;

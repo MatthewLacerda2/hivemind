@@ -585,3 +585,68 @@ fn a_box_that_is_not_one_is_refused_before_a_request_is_made() {
         "it should name the boxes there are: {said}"
     );
 }
+
+/// Give `path` this modification time. `std::fs::copy` cannot, and the gap
+/// between the two builds is the whole of what this test is about.
+fn written_at(path: &std::path::Path, when: std::time::SystemTime) {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("open the binary")
+        .set_times(std::fs::FileTimes::new().set_modified(when))
+        .expect("set its modification time");
+}
+
+#[test]
+fn a_daemon_whose_binary_has_been_replaced_says_so_rather_than_serving_the_old_code_in_silence() {
+    // #36, end to end and through the real binary, because every part of it
+    // that can be wrong is outside the process: the daemon reads its own file
+    // at startup, stamps every response, and the CLI compares that with the
+    // file it was itself started from.
+    //
+    // A copy, because the replacement has to be real and the binary cargo
+    // built is shared with every other test in this run. Renamed over rather
+    // than written through, which is both what an installer does and the only
+    // way to replace a file a process is running from.
+    let installed = tempfile::tempdir().expect("temp dir");
+    let binary = installed.path().join("hivemind");
+    std::fs::copy(env!("CARGO_BIN_EXE_hivemind"), &binary).expect("copy the binary");
+    let an_hour_ago = std::time::SystemTime::now() - std::time::Duration::from_hours(1);
+    written_at(&binary, an_hour_ago);
+
+    let daemon = Daemon::start_from(NAME, &binary);
+
+    // Nothing has been replaced yet, and a check that fired here would be
+    // ignored within a week — and then so would the one below.
+    let (_, before) = daemon.try_run(&["doctor"]);
+    assert!(
+        before.contains("running the binary on disk"),
+        "a daemon running what is on disk is not stale: {before}"
+    );
+    let status = daemon.run(&["status"]);
+    assert!(
+        !status.contains("older binary"),
+        "nothing to warn about yet: {status}"
+    );
+
+    // The reinstall.
+    let replacement = installed.path().join("hivemind.new");
+    std::fs::copy(env!("CARGO_BIN_EXE_hivemind"), &replacement).expect("copy the binary");
+    written_at(&replacement, std::time::SystemTime::now());
+    std::fs::rename(&replacement, &binary).expect("rename over the running binary");
+
+    let (ok, said) = daemon.try_run(&["doctor"]);
+    assert!(!ok, "doctor has to fail on this, not mention it: {said}");
+    assert!(
+        said.contains("has since been replaced") && said.contains("restart"),
+        "and say what happened and what to do: {said}"
+    );
+
+    // And the command somebody is actually running when it matters says it
+    // too, in one line, without being asked about the daemon at all.
+    let status = daemon.run(&["status"]);
+    assert!(
+        status.contains("the daemon is running an older binary than this one"),
+        "every command talking to a stale daemon says so: {status}"
+    );
+}

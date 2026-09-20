@@ -123,8 +123,22 @@ has to read it, which may be you, when you are asked.
 hivemind doctor
 ```
 
-It checks the daemon, the ports, the identity's file permissions, Tailscale,
-Claude Code and mDNS, and every check that can fail says what to do about it.
+It checks the daemon, the binary it is running, the ports, the identity's file
+permissions, Tailscale, Claude Code and mDNS, and every check that can fail
+says what to do about it.
+
+**After reinstalling, restart the daemon.** `cargo install` replaces the file;
+the one already running goes on serving the code it loaded, and the version
+does not move between two builds of one release, so nothing about it looks
+different. `doctor` now says so, and so does every command that talks to a
+daemon older than the binary invoking it — but
+
+```
+hivemind service restart
+```
+
+is the whole of the answer, and it is worth doing before checking whether a fix
+worked rather than after.
 
 `hivemind status` is the shorter question: am I up, who do I know, is anything
 waiting.

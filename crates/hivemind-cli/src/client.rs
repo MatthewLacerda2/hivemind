@@ -184,6 +184,16 @@ impl Client {
                 .with_context(|| format!("request to {} failed", self.base))?;
 
             let status = response.status();
+            // Every response says which binary answered it, so the question
+            // "am I talking to the code that is installed" costs nothing to
+            // ask and gets asked on every command rather than on `doctor`
+            // alone (#36).
+            crate::freshness::note(
+                response
+                    .headers()
+                    .get(hivemind_api::freshness::BINARY_MODIFIED)
+                    .and_then(|stamp| stamp.to_str().ok()),
+            );
             let collected = response
                 .into_body()
                 .collect()
