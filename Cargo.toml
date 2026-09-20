@@ -51,10 +51,6 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 rmcp = { version = "3", features = ["server", "macros", "transport-streamable-http-server", "schemars"] }
 rmcp-client = { package = "rmcp", version = "3", features = ["client", "transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }
 schemars = "1"
-# Only tests reach for this now — the CLI talks to loopback on hyper. No
-# `rustls` feature: nothing that uses it speaks TLS, and asking for it pulls
-# `hyper-rustls`, which turns on `rustls`'s `aws-lc-rs` for the whole build.
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
 rustls-pki-types = "1"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
