@@ -8,8 +8,6 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use hivemind_api::service::MailService;
-use hivemind_core::index::Query;
-use hivemind_core::store::Mailbox;
 use rmcp::ErrorData as McpError;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::model::{
@@ -20,10 +18,18 @@ use rmcp::model::{
 use rmcp::service::RequestContext;
 use rmcp::{RoleServer, ServerHandler, tool_handler};
 
+use crate::tools::InboxParams;
+
 /// The URI of the unread-summary resource (SPEC §9.1).
 pub const INBOX_URI: &str = "hivemind://inbox";
 /// The URI of the peer-list resource (SPEC §9.1).
 pub const PEERS_URI: &str = "hivemind://peers";
+
+/// How much unread mail `hivemind://inbox` renders.
+///
+/// A resource is read whole rather than paged, so this is a bound on a model's
+/// context and not a page size.
+const RESOURCE_UNREAD: usize = 50;
 
 impl std::fmt::Debug for HivemindMcp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -62,15 +68,18 @@ impl HivemindMcp {
     }
 
     /// The unread inbox, rendered for a model to read in one go.
+    ///
+    /// The `inbox` tool's default question, asked through the same construction
+    /// so the filters have one place to live rather than two — both copies had
+    /// every field unasserted (#102).
     fn inbox_text(&self) -> Result<String, McpError> {
+        let query = self.inbox_query(&InboxParams {
+            limit: Some(RESOURCE_UNREAD),
+            ..InboxParams::default()
+        })?;
         let summaries = self
             .service
-            .list(&Query {
-                mailbox: Some(Mailbox::New),
-                unread_only: true,
-                limit: Some(50),
-                ..Query::default()
-            })
+            .list(&query)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         if summaries.is_empty() {
@@ -266,13 +275,17 @@ pub fn http_service(service: Arc<MailService>) -> (HttpTransport, McpSessions) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use chrono::DateTime;
     use hivemind_api::NodeDescription;
-    use hivemind_core::crypto::SigningKey;
+    use hivemind_core::crypto::{Signature, SigningKey};
+    use hivemind_core::identity::Identity;
+    use hivemind_core::message::{Kind, Message, Recipient, SenderKind};
     use hivemind_core::peer::NodeId;
+    use ulid::Ulid;
 
-    fn server() -> (tempfile::TempDir, HivemindMcp) {
+    pub(crate) fn server() -> (tempfile::TempDir, HivemindMcp) {
         let dir = tempfile::tempdir().expect("temp dir");
         let node = NodeDescription {
             id: NodeId::from_certificate_der(b"this node"),
@@ -295,21 +308,107 @@ mod tests {
         (dir, HivemindMcp::new(service))
     }
 
-    /// Put a member in the address book, and return its id.
-    fn admit(server: &HivemindMcp, seed: u8) -> NodeId {
-        let friend = hivemind_core::identity::Identity::from_seed([seed; 32]).expect("identity");
-        let id = friend.node_id();
+    /// Put a member in the address book, keys and all.
+    pub(crate) fn member(server: &HivemindMcp, seed: u8, name: &str) -> Identity {
+        let friend = Identity::from_seed([seed; 32]).expect("identity");
         server
             .service
             .admit(
-                id,
-                "ana-mbp",
+                friend.node_id(),
+                name,
                 Some("ana"),
                 friend.certificate_der().to_vec(),
                 hivemind_core::peerbook::PeerAddr::manual("10.0.0.9", 8400),
             )
             .expect("admit");
-        id
+        friend
+    }
+
+    /// Put a member in the address book, and return its id.
+    fn admit(server: &HivemindMcp, seed: u8) -> NodeId {
+        member(server, seed, "ana-mbp").node_id()
+    }
+
+    /// Deliver one message from `friend`, as its machine would have.
+    ///
+    /// `millis` is the send time, and the id is derived from it, so a test can
+    /// say which message is the newest rather than hope.
+    pub(crate) fn deliver(
+        server: &HivemindMcp,
+        friend: &Identity,
+        millis: u64,
+        subject: &str,
+    ) -> Ulid {
+        let id = Ulid::from_parts(millis, 0);
+        let mut message = Message {
+            id,
+            thread_id: id,
+            in_reply_to: None,
+            from: friend.node_id(),
+            to: vec![Recipient::Node(server.service.identity())],
+            subject: subject.to_owned(),
+            body: "body".to_owned(),
+            kind: Kind::Message,
+            sender_kind: SenderKind::Human,
+            attachments: Vec::new(),
+            sent_at: DateTime::from_timestamp_millis(i64::try_from(millis).expect("in range"))
+                .expect("a timestamp"),
+            received_at: None,
+            signature: Signature::from_bytes([0u8; 64]),
+        };
+        message.sign(friend.signing_key()).expect("sign");
+        server
+            .service
+            .receive(friend.node_id(), message)
+            .expect("receive")
+    }
+
+    #[test]
+    fn the_unread_resource_carries_what_is_unread_and_leaves_out_the_rest() {
+        // `hivemind://inbox` is dropped whole into a model's context, so what
+        // it leaves out matters as much as what it carries. Every filter behind
+        // it could be deleted with the whole suite green (#102), and a mailbox
+        // filter that went missing would report read mail as unread.
+        let (_dir, server) = server();
+        let friend = member(&server, 81, "ana-mbp");
+        let read = deliver(&server, &friend, 100, "already read");
+        deliver(&server, &friend, 200, "still waiting");
+        server.service.mark_read(read).expect("mark read");
+
+        let text = server.inbox_text().expect("text");
+
+        assert!(text.starts_with("1 unread:"), "{text}");
+        assert!(text.contains("still waiting"), "{text}");
+        assert!(
+            !text.contains("already read"),
+            "mail that has been read is not unread mail: {text}"
+        );
+    }
+
+    #[test]
+    fn the_unread_resource_carries_more_than_one_page_of_the_tool() {
+        // The resource is read whole, so its cap is a bound on a model's
+        // context rather than a page size, and it is deliberately larger than
+        // the tool's default. A `limit` that went missing here would silently
+        // hand back the tool's twenty instead.
+        let (_dir, server) = server();
+        let friend = member(&server, 82, "ana-mbp");
+        let more_than_a_page = crate::tools::DEFAULT_LIMIT + 1;
+        for n in 0..more_than_a_page {
+            deliver(&server, &friend, 100 + n as u64, &format!("message {n}"));
+        }
+
+        let text = server.inbox_text().expect("text");
+
+        assert!(
+            text.starts_with(&format!("{more_than_a_page} unread:")),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("message {}", more_than_a_page - 1)),
+            "the newest is in it: {text}"
+        );
+        assert!(text.contains("message 0"), "and so is the oldest: {text}");
     }
 
     #[test]

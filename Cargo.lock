@@ -1105,6 +1105,7 @@ name = "hivemind-mcp"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "chrono",
  "hivemind-api",
  "hivemind-core",
  "rmcp",

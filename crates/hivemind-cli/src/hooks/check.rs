@@ -126,6 +126,49 @@ async fn tell_the_daemon(api: &str, event: &HookEvent) {
 /// that has not finished in 80 ms is one the daemon is not going to answer.
 const HOOK_BUDGET: std::time::Duration = std::time::Duration::from_millis(80);
 
+/// How many senders the line names before it stops.
+const PREVIEW: usize = 3;
+
+/// What the hook has to say about unread mail, or nothing worth a line.
+///
+/// Split out of `hook_check` so what it asks the index can be asserted on. The
+/// rest of the hook is a process, a stdin and a daemon; this is the part that
+/// decides what a Claude is told it has, and every filter in the query below
+/// could be deleted without a test noticing (#102).
+fn unread_line(index: &Index) -> Option<String> {
+    let summaries = index
+        .search(&hivemind_core::index::Query {
+            // `new/` **is** the unread box, so this one filter is the whole of
+            // "unread mail that arrived here". `unread_only: true` stood beside
+            // it until #102 and added the same predicate a second time, which
+            // no test could ever tell from one.
+            mailbox: Some(hivemind_core::store::Mailbox::New),
+            limit: Some(PREVIEW),
+            ..Default::default()
+        })
+        .ok()?;
+
+    if summaries.is_empty() {
+        return None;
+    }
+
+    // The preview shows at most three; the count is the real total, and falls
+    // back to what we can see if the count query fails.
+    let visible = summaries.len() as u64;
+    let total = index.unread_count().unwrap_or(visible);
+    let preview: Vec<String> = summaries
+        .iter()
+        .map(|s| format!("{}: {:?}", short_node(&s.from.to_string()), s.subject))
+        .collect();
+
+    // One line, no colour: this goes into a transcript, not a terminal.
+    Some(format!(
+        "hivemind: {} — {}",
+        unread_phrase(total),
+        preview.join(", ")
+    ))
+}
+
 pub(crate) async fn hook_check(home: Option<&Path>, api: &str) {
     // The session register first, because `SessionEnd` has nothing else to do
     // here and the rest of this is about unread mail.
@@ -149,39 +192,96 @@ pub(crate) async fn hook_check(home: Option<&Path>, api: &str) {
     let Ok(index) = Index::open(&home.join("index.db")) else {
         return;
     };
-    let Ok(summaries) = index.search(&hivemind_core::index::Query {
-        mailbox: Some(hivemind_core::store::Mailbox::New),
-        unread_only: true,
-        limit: Some(3),
-        ..Default::default()
-    }) else {
-        return;
-    };
-
-    if summaries.is_empty() {
-        return;
+    if let Some(line) = unread_line(&index) {
+        println!("{line}");
     }
-
-    // The preview shows at most three; the count is the real total, and falls
-    // back to what we can see if the count query fails.
-    let visible = summaries.len() as u64;
-    let total = index.unread_count().unwrap_or(visible);
-    let preview: Vec<String> = summaries
-        .iter()
-        .map(|s| format!("{}: {:?}", short_node(&s.from.to_string()), s.subject))
-        .collect();
-
-    // One line, no colour: this goes into a transcript, not a terminal.
-    println!(
-        "hivemind: {} — {}",
-        unread_phrase(total),
-        preview.join(", ")
-    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use chrono::{DateTime, Utc};
+    use hivemind_core::crypto::Signature;
+    use hivemind_core::message::{Kind, Message, Recipient, SenderKind};
+    use hivemind_core::peer::NodeId;
+    use hivemind_core::store::Mailbox;
+    use ulid::Ulid;
+
+    /// Put one message in `mailbox`, sent at `millis`.
+    ///
+    /// Written straight into the index rather than sent through a service: the
+    /// query under test only ever sees index rows, and a hook that has to
+    /// start a daemon to be tested is a hook nobody tests.
+    fn row(index: &Index, mailbox: Mailbox, millis: u64, subject: &str) {
+        let id = Ulid::from_parts(millis, 0);
+        let message = Message {
+            id,
+            thread_id: id,
+            in_reply_to: None,
+            from: NodeId::from_certificate_der(b"somebody else"),
+            to: vec![Recipient::Everyone],
+            subject: subject.to_owned(),
+            body: "body".to_owned(),
+            kind: Kind::Message,
+            sender_kind: SenderKind::Human,
+            attachments: Vec::new(),
+            sent_at: DateTime::<Utc>::from_timestamp_millis(
+                i64::try_from(millis).expect("in range"),
+            )
+            .expect("a timestamp"),
+            received_at: None,
+            signature: Signature::from_bytes([0u8; 64]),
+        };
+        index.upsert(mailbox, &message).expect("upsert");
+    }
+
+    #[test]
+    fn the_hook_names_the_newest_unread_mail_and_stops_at_three() {
+        // Four unread, so "three" is distinguishable from "all of them", and
+        // newer mail in the two boxes the hook must not report, so "the inbox"
+        // is distinguishable from "everything" (#102). Both filters had gone
+        // missing without anything failing.
+        let index = Index::in_memory().expect("an index");
+        for (n, subject) in ["first", "second", "third", "fourth"].iter().enumerate() {
+            row(&index, Mailbox::New, 100 + n as u64 * 100, subject);
+        }
+        row(&index, Mailbox::Cur, 500, "already read");
+        row(&index, Mailbox::Sent, 600, "i sent this");
+
+        let line = unread_line(&index).expect("four unread messages are worth a line");
+
+        assert!(line.contains("4 unread messages"), "got: {line}");
+        for named in ["fourth", "third", "second"] {
+            assert!(
+                line.contains(named),
+                "the newest three, and {named} is not in {line}"
+            );
+        }
+        assert!(
+            !line.contains("first"),
+            "the preview stops at three, newest first: {line}"
+        );
+        assert!(
+            !line.contains("already read") && !line.contains("i sent this"),
+            "only what arrived and is unread belongs in the line: {line}"
+        );
+    }
+
+    #[test]
+    fn a_box_with_nothing_unread_in_it_is_a_hook_that_says_nothing() {
+        // With mail in the store, so "nothing to say" cannot be confused with
+        // "nothing here" — which is exactly the assertion #28 got wrong.
+        let index = Index::in_memory().expect("an index");
+        row(&index, Mailbox::Cur, 100, "already read");
+        row(&index, Mailbox::Sent, 200, "i sent this");
+
+        assert_eq!(
+            unread_line(&index),
+            None,
+            "read mail and sent mail are not unread mail"
+        );
+    }
 
     #[test]
     fn a_turn_names_its_session_and_what_it_is_working_on() {

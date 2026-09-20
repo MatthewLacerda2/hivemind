@@ -326,7 +326,7 @@ Tools — keep it to these eight; every one maps 1:1 to a service-layer function
 |---|---|---|
 | `list_peers` | `{}` | peers with name, owner, id, online, last_seen, sessions |
 | `send` | `{to: [string], subject, body, kind?, attachments?: [local path]}` | `{id, thread_id, duplicate_of?}` (§8) |
-| `inbox` | `{unread_only?: bool, limit?: int, from?: string}` | summaries (id, from, subject, kind, sender_kind, sent_at, attachment names) |
+| `inbox` | `{box?: new\|cur\|out\|sent, unread_only?: bool, limit?: int, from?: node id, whole or short}` | summaries (id, from, subject, kind, sender_kind, sent_at, attachment names) |
 | `read` | `{id}` | full message; marks read; attachment refs include a **local filesystem path**; `others_in_thread` counts the rest of the conversation |
 | `thread` | `{id}` | every message in the conversation that id belongs to — **any** message in it, not only the root — oldest first and in full; marks them read |
 | `reply` | `{id, body, attachments?}` | `{id}` |
