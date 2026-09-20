@@ -174,6 +174,32 @@ lean; keep CI fast. That is part of Craft, not a trade against it.
 
 Signals, opt-in and never part of passing: `just mutants`, `just cov`.
 
+### A gate with nothing to say says one line
+
+`just ci`, `just test`, `just lint` and `just cov-gate` print **one line per
+gate** when they pass, and the **whole output** of whatever fails. `--verbose`
+on any of them streams the lot: `just ci --verbose`, `just test --verbose`.
+
+This is not tidiness. A session that took M7 and six bugs spent **259k tokens**,
+a quarter of its context, on command output that had already answered its
+question — a thirty-line coverage table, 450 test names, one clippy warning
+repeated in four files (#71). Context spent is work that does not fit in the
+session, and the summary that follows loses the dead ends, which are the
+expensive part.
+
+**Asking for the result of a long command, where no recipe covers it:** run it
+through the same wrapper rather than inventing a filter.
+
+    python3 .github/scripts/quiet.py --label audit -- cargo audit --deny warnings
+
+It prints one line on success and everything on failure, and it leaves the exit
+status alone. `--tail 1` keeps the command's own last line, which for a test
+runner is the count of what ran. **Do not pipe a gate through `tail` or
+`grep`**: a command that dies before printing anything has no error string to
+match, so a filter looking for one finds a clean run. The three states are kept
+apart on purpose — `ok`, `FAILED`, and `skip` for a gate that declined because
+an optional tool is absent, which is neither.
+
 ## Merging
 
 **`just mergeable N` before `gh pr merge`, always.** It asks GitHub whether
