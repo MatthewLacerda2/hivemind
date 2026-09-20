@@ -57,7 +57,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Send a message.
+    /// Send a message, which opens a conversation.
+    ///
+    /// A new subject with somebody you are already talking to is a `send`, not
+    /// a `reply`: it starts a conversation of its own, which `hivemind chats`
+    /// then lists beside the others. `hivemind reply` is for staying in one.
     Send {
         /// A node id, an owner name, or `everyone`.
         to: Vec<String>,
@@ -118,6 +122,26 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// List your conversations, the one that moved last first.
+    ///
+    /// One line per conversation rather than per message: the subject it
+    /// opened with, who it is with, when it last moved and how much of it is
+    /// unread. `hivemind thread <id>` reads one and `hivemind reply <id>`
+    /// answers it — both take the id printed here.
+    ///
+    /// A new subject with the same machine is a new conversation, and the way
+    /// to start one is `hivemind send`.
+    Chats {
+        /// Only conversations with this machine: a node id, whole or short.
+        #[arg(long)]
+        with: Option<String>,
+        /// How many to show.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Print JSON instead of prose.
+        #[arg(long)]
+        json: bool,
+    },
     /// Read a whole conversation, oldest first, and mark it read.
     ///
     /// Takes the id of any message in the thread, not only the first one:
@@ -129,9 +153,14 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Reply to a message.
+    /// Reply to a conversation, or to one message in it.
+    ///
+    /// A thread id — the one `hivemind chats` prints — answers the most recent
+    /// message in that conversation, so continuing a subject does not mean
+    /// hunting for the id of its latest message. Any other message id answers
+    /// exactly that message.
     Reply {
-        /// The message being replied to.
+        /// The conversation to continue, or the message to answer.
         id: String,
         /// The body, spelled like `send`'s.
         #[arg(short = 'b', long = "body", value_name = "BODY")]
@@ -385,6 +414,9 @@ async fn main() -> Result<()> {
         } => commands::inbox(&cli.api, r#box, unread, limit, json).await,
         Command::Sent { limit, json } => commands::sent(&cli.api, limit, json).await,
         Command::Wait(args) => waited(&cli.api, &args).await,
+        Command::Chats { with, limit, json } => {
+            commands::chats(&cli.api, with.as_deref(), limit, json).await
+        }
         Command::Read { id, json } => commands::read(&cli.api, &id, json).await,
         Command::Thread { id, json } => commands::thread(&cli.api, &id, json).await,
         Command::Reply {

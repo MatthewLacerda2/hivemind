@@ -29,6 +29,8 @@ use serde::Deserialize;
 
 use crate::service::{Draft, MailService};
 
+mod chats;
+
 /// Everything the layout needs, on every page.
 struct Chrome {
     here: &'static str,
@@ -159,6 +161,7 @@ struct PeersPage {
 pub fn router(state: Arc<MailService>) -> Router {
     Router::new()
         .route("/", get(inbox))
+        .route("/chats", get(chats::chats))
         .route("/sent", get(sent))
         .route("/thread/{id}", get(thread))
         .route("/thread/{id}/reply", post(reply))
@@ -330,18 +333,15 @@ async fn reply(
     axum::Form(form): axum::Form<ReplyForm>,
 ) -> Result<Redirect, Response> {
     let thread_id: ulid::Ulid = id.parse().map_err(|_| not_found("no such thread"))?;
-    // Reply to the last message in the thread: that is what the box under it
-    // means, and replying to the root would lose the context of a long one.
-    let last = service
-        .thread(thread_id)
-        .map_err(render_error)?
-        .last()
-        .map(|s| s.id)
-        .ok_or_else(|| not_found("no such thread"))?;
 
-    // A person typed this into a browser (SPEC §4.1).
+    // The thread id, not a message id: the box under a conversation means
+    // "answer this conversation", and `reply` takes a thread and answers the
+    // message it got to (#43). This used to find that message here, which was
+    // the same rule written twice.
+    //
+    // A person typed it into a browser (SPEC §4.1).
     service
-        .reply(last, form.body, Vec::new(), SenderKind::Human)
+        .reply(thread_id, form.body, Vec::new(), SenderKind::Human)
         .map_err(render_error)?;
 
     Ok(Redirect::to(&format!("/thread/{thread_id}")))

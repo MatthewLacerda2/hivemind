@@ -111,17 +111,27 @@ impl MailService {
         })
     }
 
-    /// Reply to a message, inheriting its thread.
+    /// Answer a message, or the conversation `target` names, inheriting its
+    /// thread (SPEC §10, #43).
+    ///
+    /// **A thread id answers the conversation's most recent message.** A
+    /// thread id *is* the id of the message that opened the conversation, so
+    /// that is the only way the two can be told apart — and "answer the first
+    /// message of a six-message thread" is not a thing anybody means by
+    /// handing over a conversation's id. Continuing a subject should not mean
+    /// hunting for the id of its latest message.
     ///
     /// # Errors
-    /// [`ServiceError::NoSuchMessage`] if the parent is unknown.
+    /// [`ServiceError::NoSuchMessage`] if neither a message nor a conversation
+    /// here is called that.
     pub fn reply(
         &self,
-        parent: Ulid,
+        target: Ulid,
         body: String,
         attachments: Vec<std::path::PathBuf>,
         sender_kind: SenderKind,
     ) -> Result<Queued, ServiceError> {
+        let parent = self.reply_target(target)?;
         let (_, original) = self.get(parent)?;
         let subject = if original.subject.starts_with("Re: ") {
             original.subject.clone()
@@ -129,9 +139,20 @@ impl MailService {
             format!("Re: {}", original.subject)
         };
 
+        // Answering our own message — which is what continuing a conversation
+        // nobody has answered yet comes down to — goes to whoever it was sent
+        // to. Replying to the sender would address this machine, so the answer
+        // would land in its own inbox and reach nobody: a message that went
+        // nowhere and said it was sent, which is the shape of #19.
+        let to = if original.from == self.identity {
+            original.to.clone()
+        } else {
+            vec![Recipient::Node(original.from)]
+        };
+
         self.send(
             Draft {
-                to: vec![Recipient::Node(original.from)],
+                to,
                 subject,
                 body,
                 kind: Kind::Message,
@@ -141,6 +162,25 @@ impl MailService {
             sender_kind,
         )
     }
+
+    /// Which message a reply to `target` answers.
+    ///
+    /// The id of a message that is not the one a conversation opened with
+    /// answers exactly that message. Anything else — the id of a conversation,
+    /// or of a conversation whose opening message this node never received —
+    /// answers the most recent message in it.
+    fn reply_target(&self, target: Ulid) -> Result<Ulid, ServiceError> {
+        match self.get(target) {
+            Ok((_, named)) if named.thread_id != target => Ok(target),
+            Ok(_) | Err(ServiceError::NoSuchMessage { .. }) => self
+                .thread(target)?
+                .last()
+                .map(|last| last.id)
+                .ok_or(ServiceError::NoSuchMessage { id: target }),
+            Err(other) => Err(other),
+        }
+    }
+
     /// Everything still awaiting delivery, oldest first (SPEC §8).
     ///
     /// # Errors
@@ -327,6 +367,141 @@ mod tests {
 
         assert_eq!(second.subject, "Re: lunch");
     }
+    /// A member of this node's group, keys and all.
+    fn member(service: &MailService, seed: u8) -> hivemind_core::identity::Identity {
+        let friend = hivemind_core::identity::Identity::from_seed([seed; 32]).expect("identity");
+        service
+            .admit(
+                friend.node_id(),
+                "ana-mbp",
+                Some("ana"),
+                friend.certificate_der().to_vec(),
+                PeerAddr::manual("10.0.0.2", 8400),
+            )
+            .expect("admit");
+        friend
+    }
+
+    /// One message from `friend`, in `thread` when it is a reply.
+    fn arrives(
+        service: &MailService,
+        friend: &hivemind_core::identity::Identity,
+        millis: u64,
+        thread: Option<Ulid>,
+        subject: &str,
+    ) -> Ulid {
+        let id = Ulid::from_parts(millis, 0);
+        let mut message = Message {
+            id,
+            thread_id: thread.unwrap_or(id),
+            in_reply_to: thread,
+            from: friend.node_id(),
+            to: vec![Recipient::Node(service.identity())],
+            subject: subject.to_owned(),
+            body: "body".to_owned(),
+            kind: Kind::Message,
+            sender_kind: SenderKind::Human,
+            attachments: Vec::new(),
+            sent_at: DateTime::from_timestamp_millis(i64::try_from(millis).expect("in range"))
+                .expect("a timestamp"),
+            received_at: None,
+            signature: Signature::from_bytes([0u8; 64]),
+        };
+        message.sign(friend.signing_key()).expect("sign");
+        service.receive(friend.node_id(), message).expect("receive")
+    }
+
+    #[test]
+    fn replying_to_a_conversation_answers_its_most_recent_message() {
+        // What #43 asks for: continuing a subject should not mean hunting for
+        // the id of the message that happens to be last in it.
+        let (_dir, service) = service();
+        let ana = member(&service, 63);
+        let opened = arrives(&service, &ana, 100, None, "dashboard PR");
+        let latest = arrives(&service, &ana, 200, Some(opened), "Re: dashboard PR");
+
+        // `opened` is the conversation's id as well as a message's: a thread
+        // id is the id of the message that opened it.
+        let answer = service
+            .reply(opened, "on it".to_owned(), Vec::new(), SenderKind::Human)
+            .expect("reply")
+            .message;
+
+        assert_eq!(
+            answer.in_reply_to,
+            Some(latest),
+            "the conversation's id answers where the conversation got to"
+        );
+        assert_eq!(answer.thread_id, opened);
+        assert_eq!(answer.to, vec![Recipient::Node(ana.node_id())]);
+    }
+
+    #[test]
+    fn replying_to_one_message_in_a_conversation_still_answers_that_message() {
+        // The other half: an id that names a message and not a conversation
+        // means that message, which is what `thread` tells a Claude to do
+        // when it wants to answer one particular turn.
+        let (_dir, service) = service();
+        let ana = member(&service, 64);
+        let opened = arrives(&service, &ana, 100, None, "dashboard PR");
+        let middle = arrives(&service, &ana, 200, Some(opened), "Re: dashboard PR");
+        arrives(&service, &ana, 300, Some(opened), "Re: dashboard PR");
+
+        let answer = service
+            .reply(
+                middle,
+                "about that".to_owned(),
+                Vec::new(),
+                SenderKind::Human,
+            )
+            .expect("reply")
+            .message;
+
+        assert_eq!(answer.in_reply_to, Some(middle));
+    }
+
+    #[test]
+    fn answering_our_own_message_goes_to_whoever_it_was_sent_to() {
+        // Continuing a conversation nobody has answered yet comes down to
+        // replying to ourselves. Addressing the sender would address this
+        // machine, and the answer would land in its own inbox and reach
+        // nobody — sent, and gone nowhere (#19).
+        let (_dir, service) = service();
+        let ana = member(&service, 65);
+        let opened = service
+            .send(
+                Draft {
+                    to: vec![Recipient::Node(ana.node_id())],
+                    subject: "dashboard PR".to_owned(),
+                    body: "take a look".to_owned(),
+                    kind: Kind::Message,
+                    in_reply_to: None,
+                    attachments: Vec::new(),
+                },
+                SenderKind::Human,
+            )
+            .expect("send")
+            .message;
+
+        let answer = service
+            .reply(
+                opened.thread_id,
+                "and one more thing".to_owned(),
+                Vec::new(),
+                SenderKind::Human,
+            )
+            .expect("reply")
+            .message;
+
+        assert_eq!(
+            answer.to,
+            vec![Recipient::Node(ana.node_id())],
+            "the conversation is with her, whoever spoke last"
+        );
+        assert_eq!(answer.thread_id, opened.thread_id);
+        assert_eq!(answer.in_reply_to, Some(opened.id));
+    }
+
     #[test]
     fn replying_to_a_message_that_does_not_exist_is_an_error() {
         let (_dir, service) = service();

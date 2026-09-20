@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Conversations — hivemind{% endblock %}
+{% block content %}
+<h1>Conversations</h1>
+
+{% if chats.is_empty() %}
+  <p class="empty">Nothing here yet.</p>
+{% else %}
+  <ul class="messages">
+  {% for chat in chats %}
+    <li class="message{% if chat.unread > 0 %} unread{% endif %}">
+      <a href="/thread/{{ chat.thread_id }}">
+        <span class="subject">{{ chat.subject }}</span>
+      </a>
+      <p class="meta">
+        {% for who in chat.participants %}
+          <span class="who" title="{{ who.id }}">{{ who.short }}</span>
+        {% endfor %}
+        <span class="badge {{ chat.last_sender_kind }}">{{ chat.last_sender_kind }}</span>
+        <time datetime="{{ chat.last_at }}">{{ chat.when }}</time>
+        <span class="how-many">
+          {{ chat.messages }} message{% if chat.messages != 1 %}s{% endif %}{% if chat.unread > 0 %}, {{ chat.unread }} unread{% endif %}
+        </span>
+      </p>
+    </li>
+  {% endfor %}
+  </ul>
+{% endif %}
+{% endblock %}

@@ -1,4 +1,5 @@
-//! `hivemind thread`: reading a conversation as a conversation (#34).
+//! `hivemind chats` and `hivemind thread`: conversations, listed and read
+//! (#43, #34).
 //!
 //! Through the shipped binary, because what this is about is what somebody —
 //! or a Claude resuming a session — sees on the screen, and an in-process test
@@ -158,4 +159,145 @@ fn reading_one_message_says_how_much_more_the_thread_holds() {
         !alone.contains("in this thread"),
         "nothing to point at, so nothing to say: {alone}"
     );
+}
+
+#[test]
+fn the_chat_list_is_one_conversation_per_subject_not_one_line_per_message() {
+    // #43 in one screen: three messages about two subjects show as two
+    // conversations, and the subject shown is the one each opened with rather
+    // than the `Re:` its latest message carries.
+    let daemon = Daemon::start(NAME);
+    let (root, _) = two_threads(&daemon);
+
+    let printed = daemon.run(&["chats"]);
+
+    assert!(
+        printed.contains("dashboard PR") && printed.contains("lunch"),
+        "both conversations should be listed: {printed}"
+    );
+    assert!(
+        !printed.contains("Re: dashboard PR"),
+        "a conversation is shown by the subject it opened with: {printed}"
+    );
+    assert!(
+        printed.contains("2 messages") && printed.contains("1 message,"),
+        "how much is in each, counted once per message: {printed}"
+    );
+    assert!(
+        printed.contains(short(&root)),
+        "the id to open it with: {printed}"
+    );
+    assert!(
+        printed.contains("hivemind thread") && printed.contains("hivemind reply"),
+        "and what to do with that id: {printed}"
+    );
+
+    // Newest first: `lunch` was sent after `dashboard PR` was opened, and the
+    // reply to `dashboard PR` came after that.
+    let listed = json(&daemon.run(&["chats", "--json"]));
+    let subjects: Vec<&str> = listed
+        .as_array()
+        .expect("an array")
+        .iter()
+        .map(|c| c["subject"].as_str().expect("a subject"))
+        .collect();
+    assert_eq!(subjects, ["dashboard PR", "lunch"], "{listed}");
+    assert_eq!(listed[0]["messages"], 2);
+    assert_eq!(listed[0]["unread"], 2);
+}
+
+#[test]
+fn replying_by_the_conversations_id_answers_where_that_conversation_got_to() {
+    // The point of taking a thread: continuing a subject should not mean
+    // hunting for the id of the message that happens to be last in it (#43).
+    let daemon = Daemon::start(NAME);
+    let (root, latest) = two_threads(&daemon);
+
+    let queued = daemon.run(&["reply", short(&root), "-b", "still looking"]);
+    let id = queued
+        .split_whitespace()
+        .nth(1)
+        .expect("`queued <id>`")
+        .to_owned();
+
+    let (status, answer) = daemon.get_json(&format!("/api/v1/messages/{id}"));
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(
+        answer["thread_id"], root,
+        "it lands in the conversation it was addressed to: {answer}"
+    );
+    assert_eq!(
+        answer["in_reply_to"], latest,
+        "and answers where that conversation got to, not the message that opened it"
+    );
+
+    // The other conversation is untouched, or "the right thread" means
+    // nothing: a single-threaded store cannot tell them apart.
+    let lunch = json(&daemon.run(&["thread", &id_of(&daemon, "lunch"), "--json"]));
+    assert_eq!(lunch.as_array().expect("an array").len(), 1, "{lunch}");
+}
+
+#[test]
+fn a_conversation_says_which_machine_it_is_with_and_moves_up_when_it_moves() {
+    let alice = Daemon::start("alice");
+    let bob = Daemon::start("bob");
+    pair(&alice, &bob);
+
+    alice.run(&[
+        "send",
+        &bob.node_id(),
+        "-s",
+        "a question",
+        "-b",
+        "what time?",
+    ]);
+    let question = bob.wait_for("a question");
+    let question_id = question["id"].as_str().expect("an id").to_owned();
+    bob.run(&["reply", &question_id, "-b", "one o'clock"]);
+    alice.wait_for("Re: a question");
+    // Read it, so that the wait further down is a wait for the *next* answer
+    // rather than a wait satisfied by the one already in the box.
+    alice.run(&["thread", &question_id]);
+
+    // A second subject with the same machine — which is a `send`, not a new
+    // kind of thing — and one with nobody else, so the filter below has
+    // something to leave out.
+    alice.run(&["send", &bob.node_id(), "-s", "lunch", "-b", "1pm?"]);
+    alice.run(&["send", &alice.node_id(), "-s", "note to self", "-b", "x"]);
+
+    let printed = alice.run(&["chats"]);
+    let his = bob.node_id()[4..8].to_owned();
+    assert!(
+        printed.contains(&his),
+        "a conversation says who it is with: {printed}"
+    );
+
+    let with_bob = json(&alice.run(&["chats", "--with", &bob.node_id(), "--json"]));
+    let subjects: Vec<&str> = with_bob
+        .as_array()
+        .expect("an array")
+        .iter()
+        .map(|c| c["subject"].as_str().expect("a subject"))
+        .collect();
+    assert_eq!(
+        subjects,
+        ["lunch", "a question"],
+        "two subjects with one machine stay two conversations, and the note to \
+         self is not one of them: {with_bob}"
+    );
+
+    // A machine this one has never met is refused rather than answered with an
+    // empty list, which would read as "no conversations with them" (#28).
+    let (ok, said) = alice.try_run(&["chats", "--with", "nobody-here"]);
+    assert!(!ok, "it should refuse: {said}");
+
+    // And the conversation that moves goes to the top.
+    bob.run(&["reply", &question_id, "-b", "make it half past"]);
+    alice.run(&["wait", "--thread", &question_id, "--timeout", "60s"]);
+    let after = json(&alice.run(&["chats", "--with", &bob.node_id(), "--json"]));
+    assert_eq!(
+        after[0]["subject"], "a question",
+        "a new message lifts its conversation: {after}"
+    );
+    assert_eq!(after[0]["messages"], 3);
 }

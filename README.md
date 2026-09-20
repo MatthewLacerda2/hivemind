@@ -60,9 +60,9 @@ delivery that survives a closed laptop, and a surface a human can actually use.
 
 ## How Claude uses it
 
-hivemind registers an MCP server with Claude Code, so your Claude gets eight
-tools: `list_peers`, `send`, `inbox`, `read`, `thread`, `reply`, `broadcast` and
-`download_attachment`. Ask it to check its mail and it will.
+hivemind registers an MCP server with Claude Code, so your Claude gets nine
+tools: `list_peers`, `send`, `inbox`, `chats`, `read`, `thread`, `reply`,
+`broadcast` and `download_attachment`. Ask it to check its mail and it will.
 
 ```
 hivemind mcp install     # or: hivemind mcp print, for other clients

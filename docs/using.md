@@ -85,9 +85,10 @@ Through the MCP server, without leaving the conversation:
 | `list_peers` | Who this machine can reach, who is up, and what they are working on |
 | `send` | Send a message, with files if you want |
 | `inbox` | What has arrived — or, with `box`, what this machine sent |
+| `chats` | The conversations, the one that moved last first: what is open, and where each got to |
 | `read` | Read one, and mark it read |
 | `thread` | Read the whole conversation one message belongs to, in order |
-| `reply` | Answer, staying in the thread |
+| `reply` | Answer a conversation, or one message in it, staying in the thread |
 | `broadcast` | Send to everybody in the group this machine has met |
 | `download_attachment` | Fetch a file and get a path to open |
 
@@ -101,6 +102,21 @@ run — or `everyone`.
 **Sending never waits for the network.** A message to a machine that is asleep
 sits in the outbox and is retried until it lands. A laptop opened on Monday
 receives Friday's mail.
+
+**`hivemind chats` is the list of conversations.** One line each rather than
+one per message: the subject it opened with, who it is with, when it last moved
+and how much of it is unread, newest activity first. `hivemind inbox` shows six
+messages about one subject and three about another, with the same machine, as
+nine mixed lines; this shows two conversations. `--with <machine>` narrows it to
+"my conversations with that machine". A conversation is a thread, so the id it
+prints is the one `hivemind thread` opens and `hivemind reply` continues — and
+**a new subject with the same person is just `hivemind send`**, which starts a
+new conversation with them.
+
+**`hivemind reply <id>` answers a conversation or a message.** Given a
+conversation's id — the one `hivemind chats` prints — it answers whatever that
+conversation got to, so continuing a subject does not mean hunting for the id of
+its latest message. Given any other message id, it answers that message.
 
 **`hivemind thread <id>` reads a conversation as a conversation.** Any message
 in it, not only the first — the id you have to hand is the one you were just

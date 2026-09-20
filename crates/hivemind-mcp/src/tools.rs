@@ -1,11 +1,11 @@
-//! The eight tools and the two resources (SPEC §9.1).
+//! The nine tools and the two resources (SPEC §9.1).
 //!
 //! Tool descriptions are part of the product: they are what tells Claude that
 //! `sender_kind: human` means a person typed the message, and that `to` accepts
 //! a node name, an owner name or `everyone`.
 
 use hivemind_api::service::{Draft, Queued, ServiceError};
-use hivemind_core::index::Query;
+use hivemind_core::index::{ConversationQuery, Query};
 use hivemind_core::message::{Kind, Recipient, SenderKind};
 use hivemind_core::peer::NodeId;
 use hivemind_core::store::Mailbox;
@@ -114,7 +114,7 @@ impl HivemindMcp {
     pub(crate) fn inbox_query(&self, params: &InboxParams) -> Result<Query, McpError> {
         Ok(Query {
             mailbox: Some(params.mailbox()?),
-            from: self.sender(params.from.as_deref())?,
+            from: self.machine(params.from.as_deref(), "from")?,
             limit: Some(params.limit.unwrap_or(DEFAULT_LIMIT)),
             ..Query::default()
         })
@@ -128,14 +128,17 @@ impl HivemindMcp {
     /// whole `hm1:` fingerprint — the short form included — meant "no filter
     /// at all", and a Claude asking for one machine's mail was handed
     /// everybody's without being told (#102).
-    fn sender(&self, typed: Option<&str>) -> Result<Option<NodeId>, McpError> {
+    ///
+    /// `field` is which argument said it, because a refusal that names the
+    /// wrong one sends an agent to fix a parameter it did not pass.
+    fn machine(&self, typed: Option<&str>, field: &str) -> Result<Option<NodeId>, McpError> {
         typed
             .map(|typed| {
                 self.service.resolve_peer(typed.trim()).map_err(|_| {
                     McpError::invalid_params(
                         format!(
-                            "`{typed}` is not a machine this node knows. `from` takes a node \
-                             id, whole or in the short form `list_peers` shows."
+                            "`{typed}` is not a machine this node knows. `{field}` takes a \
+                             node id, whole or in the short form `list_peers` shows."
                         ),
                         None,
                     )
@@ -255,10 +258,22 @@ pub struct ThreadParams {
     pub id: String,
 }
 
+/// Arguments for `chats`.
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct ChatsParams {
+    /// Only conversations with this machine: the node id `list_peers` gives
+    /// you, short or whole.
+    pub with: Option<String>,
+    /// How many conversations to return. Defaults to 20.
+    pub limit: Option<usize>,
+}
+
 /// Arguments for `reply`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ReplyParams {
-    /// The id of the message being replied to.
+    /// What to answer: the `thread_id` of a conversation, which answers
+    /// whatever that conversation got to, or the id of one message, which
+    /// answers exactly that message. Short ids work, as everywhere else.
     pub id: String,
     /// The reply body, as markdown.
     pub body: String,
@@ -334,6 +349,30 @@ pub struct InboxItem {
     pub unread: bool,
     /// The names of any attachments.
     pub attachment_names: Vec<String>,
+}
+
+/// One conversation, as `chats` returns it.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct ChatItem {
+    /// The conversation's id. Pass it to `thread` to read it, or to `reply` to
+    /// continue it.
+    pub thread_id: String,
+    /// The subject it opened with. Every reply in it is `Re:` this.
+    pub subject: String,
+    /// The machines it is with. This one is left out unless it is the only
+    /// machine in the conversation.
+    pub participants: Vec<String>,
+    /// How many messages are in it.
+    pub messages: u64,
+    /// How many of those have not been read yet.
+    pub unread: u64,
+    /// Who sent the most recent message.
+    pub last_from: String,
+    /// `human` if a person typed the most recent message, `agent` if another
+    /// Claude sent it.
+    pub last_sender_kind: String,
+    /// When it was sent, RFC 3339. The list is ordered by this.
+    pub last_at: String,
 }
 
 /// A whole message, as `read` returns it.
@@ -484,7 +523,8 @@ impl HivemindMcp {
                        body in full, with who sent each one and when. `sender_kind` is \
                        `human` where a person typed it and `agent` where another Claude \
                        did, so you can see which turns were yours. To continue the \
-                       conversation, `reply` to the last id in it."
+                       conversation, `reply` to its `thread_id`, which answers where it \
+                       got to. `chats` lists the conversations this machine has open."
     )]
     async fn thread(
         &self,
@@ -513,10 +553,58 @@ impl HivemindMcp {
     }
 
     #[tool(
+        name = "chats",
+        description = "List the conversations on this machine, the one that moved last \
+                       first. One row per conversation rather than per message: the \
+                       subject it opened with, which machines it is with, when it last \
+                       moved, and how many messages in it are still unread. Reach for \
+                       this when you are picking a session back up, or when the user \
+                       asks what is going on with somebody — `inbox` answers the same \
+                       mail as loose messages in arrival order, six about one subject \
+                       and three about another all mixed together. A conversation IS a \
+                       thread: `thread` with the `thread_id` here reads one in full, and \
+                       `reply` with that same id continues it by answering whatever it \
+                       got to. To open a NEW subject with somebody you are already \
+                       talking to, use `send` — a new send is a new conversation. `with` \
+                       narrows the list to one machine: pass the id `list_peers` gives \
+                       you, short or whole."
+    )]
+    async fn chats(
+        &self,
+        Parameters(params): Parameters<ChatsParams>,
+    ) -> Result<Json<Vec<ChatItem>>, McpError> {
+        let query = ConversationQuery {
+            with: self.machine(params.with.as_deref(), "with")?,
+            limit: Some(params.limit.unwrap_or(DEFAULT_LIMIT)),
+        };
+
+        Ok(Json(
+            self.service
+                .conversations(&query)
+                .map_err(|e| mcp_error(&e))?
+                .into_iter()
+                .map(|chat| ChatItem {
+                    thread_id: chat.thread_id.to_string(),
+                    subject: chat.subject,
+                    participants: chat.participants.iter().map(ToString::to_string).collect(),
+                    messages: chat.messages,
+                    unread: chat.unread,
+                    last_from: chat.last_from.to_string(),
+                    last_sender_kind: chat.last_sender_kind.as_str().to_owned(),
+                    last_at: chat.last_at.to_rfc3339(),
+                })
+                .collect(),
+        ))
+    }
+
+    #[tool(
         name = "send",
         description = "Send a message to one or more recipients. Each recipient is a node \
                        name (one machine), an owner name (every machine that person runs), \
-                       or `everyone`. Sending never blocks on the network: the message is \
+                       or `everyone`. **A new subject with somebody you are already \
+                       talking to is a `send`**, not a `reply`: it opens a conversation of \
+                       its own, which `chats` then lists beside the others. `reply` is for \
+                       staying in one. Sending never blocks on the network: the message is \
                        queued and delivered when the recipient is reachable, which may be \
                        days later if their laptop is closed."
     )]
@@ -557,9 +645,15 @@ impl HivemindMcp {
 
     #[tool(
         name = "reply",
-        description = "Reply to a message, keeping it in the same thread. Prefer this over \
+        description = "Answer a conversation, or one message in it, keeping it in the \
+                       same thread. Pass the `thread_id` from `chats` or `thread` and it \
+                       answers whatever that conversation got to, so continuing a subject \
+                       does not mean hunting for the id of its latest message; pass a \
+                       message id and it answers exactly that message. Prefer this over \
                        `send` when responding to something in the inbox, so the \
-                       conversation stays readable to the person on the other end."
+                       conversation stays readable to the person on the other end — but \
+                       a NEW subject with the same person is a `send`, not a reply to \
+                       something unrelated."
     )]
     async fn reply(
         &self,
@@ -841,6 +935,149 @@ mod tests {
             "it should say which one to drop: {}",
             error.message
         );
+    }
+
+    /// The conversations a listing came back with, newest activity first.
+    async fn chat_subjects(server: &HivemindMcp, params: ChatsParams) -> Vec<String> {
+        server
+            .chats(Parameters(params))
+            .await
+            .expect("a conversation list")
+            .0
+            .into_iter()
+            .map(|chat| chat.subject)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn two_subjects_with_one_machine_are_two_conversations() {
+        // The complaint in #43, from the side a Claude sees it: `inbox` hands
+        // back three loose messages, and which of them belong together is
+        // something it then has to work out.
+        let (_dir, server) = server();
+        let ana = member(&server, 95, "ana-mbp");
+        let beto = member(&server, 96, "beto-air");
+        deliver(&server, &ana, 100, "dashboard PR");
+        deliver(&server, &ana, 200, "lunch?");
+        deliver(&server, &beto, 300, "the release");
+
+        assert_eq!(
+            chat_subjects(&server, ChatsParams::default()).await,
+            ["the release", "lunch?", "dashboard PR"],
+            "one row per conversation, the one that moved last first"
+        );
+        assert_eq!(
+            chat_subjects(
+                &server,
+                ChatsParams {
+                    with: Some(ana.node_id().short()),
+                    ..ChatsParams::default()
+                }
+            )
+            .await,
+            ["lunch?", "dashboard PR"],
+            "hers, by the short id `list_peers` shows — and not his"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_conversation_says_who_it_is_with_and_what_is_unread_in_it() {
+        let (_dir, server) = server();
+        let ana = member(&server, 97, "ana-mbp");
+        let read = deliver(&server, &ana, 100, "dashboard PR");
+        deliver(&server, &ana, 200, "lunch?");
+        server.service.mark_read(read).expect("mark read");
+
+        let listed = server
+            .chats(Parameters(ChatsParams::default()))
+            .await
+            .expect("a list")
+            .0;
+
+        let dashboard = listed
+            .iter()
+            .find(|chat| chat.subject == "dashboard PR")
+            .expect("the one that was read");
+        assert_eq!(dashboard.participants, vec![ana.node_id().to_string()]);
+        assert_eq!(dashboard.messages, 1);
+        assert_eq!(dashboard.unread, 0, "it has been read");
+        assert_eq!(dashboard.last_from, ana.node_id().to_string());
+        assert_eq!(dashboard.last_sender_kind, "human");
+
+        let lunch = listed
+            .iter()
+            .find(|chat| chat.subject == "lunch?")
+            .expect("the one that was not");
+        assert_eq!(lunch.unread, 1, "and this one has not");
+    }
+
+    #[tokio::test]
+    async fn a_with_that_names_no_machine_is_refused_and_says_which_argument() {
+        // An empty list would read as "no conversations with them" (#28), and
+        // a refusal naming `from` would send a Claude to fix an argument it
+        // never passed.
+        let (_dir, server) = server();
+        let ana = member(&server, 98, "ana-mbp");
+        deliver(&server, &ana, 100, "dashboard PR");
+
+        let error = match server
+            .chats(Parameters(ChatsParams {
+                with: Some("nobody-here".to_owned()),
+                ..ChatsParams::default()
+            }))
+            .await
+        {
+            Err(error) => error,
+            // Naming what came back instead, because "refused" and "filtered
+            // to nothing" are the two answers this is about telling apart.
+            Ok(listed) => panic!(
+                "a machine this node has never met should be refused, and it \
+                 answered with {} conversations",
+                listed.0.len()
+            ),
+        };
+
+        assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert!(error.message.contains("nobody-here"), "{}", error.message);
+        assert!(error.message.contains("`with`"), "{}", error.message);
+    }
+
+    #[tokio::test]
+    async fn replying_to_a_conversation_answers_where_it_got_to() {
+        // What the tool description promises: the id `chats` hands back is
+        // the one `reply` takes, and it does not mean the message that opened
+        // the conversation.
+        let (_dir, server) = server();
+        let ana = member(&server, 99, "ana-mbp");
+        let opened = deliver(&server, &ana, 100, "dashboard PR");
+        server
+            .service
+            .reply(opened, "on it".to_owned(), Vec::new(), SenderKind::Agent)
+            .expect("an answer already in the conversation");
+
+        let chat = server
+            .chats(Parameters(ChatsParams::default()))
+            .await
+            .expect("a list")
+            .0
+            .remove(0);
+
+        let answered = server
+            .reply(Parameters(ReplyParams {
+                id: chat.thread_id.clone(),
+                body: "and one more thing".to_owned(),
+                attachments: None,
+            }))
+            .await
+            .expect("a reply")
+            .0;
+
+        assert_eq!(
+            answered.thread_id, chat.thread_id,
+            "it lands in the conversation it was addressed to"
+        );
+        let whole = server.service.thread_of(opened).expect("the conversation");
+        assert_eq!(whole.len(), 3, "and is part of it: {whole:?}");
     }
 
     #[test]

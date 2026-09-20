@@ -273,8 +273,19 @@ POST   /api/v1/messages                    multipart: json part `message` + N fi
        # 202 carries {id, thread_id} and, when this node sent the same thing
        # within two minutes, `duplicate_of` naming it (§8). It is a notice.
 POST   /api/v1/messages/{id}/reply         same, with in_reply_to preset
+       # `{id}` is a message, or a **thread** — which answers the most
+       # recent message in it, so continuing a subject does not mean
+       # hunting for the id of its latest message (§10). Answering our own
+       # message goes to whoever it was sent to, not back to this machine.
 POST   /api/v1/messages/{id}/read          move new → cur
 GET    /api/v1/messages/{id}/attachments/{sha}   streams blob; triggers fetch if not inline & not cached
+GET    /api/v1/threads?with=&limit=       conversations, the one that moved last first
+       # A conversation *is* a thread: one row per thread_id, carrying the
+       # subject it opened with, the machines it is with, the last message,
+       # and how many of it are unread — counted once each, however many
+       # boxes hold them. `with` takes a node id, whole or short, and a
+       # machine this node does not know is refused rather than answered
+       # with an empty list.
 GET    /api/v1/threads/{thread_id}
 
 GET    /api/v1/events                      SSE: message.received, message.delivered, peer.seen, peer.online, peer.offline
@@ -320,22 +331,25 @@ RFC 9457 problem+json everywhere. Stable `type` slugs (`not_paired`, `unknown_pe
 
 ### 9.1 MCP server (`hivemind-mcp`, crate `rmcp`, streamable HTTP at `/mcp`)
 
-Tools — keep it to these eight; every one maps 1:1 to a service-layer function:
+Tools — keep it to these nine; every one maps 1:1 to a service-layer function:
 
 | Tool | Args | Returns |
 |---|---|---|
 | `list_peers` | `{}` | peers with name, owner, id, online, last_seen, sessions |
 | `send` | `{to: [string], subject, body, kind?, attachments?: [local path]}` | `{id, thread_id, duplicate_of?}` (§8) |
 | `inbox` | `{box?: new\|cur\|out\|sent, unread_only?: bool, limit?: int, from?: node id, whole or short}` | summaries (id, from, subject, kind, sender_kind, sent_at, attachment names) |
+| `chats` | `{with?: node id, whole or short, limit?: int}` | one row per conversation, the one that moved last first: thread_id, the subject it opened with, the machines it is with, how many messages and how many unread, and the last message's sender, sender_kind and time |
 | `read` | `{id}` | full message; marks read; attachment refs include a **local filesystem path**; `others_in_thread` counts the rest of the conversation |
 | `thread` | `{id}` | every message in the conversation that id belongs to — **any** message in it, not only the root — oldest first and in full; marks them read |
-| `reply` | `{id, body, attachments?}` | `{id}` |
+| `reply` | `{id: a message **or a thread**, body, attachments?}` | `{id}` — a thread answers the most recent message in it |
 | `broadcast` | `{subject, body, kind?}` | `{id}` |
 | `download_attachment` | `{id, sha}` | `{path}` — local path once fetched |
 
 Resources: `hivemind://inbox` (unread summaries, text) and `hivemind://peers`.
 
-`thread` is the eighth and arrived with #34, amending the "seven" this section said before. The number was never the point: the point is that a ninth tool would probably be orchestration, which §12 keeps out. Reading a conversation is reading mail — and it is the one door a Claude most needs, because a Claude resuming a session has the thread as its only memory of what was said and cannot reach it by speaking HTTP by hand.
+`thread` is the eighth and arrived with #34, amending the "seven" this section said before; `chats` is the ninth and arrived with #43, amending the "eight". The count was never the point and the boundary always was: **listing what this node already holds is reading mail**, and both of these answer from the index alone — nothing is scheduled, nothing is run, §12 is untouched. What would not earn a tool is one that *acts* because mail arrived.
+
+`chats` earns its own because `inbox` cannot answer the question it answers. A Claude picking a session back up needs "which conversations do I have open, and where did each get to"; from a page of loose messages that is a `thread` call per subject, and the unread count comes out wrong wherever a message is addressed to its own sender, because the index holds one row per mailbox as well as per id (#34).
 
 Tool descriptions must tell Claude that `sender_kind: human` means a person typed it directly, and that `to` accepts a node name, an owner name, or `everyone`. Ship `docs/mcp.md` with worked examples.
 
@@ -365,17 +379,28 @@ hivemind join <host[:port]>           # contact a node discovery cannot find
 hivemind peers [refresh|remove <id>|forget-addr <id> <host:port>]  # online, last seen, sessions
 hivemind send <to> -s <subject> [-a file]... [-b <body>] [-- body | -]   # body from arg or stdin
 hivemind inbox [--unread] [--box <new|cur|out|sent>] [--json]  # new + cur by default
+hivemind chats [--with <peer>] [--limit N] [--json]   # the conversations, the one that moved last first
 hivemind sent                         # out + sent: what left here, delivered or not
 hivemind wait [--from <peer>] [--thread <id>] [--timeout <30s|5m>] [--json]  # block until mail arrives; 3 if the timeout wins
 hivemind read <id>                    # says how many more are in the thread, and how to see them
 hivemind thread <id> [--json]         # the whole conversation, oldest first; any message in it, not only the root
-hivemind reply <id> [-b <body>] [body | -]
+hivemind reply <id> [-b <body>] [body | -]   # <id> is a message or a thread; a thread answers where it got to
 hivemind reindex
 hivemind hook check|install|uninstall
 hivemind mcp install|print
 hivemind service install|uninstall|restart|logs
 hivemind doctor                       # checks: daemon, binary, ports, tailscale, claude on PATH, hooks, mDNS, peer addresses
 ```
+
+`hivemind chats` lists the conversations rather than the messages: one line per
+thread, carrying the subject it opened with, the machines it is with, when it
+last moved, and how much of it is unread — counted once per message, however
+many boxes hold it. A conversation **is** a thread (#43); there is no second
+concept beside it, `hivemind thread <id>` opens one and `hivemind reply <id>`
+continues it, and both take the id this prints. A new subject with the same
+machine is a new conversation, and the way to start one is `hivemind send`.
+`--with` takes a node id, whole or short, and a machine this one does not know
+is refused rather than answered with an empty list.
 
 `hivemind wait` blocks until mail arrives and prints it exactly as `inbox` does, for somebody — or a Claude — who has decided to wait for an answer rather than ask again in a minute: `hivemind wait && notify-send 'mail'`. It is the user saying "I will wait" and never the daemon running anything because mail arrived, which stays reserved (§12). Four rules make it a door rather than another polling loop (#40): it subscribes to `/api/v1/events` **before** it looks in the box, so mail arriving between the two is still reported; **unread mail already there ends the wait at once**, rather than waiting for the next one; `--timeout` exits **3**, a status no other outcome uses, so "nothing arrived" can never be read as "something did" — and never 1, which is what anything going wrong exits with; and a daemon that goes away mid-wait, or a `--from` that names nobody this machine knows, is an error rather than a wait that can never end. `--from` takes a node id, its short form, a machine name or an owner — an owner's machines all count — and `--thread` takes any message id in the conversation, like `hivemind thread`.
 
@@ -387,7 +412,7 @@ The body of a message is taken three ways, and the rules between them are part o
 
 ## 11. Web UI
 
-One page at `http://127.0.0.1:8401/`, no framework, no build step beyond esbuild for TypeScript, assets embedded in the binary with `include_dir`. Views: inbox (live via SSE), thread, compose (with drag-drop attachments), peers (online, last seen, sessions; join by address). Show `sender_kind` as a small badge ("human" / "agent"). It must be usable without JavaScript for reading (server-rendered list via `askama`); JS enhances it. Accessibility: keyboard navigable, semantic HTML, `prefers-color-scheme`.
+One page at `http://127.0.0.1:8401/`, no framework, no build step beyond esbuild for TypeScript, assets embedded in the binary with `include_dir`. Views: inbox (live via SSE), conversations, thread, compose (with drag-drop attachments), peers (online, last seen, sessions; join by address). The conversations view is the inbox by thread rather than by message — one row per conversation, the one that moved last first, carrying the subject it opened with, the machines it is with and how much of it is unread — and each row opens the thread it belongs to (#43). Show `sender_kind` as a small badge ("human" / "agent"). It must be usable without JavaScript for reading (server-rendered list via `askama`); JS enhances it. Accessibility: keyboard navigable, semantic HTML, `prefers-color-scheme`.
 
 ---
 

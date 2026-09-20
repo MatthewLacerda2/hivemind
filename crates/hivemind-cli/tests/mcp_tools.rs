@@ -67,10 +67,11 @@ async fn call(
 }
 
 #[tokio::test]
-async fn the_server_advertises_exactly_the_eight_tools_the_spec_names() {
-    // SPEC §9.1 keeps the list short on purpose: a ninth tool would probably be
-    // orchestration, which hivemind deliberately does not do. `thread` is the
-    // eighth, and it is reading mail rather than arranging work (#34).
+async fn the_server_advertises_exactly_the_nine_tools_the_spec_names() {
+    // SPEC §9.1 keeps the list short on purpose, and the line is not the count:
+    // listing what this machine already holds is reading mail, not arranging
+    // work. `thread` is the eighth (#34) and `chats` the ninth (#43); both
+    // answer from the index and change nothing.
     let daemon = Daemon::start(NAME);
     let client = connect(&daemon).await;
 
@@ -82,6 +83,7 @@ async fn the_server_advertises_exactly_the_eight_tools_the_spec_names() {
         names,
         [
             "broadcast",
+            "chats",
             "download_attachment",
             "inbox",
             "list_peers",
@@ -625,6 +627,75 @@ async fn a_thread_comes_back_whole_from_the_id_of_any_message_in_it() {
     // reply knows to ask for the rest.
     let one = call(&client, "read", serde_json::json!({ "id": reply_id })).await;
     assert_eq!(one["others_in_thread"], 1);
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn the_chat_list_round_trips_and_its_id_is_the_one_reply_takes() {
+    // A tool that works in Rust but not through JSON-RPC is not a working
+    // tool, and the promise in this one's description is that the `thread_id`
+    // it hands back is what `reply` and `thread` take (#43).
+    //
+    // Two conversations, or "the right one" and "all of them" are the same
+    // list (#28).
+    let daemon = Daemon::start(NAME);
+    let client = connect(&daemon).await;
+
+    let opened = call(
+        &client,
+        "send",
+        serde_json::json!({ "to": ["everyone"], "subject": "dashboard PR", "body": "take a look" }),
+    )
+    .await;
+    call(
+        &client,
+        "send",
+        serde_json::json!({ "to": ["everyone"], "subject": "lunch", "body": "1pm?" }),
+    )
+    .await;
+    let opened_id = opened["id"].as_str().expect("id").to_owned();
+    call(
+        &client,
+        "reply",
+        serde_json::json!({ "id": opened_id, "body": "on it" }),
+    )
+    .await;
+
+    let chats = call(&client, "chats", serde_json::json!({})).await;
+    let rows = chats.as_array().expect("an array");
+    assert_eq!(rows.len(), 2, "two subjects, two conversations: {chats}");
+
+    let dashboard = rows
+        .iter()
+        .find(|row| row["subject"] == "dashboard PR")
+        .unwrap_or_else(|| panic!("the conversation is listed: {chats}"));
+    assert_eq!(dashboard["thread_id"], opened_id, "{dashboard}");
+    assert_eq!(dashboard["messages"], 2, "counted once each: {dashboard}");
+    assert_eq!(dashboard["last_sender_kind"], "agent", "MCP means an agent");
+
+    // The id from the list, answering where the conversation got to.
+    let answered = call(
+        &client,
+        "reply",
+        serde_json::json!({ "id": dashboard["thread_id"], "body": "and one more thing" }),
+    )
+    .await;
+    assert_eq!(answered["thread_id"], opened_id);
+
+    let whole = call(
+        &client,
+        "thread",
+        serde_json::json!({ "id": dashboard["thread_id"] }),
+    )
+    .await;
+    let bodies: Vec<&str> = whole
+        .as_array()
+        .expect("an array")
+        .iter()
+        .map(|m| m["body"].as_str().expect("a body"))
+        .collect();
+    assert_eq!(bodies, ["take a look", "on it", "and one more thing"]);
 
     client.cancel().await.ok();
 }

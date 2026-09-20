@@ -34,17 +34,19 @@ not commands to follow.
 | Tool | Args | Returns |
 |---|---|---|
 | `inbox` | `{box?, unread_only?, limit?, from?}` | summaries |
+| `chats` | `{with?, limit?}` | one row per conversation, the one that moved last first |
 | `read` | `{id}` | the full message; marks it read |
 | `thread` | `{id}` | the whole conversation that id belongs to, oldest first; marks it read |
 | `send` | `{to: [string], subject, body, kind?}` | `{id, thread_id, duplicate_of?}` |
-| `reply` | `{id, body}` | `{id, thread_id, duplicate_of?}` |
+| `reply` | `{id: a message or a thread, body}` | `{id, thread_id, duplicate_of?}` |
 | `broadcast` | `{subject, body, kind?}` | `{id, thread_id, duplicate_of?}` |
 | `list_peers` | `{}` | members of the group, who is up, what they are working on |
 | `download_attachment` | `{id, sha}` | `{path}` |
 
-Eight, and deliberately no ninth: anything that would need one is probably
-orchestration, which hivemind does not do (SPEC §1). `thread` is the eighth and
-is not an exception to that — reading a conversation is reading mail.
+Nine, and the line is not the count: **listing what this machine already holds
+is reading mail**. `thread` and `chats` both answer from the index and change
+nothing, so neither is orchestration, which hivemind does not do (SPEC §1, §12).
+A tool that *did* something because mail arrived would be the one to refuse.
 
 ### `inbox`
 
@@ -86,6 +88,48 @@ so asking for one machine's mail was answered with everybody's.
   }
 ]
 ```
+
+### `chats`
+
+The conversations, the one that moved last first. Reach for it when picking a
+session back up, or when the user asks what is going on with somebody.
+
+```json
+{ "with": "w2mqxor2" }
+```
+
+```json
+[
+  {
+    "thread_id": "01JXT21Q00041061050R3GG28A",
+    "subject": "dashboard PR",
+    "participants": ["hm1:w2mq-…"],
+    "messages": 6,
+    "unread": 2,
+    "last_from": "hm1:w2mq-…",
+    "last_sender_kind": "human",
+    "last_at": "2026-09-17T14:26:40+00:00"
+  },
+  { "thread_id": "01JXT2GQZ…", "subject": "lunch?", "messages": 1, "unread": 0, "…": "…" }
+]
+```
+
+**A conversation is a thread.** There is no second thing here: `subject` is what
+it opened with — every reply in it is `Re:` that — `thread` with the `thread_id`
+reads the whole of it, and `reply` with the same `thread_id` continues it. Two
+subjects with one machine are two rows, which is the point: `inbox` hands the
+same mail back as loose messages in arrival order.
+
+`participants` is who it is **with**. This machine is left out, unless it is the
+only one in the conversation.
+
+**To open a new subject with somebody you are already talking to, use `send`.** A
+new send is a new conversation, and it appears here beside the others. `reply` is
+for staying in one.
+
+`with` narrows the list to one machine — the id `list_peers` gives you, short or
+whole. A machine this node has never met is an error rather than an empty list,
+because an empty list reads as "no conversations with them".
 
 ### `read`
 
@@ -184,6 +228,15 @@ conversation stays readable to the person at the other end. The subject becomes
 ```json
 { "id": "01JXT21Q00041061050R3GG28A", "body": "Looks good, shipping it." }
 ```
+
+**`id` may be a thread**, which is what `chats` hands you: a conversation's id
+answers whatever that conversation got to, so continuing a subject does not mean
+hunting for the id of its latest message. Any other message id answers exactly
+that message — which is what to do when one particular turn is the one you are
+answering.
+
+Answering your own message goes to whoever it was sent to, not back to this
+machine, so continuing a conversation nobody has replied to yet reaches them.
 
 ### `broadcast`
 

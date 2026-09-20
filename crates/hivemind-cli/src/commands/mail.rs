@@ -1,4 +1,5 @@
-//! The mail verbs: `send`, `inbox`, `sent`, `read`, `reply` and `thread`.
+//! The mail verbs: `send`, `inbox`, `chats`, `sent`, `read`, `reply` and
+//! `thread`.
 //!
 //! Each one is a call to the loopback API and a way of printing what came
 //! back, because the CLI is an HTTP client like any other (SPEC §10). They are
@@ -153,6 +154,108 @@ pub(crate) async fn inbox(
 /// takes it would make a peer being off look like the message vanishing.
 pub(crate) async fn sent(api: &str, limit: usize, json: bool) -> Result<()> {
     listing(api, &[BoxArg::Out, BoxArg::Sent], false, limit, json).await
+}
+
+/// One conversation, as the local API reports it.
+#[derive(Debug, Deserialize)]
+struct Conversation {
+    thread_id: String,
+    subject: String,
+    participants: Vec<String>,
+    messages: usize,
+    unread: usize,
+    last_from: String,
+    last_sender_kind: String,
+    last_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// List the conversations, the one that moved last first (SPEC §10).
+///
+/// A conversation is a thread, so this is `hivemind thread` seen from the
+/// outside: `inbox` shows six messages about one subject and three about
+/// another, with the same machine, as nine mixed lines (#43).
+pub(crate) async fn chats(api: &str, with: Option<&str>, limit: usize, json: bool) -> Result<()> {
+    let mut path = format!("/api/v1/threads?limit={limit}");
+    if let Some(with) = with {
+        // A node id, whole or short: both are URL-safe as they are printed,
+        // and the daemon refuses a machine it does not know rather than
+        // answering with an empty list.
+        path.push_str("&with=");
+        path.push_str(with.trim());
+    }
+
+    let chats: Vec<Conversation> = Client::new(api).get(&path).await?;
+    show_chats(&chats, json)
+}
+
+/// Print the conversation list, the one way this CLI prints one.
+fn show_chats(chats: &[Conversation], json: bool) -> Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &chats
+                    .iter()
+                    .map(|c| {
+                        serde_json::json!({
+                            "thread_id": c.thread_id, "subject": c.subject,
+                            "participants": c.participants, "messages": c.messages,
+                            "unread": c.unread, "last_from": c.last_from,
+                            "last_sender_kind": c.last_sender_kind, "last_at": c.last_at,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            )?
+        );
+        return Ok(());
+    }
+
+    if chats.is_empty() {
+        println!("{}", "no conversations".dimmed());
+        return Ok(());
+    }
+
+    for chat in chats {
+        let marker = if chat.unread > 0 { "●" } else { " " };
+        // The badge says whether the last word was a person's or a Claude's,
+        // which in a conversation is the thing you want before you answer it.
+        let badge = match chat.last_sender_kind.as_str() {
+            "agent" => "[agent]".magenta(),
+            _ => "[human]".cyan(),
+        };
+        let with: Vec<String> = chat.participants.iter().map(|id| short_node(id)).collect();
+
+        println!(
+            "{marker} {} {}",
+            short_id(&chat.thread_id).dimmed(),
+            chat.subject.bold()
+        );
+        println!(
+            "    {} · {badge} {} · {}",
+            with.join(", "),
+            chat.last_at.format("%Y-%m-%d %H:%M").dimmed(),
+            counted(chat.messages, chat.unread).dimmed()
+        );
+    }
+
+    // The two doors out of this list, said once rather than per row. Both take
+    // the id printed above, which is the conversation's.
+    println!();
+    println!(
+        "{}",
+        "read one with `hivemind thread <id>` · answer it with `hivemind reply <id>`".dimmed()
+    );
+    Ok(())
+}
+
+/// How much is in a conversation, and how much of it is new.
+fn counted(messages: usize, unread: usize) -> String {
+    let messages = count_phrase(messages);
+    if unread == 0 {
+        messages
+    } else {
+        format!("{messages}, {unread} unread")
+    }
 }
 
 /// Print one page of the boxes asked for, newest first across all of them.
@@ -743,6 +846,15 @@ mod tests {
     fn a_conversation_of_one_is_not_reported_as_1_messages() {
         assert_eq!(count_phrase(1), "1 message");
         assert_eq!(count_phrase(6), "6 messages");
+    }
+
+    #[test]
+    fn a_conversation_says_how_much_of_it_is_new_only_when_some_of_it_is() {
+        // "6 messages, 0 unread" is a line that makes somebody look twice at a
+        // conversation there is nothing new in.
+        assert_eq!(counted(6, 2), "6 messages, 2 unread");
+        assert_eq!(counted(6, 0), "6 messages");
+        assert_eq!(counted(1, 1), "1 message, 1 unread");
     }
 
     /// A summary with the two fields a wait judges on, and the rest plausible.
