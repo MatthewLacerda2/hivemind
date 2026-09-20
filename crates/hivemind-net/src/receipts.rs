@@ -418,9 +418,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_loop_stops_when_it_is_told_to() {
-        let book = Book::default();
-        let transport = Scripted::accepting(&[]);
+    async fn the_loop_carries_what_is_owed_and_then_stops_when_told_to() {
+        // Both halves in one test on purpose. A loop replaced by `()` also
+        // returns, so "it stopped" alone is satisfied by a courier that never
+        // ran — and that mutant survived until this asserted the pass.
+        let peer = node(1);
+        let book = Book {
+            owed: Mutex::new(vec![owed(100, peer)]),
+            addresses: [(peer, vec!["10.0.0.2:8400".to_owned()])].into(),
+            ..Book::default()
+        };
+        let transport = Scripted::accepting(&["10.0.0.2:8400"]);
         let (stop, wait) = tokio::sync::oneshot::channel::<()>();
         drop(stop);
 
@@ -432,5 +440,12 @@ mod tests {
         )
         .await
         .expect("a courier told to stop must stop");
+
+        assert_eq!(
+            transport.batches().len(),
+            1,
+            "it should have carried the receipt before stopping"
+        );
+        assert!(book.owed().is_empty(), "and settled it");
     }
 }

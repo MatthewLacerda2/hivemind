@@ -163,6 +163,11 @@ pub struct Config {
     ///
     /// This governs what leaves this machine. A receipt that arrives here is
     /// always recorded — that is the other person's choice, already made.
+    ///
+    /// Turning it off does not recall a receipt already queued: it describes a
+    /// read that happened while it was on, and it goes when the node it is for
+    /// comes back. `~/.hivemind/receipts/` is one file per receipt, so
+    /// "not that one either" is a deletion.
     pub read_receipts: bool,
     /// Largest attachment this node will accept.
     pub max_attachment_bytes: u64,

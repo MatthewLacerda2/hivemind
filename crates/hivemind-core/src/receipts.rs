@@ -113,6 +113,27 @@ impl OwedReceipt {
     }
 }
 
+/// Whether a removal counts as settled.
+///
+/// A judgement over an `io::Result` rather than a match inside `settle`, so
+/// both branches are testable anywhere: provoking a real permission failure
+/// needs a directory nobody can write to, which is not the same test on every
+/// machine and is not a test at all as root. The same split `doctor`'s
+/// optional-tool check was given, for the same reason.
+fn settled(removed: std::io::Result<()>, message: Ulid) -> Result<(), StoreError> {
+    match removed {
+        Ok(()) => Ok(()),
+        // Already gone is what the caller asked for.
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        // Anything else is a receipt still on disk that we believe is settled,
+        // and a queue that quietly disagrees with itself is worth a word.
+        Err(source) => Err(StoreError::Io {
+            context: format!("could not settle the receipt for {message}"),
+            source,
+        }),
+    }
+}
+
 /// The queue of receipts this node owes.
 #[derive(Debug, Clone)]
 pub struct ReceiptBook {
@@ -169,14 +190,7 @@ impl ReceiptBook {
     /// # Errors
     /// Returns [`StoreError::Io`] if the file exists but cannot be deleted.
     pub fn settle(&self, message: Ulid) -> Result<(), StoreError> {
-        match fs::remove_file(self.path_of(message)) {
-            Ok(()) => Ok(()),
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(source) => Err(StoreError::Io {
-                context: format!("could not settle the receipt for {message}"),
-                source,
-            }),
-        }
+        settled(fs::remove_file(self.path_of(message)), message)
     }
 
     /// Every receipt still owed, oldest first.
@@ -283,6 +297,25 @@ mod tests {
         let (_dir, book) = book();
         book.settle(Ulid::from_parts(100, 1))
             .expect("the caller wanted it gone and it is gone");
+    }
+
+    #[test]
+    fn a_removal_that_failed_for_any_other_reason_is_reported() {
+        // The `NotFound` arm must not swallow the rest: anything else leaves a
+        // receipt on disk that we believe is settled, and it will be delivered
+        // a second time with nothing saying why.
+        let id = Ulid::from_parts(100, 1);
+        assert!(settled(Ok(()), id).is_ok());
+        assert!(settled(Err(std::io::Error::from(std::io::ErrorKind::NotFound)), id).is_ok());
+        let error = settled(
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            id,
+        )
+        .expect_err("a receipt we cannot remove is not settled");
+        assert!(
+            error.to_string().contains(&id.to_string()),
+            "it should say which one: {error}"
+        );
     }
 
     #[test]

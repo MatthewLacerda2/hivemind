@@ -101,6 +101,11 @@ and the write that follows it.
   problem type covers its one refusal, so no new slug and no new golden vector:
   the body is ordinary JSON with no signature over it, exactly as
   `/peer/v1/hello`'s peer list is.
+- **Turning the switch off does not recall what is already queued.** A receipt
+  in `receipts/` describes a read that happened while the switch was on, and it
+  is delivered when the node it is for comes back. Somebody who means "not that
+  one either" deletes the file — which is why the queue is one plainly named
+  JSON file per receipt rather than a database.
 - **Turning the default on later is a configuration line**, not a redesign. All
   of the mechanism is built either way.
 - **Nothing runs because a receipt arrived.** A field is written and `202` is

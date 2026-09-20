@@ -930,6 +930,60 @@ mod tests {
     }
 
     #[test]
+    fn the_three_delivery_states_round_trip_through_their_names() {
+        // The names are what the API and the CLI print and what the index would
+        // store if it ever stored them, so they are a contract rather than a
+        // debug rendering.
+        assert_eq!(Delivery::Queued.as_str(), "queued");
+        assert_eq!(Delivery::Delivered.as_str(), "delivered");
+        assert_eq!(Delivery::Read.as_str(), "read");
+        for state in Delivery::ALL {
+            assert_eq!(Delivery::from_str_opt(state.as_str()), Some(state));
+        }
+        assert_eq!(Delivery::from_str_opt("opened"), None);
+        assert_eq!(Delivery::from_str_opt(""), None);
+    }
+
+    #[test]
+    fn the_states_order_from_the_weakest_claim_to_the_strongest() {
+        // A listing shows the weakest state any recipient supports, so the
+        // ordering is behaviour rather than a derive nobody reads.
+        assert!(Delivery::Queued < Delivery::Delivered);
+        assert!(Delivery::Delivered < Delivery::Read);
+        assert_eq!(Delivery::ALL.iter().copied().min(), Some(Delivery::Queued));
+    }
+
+    #[test]
+    fn the_outbox_lists_every_entry_in_it_oldest_first() {
+        let (_dir, store) = store();
+        let mut ids = Vec::new();
+        for millis in [300_u64, 100, 200] {
+            let mut message = fixture();
+            message.id = Ulid::from_parts(millis, 0);
+            ids.push(message.id);
+            store
+                .put_outbound(
+                    Mailbox::Out,
+                    &Outbound {
+                        recipients: vec![RecipientState::pending(message.from)],
+                        message,
+                    },
+                )
+                .expect("put_outbound");
+        }
+
+        let listed: Vec<Ulid> = store
+            .list_outbound()
+            .expect("list")
+            .into_iter()
+            .map(|outbound| outbound.message.id)
+            .collect();
+
+        ids.sort_unstable();
+        assert_eq!(listed, ids, "the worker walks the outbox oldest first");
+    }
+
+    #[test]
     fn only_the_two_outgoing_mailboxes_hold_envelopes() {
         assert!(!Mailbox::New.holds_envelopes());
         assert!(!Mailbox::Cur.holds_envelopes());

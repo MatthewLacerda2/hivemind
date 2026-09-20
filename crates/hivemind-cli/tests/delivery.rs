@@ -271,3 +271,84 @@ fn nothing_comes_back_from_a_machine_that_has_not_turned_receipts_on() {
         "reading it must not have been reported"
     );
 }
+
+/// The receipts this machine still owes, read off its disk.
+fn owed_receipts(machine: &Daemon) -> Vec<serde_json::Value> {
+    let dir = machine.home().join("receipts");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|e| e == "json"))
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .filter_map(|text| serde_json::from_str(&text).ok())
+        .collect()
+}
+
+#[test]
+fn a_receipt_waits_on_disk_while_the_sender_is_off_and_clears_when_it_lands() {
+    // ADR 0016's reason for a queue rather than one attempt: the node owed a
+    // receipt may be off for days, exactly as the node owed a message may be.
+    // Asserted from the files, because "it was retried" and "it was sent once
+    // and lost" look identical from the sender's side.
+    let mut sender = Daemon::start("sender");
+    let reader = Daemon::start_with("reader", &[("HIVEMIND_READ_RECEIPTS", "true")]);
+    pair(&sender, &reader);
+
+    sender.run(&[
+        "send",
+        &reader.node_id(),
+        "-s",
+        "read it whenever",
+        "--",
+        "no hurry",
+    ]);
+    let arrived = reader.wait_for("read it whenever");
+    let id = arrived["id"].as_str().expect("an id").to_owned();
+
+    // She reads it with the sender's laptop shut.
+    sender.stop();
+    reader.run(&["read", &id]);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
+    let waiting = loop {
+        let owed = owed_receipts(&reader);
+        if owed
+            .first()
+            .is_some_and(|r| r["attempts"].as_u64() > Some(0))
+        {
+            break owed;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the receipt should be queued and retried: {owed:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    assert_eq!(waiting.len(), 1);
+    assert_eq!(waiting[0]["message"], id);
+    assert!(
+        waiting[0]["last_error"].is_string(),
+        "and it should say what happened: {waiting:?}"
+    );
+
+    // The laptop comes back. The receipt goes, and stops being owed.
+    sender.restart("sender");
+    until(&sender, "read it whenever", "read", |state| {
+        state["read"] == 1
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
+    loop {
+        let owed = owed_receipts(&reader);
+        if owed.is_empty() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a receipt that landed should stop being owed: {owed:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}

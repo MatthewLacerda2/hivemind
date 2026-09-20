@@ -103,10 +103,17 @@ impl MailService {
                 continue;
             }
 
-            // Through `save_outbound` rather than the store directly, because a
-            // receipt is also proof of delivery: it can be the thing that
-            // completes a message and moves it out of `out/`.
-            self.save_outbound(&outbound)?;
+            if mailbox == Mailbox::Out {
+                // Through `save_outbound`, because a receipt is also proof of
+                // delivery and can be the thing that completes a message and
+                // moves it out of `out/`.
+                self.save_outbound(&outbound)?;
+            } else {
+                // Already finished. Writing the envelope back directly rather
+                // than through `save_outbound`, which would announce
+                // `message.delivered` again for something delivered days ago.
+                self.store.put_outbound(Mailbox::Sent, &outbound)?;
+            }
             recorded += 1;
             tracing::info!(
                 id = %note.id,
@@ -350,6 +357,58 @@ mod tests {
                 )
                 .expect("not an error"),
             0
+        );
+    }
+
+    #[test]
+    fn a_receipt_for_something_long_delivered_does_not_announce_it_again() {
+        // `message.delivered` means "it reached everybody", and a receipt
+        // arriving a week later is not that happening a second time.
+        let (_dir, service, ana) = pair_with_receipts(true);
+        let sent = service
+            .send(
+                Draft {
+                    to: vec![Recipient::Node(ana)],
+                    subject: "long gone".to_owned(),
+                    body: "body".to_owned(),
+                    kind: Kind::Message,
+                    in_reply_to: None,
+                    attachments: Vec::new(),
+                },
+                SenderKind::Human,
+            )
+            .expect("send")
+            .message;
+        let mut outbound = service
+            .store
+            .get_outbound(Mailbox::Out, sent.id)
+            .expect("envelope");
+        assert!(outbound.mark_delivered(ana, Utc::now()));
+        service.save_outbound(&outbound).expect("save");
+        assert_eq!(service.get(sent.id).expect("get").0, Mailbox::Sent);
+
+        let mut events = service.subscribe();
+        let read_at = Utc::now().trunc_subsecs(3);
+        assert_eq!(
+            service
+                .record_read_receipts(
+                    ana,
+                    &[ReadNote {
+                        id: sent.id,
+                        read_at
+                    }]
+                )
+                .expect("record"),
+            1
+        );
+
+        assert!(
+            events.try_recv().is_err(),
+            "nothing happened that a client has to hear about"
+        );
+        assert_eq!(
+            service.delivery_of(sent.id).expect("ours").expect("sent")[0].read_at,
+            Some(read_at)
         );
     }
 
