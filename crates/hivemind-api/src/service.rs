@@ -28,7 +28,7 @@ use hivemind_core::peerbook::{
     AddrSource, CertificateDer, Peer, PeerAddr, PeerBook, PeerBookError,
 };
 use hivemind_core::store::{MailStore, Mailbox, Outbound, RecipientState, StoreError};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use ulid::Ulid;
 
 /// How many events a slow subscriber may fall behind before it is dropped.
@@ -286,6 +286,7 @@ pub struct MailService {
     prefetch: bool,
     signing_key: SigningKey,
     events: broadcast::Sender<Event>,
+    closing: watch::Sender<bool>,
 }
 
 /// Who this node says it is when introducing itself (SPEC §7.2).
@@ -353,6 +354,7 @@ impl MailService {
         let group = hivemind_core::group::Group::load(root)?;
 
         let (events, _) = broadcast::channel(EVENT_BUFFER);
+        let (closing, _) = watch::channel(false);
         Ok(Self {
             store,
             blobs,
@@ -381,6 +383,7 @@ impl MailService {
             prefetch: node.prefetch,
             signing_key,
             events,
+            closing,
         })
     }
 
@@ -422,6 +425,32 @@ impl MailService {
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
         self.events.subscribe()
+    }
+
+    /// Tell every open event stream that the daemon is going away (#108).
+    ///
+    /// An SSE subscription is in flight for as long as it is open, and
+    /// `/api/v1/events` is open by design — so a graceful shutdown that waits
+    /// for in-flight connections waits for ever, and launchd's SIGKILL is
+    /// what actually ends the process. The stream needs something to end on.
+    ///
+    /// A signal of its own rather than dropping the event sender, which was
+    /// the other shape on offer: the sender lives in this struct behind an
+    /// `Arc` that every task holds, so dropping it means an `Option` and a
+    /// lock on the path every published event takes — and a `Closed` that
+    /// readers cannot tell from the service having gone away by accident.
+    pub fn close_event_streams(&self) {
+        let _ = self.closing.send(true);
+    }
+
+    /// Watch for [`Self::close_event_streams`].
+    ///
+    /// A `watch` and not a `Notify`, because the value is sticky: a stream
+    /// opened after the daemon began shutting down has to end at once rather
+    /// than wait for a signal that has already been sent.
+    #[must_use]
+    pub fn closing(&self) -> watch::Receiver<bool> {
+        self.closing.subscribe()
     }
 
     fn index(&self) -> Result<std::sync::MutexGuard<'_, Index>, ServiceError> {

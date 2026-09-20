@@ -79,7 +79,8 @@ pub(crate) struct Stream {
     body: hyper::body::Incoming,
     buffer: String,
     // Held, not dropped: in hyper 1.x the connection finishes once the last
-    // `SendRequest` goes away, and this response body never ends by design.
+    // `SendRequest` goes away, and this response body ends only when the
+    // daemon shuts down (#108) or goes away under it.
     _sender: hyper::client::conn::http1::SendRequest<http_body_util::Empty<hyper::body::Bytes>>,
     // Drives the socket. Nothing awaits it: it ends when the daemon does.
     pump: tokio::task::JoinHandle<()>,
@@ -147,12 +148,15 @@ impl Stream {
     ///
     /// # Errors
     /// When the stream stops, however it stops. There is no `None` here on
-    /// purpose: `/api/v1/events` never ends while the daemon is up (SPEC §7.1),
+    /// purpose: `/api/v1/events` ends only when the daemon does (SPEC §7.1),
     /// so an end and a broken connection are one fact — it has gone away — and
     /// a caller that cannot tell either of them from "nothing yet" waits for
-    /// ever, which is the silence this command exists to end (#40). Kept apart,
-    /// the clean-end branch was also unreachable: a daemon that is killed
-    /// leaves a truncated chunked body, which arrives as the error below.
+    /// ever, which is the silence this command exists to end (#40).
+    ///
+    /// Both endings are now reachable and both have to read alike: a daemon
+    /// that is killed leaves a truncated chunked body, which arrives as the
+    /// error below, and one that is stopped politely closes the stream so it
+    /// can drain, which arrives as the clean end (#108).
     pub(crate) async fn next(&mut self) -> Result<Event> {
         loop {
             if let Some(event) = take(&mut self.buffer) {

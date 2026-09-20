@@ -419,6 +419,27 @@ impl Daemon {
     /// stops a service that way), and this is the test that proves mail
     /// survives it.
     pub(crate) fn stop(&mut self) {
+        if self.terminate_within(Duration::from_secs(4)).is_some() {
+            return;
+        }
+        let _ = self.process.kill();
+        let _ = self.process.wait();
+    }
+
+    /// SIGTERM it and say how long it took to go, or `None` if it never did.
+    ///
+    /// The number is the point, and it is why this is not folded into
+    /// [`Self::stop`]: `stop` kills whatever SIGTERM did not, which is right
+    /// for a test that only needs the daemon gone — and which makes a daemon
+    /// that *ignores* SIGTERM indistinguishable from one that obeys it. One
+    /// holding an open event stream ignored it for ever (#108), and a test
+    /// about that has to be able to tell.
+    ///
+    /// Bounded, and it never waits on a process that is not going: the caller
+    /// gets `None` and says what it was waiting for, while `Drop` still kills
+    /// the child. Nothing here can hang.
+    pub(crate) fn terminate_within(&mut self, within: Duration) -> Option<Duration> {
+        let started = Instant::now();
         #[cfg(unix)]
         {
             let _ = Command::new("kill")
@@ -428,15 +449,14 @@ impl Daemon {
                 // output and name a pid nobody is looking for.
                 .stderr(Stdio::null())
                 .status();
-            for _ in 0..200 {
+            while started.elapsed() < within {
                 if matches!(self.process.try_wait(), Ok(Some(_))) {
-                    return;
+                    return Some(started.elapsed());
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
         }
-        let _ = self.process.kill();
-        let _ = self.process.wait();
+        None
     }
 
     /// Kill the daemon outright, the way a crash or a lost battery does.

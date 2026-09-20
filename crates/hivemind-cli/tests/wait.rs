@@ -250,3 +250,36 @@ fn a_daemon_that_dies_mid_wait_ends_the_wait_with_an_error() {
         finished.err
     );
 }
+
+#[test]
+fn a_daemon_that_shuts_down_politely_mid_wait_ends_it_the_same_way() {
+    // The other half of the test above, and reachable only since #108. A
+    // SIGTERM used to leave the daemon running *because* this wait was
+    // attached, so the only way a wait ever ended was the daemon being killed
+    // — and a kill leaves a truncated chunked body, which is a different
+    // branch of the reader from a stream that ends cleanly. Both have to say
+    // the same thing, or `hivemind wait && …` behaves differently depending on
+    // how the daemon went.
+    let mut daemon = Daemon::start("polite");
+    let waiting = Waiting::start(&daemon, &[]);
+
+    // Subscribed and waiting before the daemon goes away, as above.
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(
+        daemon.terminate_within(Duration::from_secs(15)).is_some(),
+        "the daemon ignored SIGTERM with a wait attached, which is #108 itself"
+    );
+
+    let finished = waiting.finish(Duration::from_secs(30));
+    assert_eq!(
+        finished.code,
+        Some(1),
+        "a daemon that has gone is an error however it went: {}",
+        finished.err
+    );
+    assert!(
+        finished.err.contains("stopped sending events"),
+        "and it should say so rather than exiting quietly: {:?}",
+        finished.err
+    );
+}

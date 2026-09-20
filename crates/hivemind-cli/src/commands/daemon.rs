@@ -82,14 +82,30 @@ pub(crate) async fn daemon(home: Option<&Path>, port: u16) -> Result<()> {
     println!("  node   {}", identity.node_id());
     tracing::info!(node = %identity.node_id(), %addr, "hivemind is up");
 
+    // MCP is mounted here rather than inside hivemind-api, so that the API
+    // crate does not depend on the MCP crate that depends on it (SPEC §3).
+    // Built before the shutdown task, which has to be able to close its
+    // sessions.
+    let (mcp, mcp_sessions) = hivemind_mcp::http_service(Arc::clone(&service));
+
     // One shutdown signal, several listeners. `shutdown()` can only be awaited
     // once, so it is fanned out: a Ctrl-C that stopped the local API but left
     // the peer port open would be worse than no graceful shutdown at all.
     let (stopping, _) = tokio::sync::broadcast::channel::<()>(1);
     tokio::spawn({
         let stopping = stopping.clone();
+        let service = Arc::clone(&service);
+        let sessions = mcp_sessions.clone();
         async move {
             shutdown().await;
+            // Both before the server is told to drain rather than after: it
+            // waits for the connections still in flight, and a stream is in
+            // flight until it ends. Without these two lines a daemon with a
+            // browser tab, a `hivemind wait` or a Claude on the MCP endpoint
+            // attached ignored SIGTERM altogether, and launchd's SIGKILL was
+            // what stopped it (#108).
+            service.close_event_streams();
+            sessions.close_all().await;
             let _ = stopping.send(());
         }
     });
@@ -115,10 +131,7 @@ pub(crate) async fn daemon(home: Option<&Path>, port: u16) -> Result<()> {
     )
     .await?;
 
-    // MCP is mounted here rather than inside hivemind-api, so that the API
-    // crate does not depend on the MCP crate that depends on it (SPEC §3).
-    let router = hivemind_api::router(Arc::clone(&service))
-        .nest_service("/mcp", hivemind_mcp::http_service(Arc::clone(&service)));
+    let router = hivemind_api::router(Arc::clone(&service)).nest_service("/mcp", mcp);
 
     axum::serve(listener, router)
         .with_graceful_shutdown(stop())

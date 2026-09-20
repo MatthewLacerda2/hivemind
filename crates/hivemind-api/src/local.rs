@@ -842,10 +842,17 @@ pub(crate) async fn events(
     State(service): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
     let receiver = service.subscribe();
+    let mut closing = service.closing();
     let stream = async_stream::stream! {
         let mut receiver = receiver;
         loop {
-            match receiver.recv().await {
+            let arrived = tokio::select! {
+                arrived = receiver.recv() => arrived,
+                // Ending the stream is what lets this connection drain, and a
+                // graceful shutdown waits on every one that does not (#108).
+                _ = closing.wait_for(|closing| *closing) => break,
+            };
+            match arrived {
                 Ok(event) => {
                     yield Ok(SseEvent::default()
                         .event(event.name())
@@ -890,6 +897,7 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use axum::response::IntoResponse as _;
     use hivemind_core::crypto::SigningKey;
     use hivemind_core::peer::NodeId;
     use http_body_util::BodyExt as _;
@@ -1101,6 +1109,26 @@ mod tests {
         assert_eq!(body["id"], identity.to_string());
         assert_eq!(body["short_id"], identity.short());
         assert_eq!(body["unread"], 0);
+    }
+
+    #[tokio::test]
+    async fn an_event_stream_ends_when_the_daemon_says_it_is_closing() {
+        // The mechanism behind `tests/shutdown.rs`, asserted without a
+        // process: a stream that does not end keeps its connection in flight,
+        // and the graceful shutdown waits on every one of those (#108).
+        let (_dir, _router, service) = app_with_service();
+        let stream = events(State(Arc::clone(&service)))
+            .await
+            .into_response()
+            .into_body();
+
+        service.close_event_streams();
+
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(5), stream.collect()).await;
+        assert!(
+            ended.is_ok(),
+            "the stream should have ended once the daemon said it was closing"
+        );
     }
 
     /// Ask for a path and report the status and body.
