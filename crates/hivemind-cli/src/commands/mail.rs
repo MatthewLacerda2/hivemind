@@ -16,6 +16,8 @@ use crate::events;
 
 use super::short_node;
 
+mod delivery;
+
 #[derive(Debug, Deserialize)]
 struct Accepted {
     id: String,
@@ -94,6 +96,10 @@ struct Summary {
     unread: bool,
     mailbox: String,
     attachment_names: Vec<String>,
+    /// How far it has got with its recipients, for a message this machine
+    /// sent. Absent for mail that arrived here.
+    #[serde(default)]
+    delivery: Option<delivery::Delivery>,
 }
 
 /// Which of the four boxes to list (SPEC §4.3).
@@ -304,6 +310,10 @@ fn show(summaries: &[Summary], json: bool) -> Result<()> {
                             "sender_kind": s.sender_kind, "sent_at": s.sent_at,
                             "unread": s.unread, "mailbox": s.mailbox,
                             "attachment_names": s.attachment_names,
+                            "delivery": s.delivery.as_ref().map(|d| serde_json::json!({
+                                "state": d.state, "recipients": d.recipients,
+                                "delivered": d.delivered, "read": d.read,
+                            })),
                         })
                     })
                     .collect::<Vec<_>>()
@@ -331,13 +341,16 @@ fn show(summaries: &[Summary], json: bool) -> Result<()> {
             format!(" 📎{}", summary.attachment_names.len())
         };
 
-        // A row in `out/` is the answer to "I sent it, did it arrive?", and
-        // printing it like any other would answer yes (#26).
-        let waiting = if summary.mailbox == "out" {
-            " waiting to be delivered".yellow()
-        } else {
-            String::new()
-        };
+        // A row this machine sent is the answer to "I sent it, did it
+        // arrive?", and printing it like any other would answer yes (#26).
+        // The mark says which recipients have it rather than which box it is
+        // in, because a message everybody has is still one somebody asks
+        // about (#31).
+        let state = summary
+            .delivery
+            .as_ref()
+            .map(|d| format!(" {}", delivery::row_coloured(d)))
+            .unwrap_or_default();
 
         println!(
             "{marker} {} {badge} {}{attachments}",
@@ -345,7 +358,7 @@ fn show(summaries: &[Summary], json: bool) -> Result<()> {
             summary.subject.bold(),
         );
         println!(
-            "    {} {}{waiting}",
+            "    {} {}{state}",
             summary.sent_at.format("%Y-%m-%d %H:%M").dimmed(),
             short_node(&summary.from).dimmed()
         );
@@ -364,6 +377,9 @@ struct MessageBody {
     sent_at: chrono::DateTime<chrono::Utc>,
     #[serde(default)]
     attachments: Vec<Attachment>,
+    /// One entry per recipient, for a message this machine sent.
+    #[serde(default)]
+    recipients: Vec<delivery::Recipient>,
 }
 
 /// One attachment, as the local API reports it.
@@ -433,6 +449,11 @@ pub(crate) async fn read(api: &str, id: &str, json: bool) -> Result<()> {
             println!("    {}", attachment.sha256.dimmed());
         }
     }
+
+    // What each recipient did with it, for something this machine sent. The
+    // question #31 is about — "did it arrive, and to whom" — is asked of one
+    // message, and this is where it is answered.
+    delivery::block(&message.recipients);
 
     if others > 0 {
         println!();
@@ -541,6 +562,10 @@ fn as_json(message: &MessageBody) -> serde_json::Value {
         "subject": message.subject, "body": message.body,
         "sender_kind": message.sender_kind, "sent_at": message.sent_at,
         "attachments": message.attachments,
+        "recipients": message.recipients.iter().map(|r| serde_json::json!({
+            "node": r.node, "state": r.state, "delivered_at": r.delivered_at,
+            "read_at": r.read_at, "attempts": r.attempts, "last_error": r.last_error,
+        })).collect::<Vec<_>>(),
     })
 }
 
@@ -869,6 +894,7 @@ mod tests {
             unread: true,
             mailbox: "new".to_owned(),
             attachment_names: Vec::new(),
+            delivery: None,
         }
     }
 

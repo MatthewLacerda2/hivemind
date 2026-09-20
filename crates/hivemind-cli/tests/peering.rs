@@ -569,13 +569,14 @@ fn a_message_to_a_machine_that_is_off_waits_in_out_and_then_shows_as_sent() {
         "asking for a friend",
     ]);
 
-    // Waiting: in `out`, and said to be waiting rather than listed as if it
-    // had landed.
+    // Waiting: in `out`, and marked as such rather than listed as if it had
+    // landed. The words were "waiting to be delivered" until #31 made the mark
+    // say which recipients are owed a copy.
     let waiting = alice.wait_for_sent("did it arrive", "out");
     assert_eq!(waiting["mailbox"], "out");
     let prose = alice.run(&["sent"]);
     assert!(
-        prose.contains("waiting"),
+        prose.contains("· queued"),
         "a message still going out should say so: {prose}"
     );
 
