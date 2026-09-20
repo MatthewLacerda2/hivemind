@@ -10,7 +10,16 @@ COVERAGE_MIN := "85"
 
 # What the coverage gate does not measure: the integration tests themselves,
 # and the CLI, whose behaviour the integration tests cover end to end.
-COV_IGNORE := '(tests/|crates/hivemind-cli/)'
+#
+# llvm-cov searches this against each file's *absolute* path, so the leading
+# `/crates/` is load-bearing. Unanchored, `tests/` matched the worktree's own
+# directory: a branch called `split-local-tests` ignored every file in the
+# workspace, and a floor of 85% passed over an empty report (#91). The other
+# way out, `--remap-path-prefix`, was not taken — it is a compile-time flag, so
+# it rebuilds the world and has to be repeated on every llvm-cov invocation,
+# and cargo-llvm-cov warns it is not fully compatible with doctests. The cost
+# of this one is that it knows the layout, which `just scripts` holds it to.
+COV_IGNORE := '/crates/([^/]+/tests/|hivemind-cli/)'
 
 # A long recipe with nothing to say should not spend a session's context saying
 # it (#71). `quiet.py` runs a command, prints one line when it passes and the

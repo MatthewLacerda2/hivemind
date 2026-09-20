@@ -4,16 +4,22 @@ The interesting cases are all the second kind. A percentage below the floor
 fails, which is easy; output that carries no percentage at all must fail too,
 because "nothing was measured" reads as "0%" to a scraper and as "fine" to
 anybody who only looks for the word FAILED.
+
+The last class here is about the other half of the same incident: the
+expression that decides which files the gate measures at all.
 """
 
 import contextlib
 import io
 import json
 import pathlib
+import re
 import sys
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+
+JUSTFILE = pathlib.Path(__file__).resolve().parents[3] / "justfile"
 
 from coverage import Lines, line_totals, main, parse, verdict  # noqa: E402
 
@@ -172,6 +178,69 @@ class Main(unittest.TestCase):
     def test_no_command_is_refused(self):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(main(["coverage.py", "--floor", "85"]), 2)
+
+
+# A worktree per branch is how this repository is worked, and a branch that
+# touches tests is habitually named for it. This is the one that broke the
+# gate (#91); the paths below are the shape llvm-cov actually sees.
+TESTS_WORKTREE = "/Users/dev/repos/hivemind.worktrees/split-local-tests"
+PLAIN_WORKTREE = "/Users/dev/repos/hivemind"
+
+
+def ignore_expression() -> str:
+    """The expression the justfile hands `cargo llvm-cov --ignore-filename-regex`.
+
+    Read from the justfile rather than restated here, because a copy of it in
+    this file would be a second place to be wrong, and a test asserting on the
+    copy would pass while the gate stayed broken.
+    """
+    for line in JUSTFILE.read_text().splitlines():
+        found = re.fullmatch(r"COV_IGNORE\s*:=\s*'(.*)'", line.strip())
+        if found:
+            return found.group(1)
+    raise AssertionError(f"no COV_IGNORE in {JUSTFILE}")
+
+
+class IgnoredFiles(unittest.TestCase):
+    """llvm-cov searches this expression against each file's *absolute* path.
+
+    `re.search` is the same question llvm-cov asks — Rust's `regex` and
+    Python's `re` agree on this subset, which is character classes and an
+    alternation.
+    """
+
+    def ignored(self, path: str) -> bool:
+        return re.search(ignore_expression(), path) is not None
+
+    def test_a_worktree_named_after_tests_does_not_hide_the_workspace(self):
+        # The failure this came from: every file ignored, an empty report, and
+        # a floor of 85% passing over nothing at all.
+        for path in (
+            f"{TESTS_WORKTREE}/crates/hivemind-api/src/local.rs",
+            f"{TESTS_WORKTREE}/crates/hivemind-core/src/index.rs",
+            f"{TESTS_WORKTREE}/crates/hivemind-net/src/outbox.rs",
+        ):
+            with self.subTest(path=path):
+                self.assertFalse(self.ignored(path))
+
+    def test_the_source_under_measurement_is_measured(self):
+        for path in (
+            f"{PLAIN_WORKTREE}/crates/hivemind-core/src/store.rs",
+            f"{PLAIN_WORKTREE}/crates/hivemind-net/src/transport.rs",
+            f"{PLAIN_WORKTREE}/crates/hivemind-api/src/service.rs",
+        ):
+            with self.subTest(path=path):
+                self.assertFalse(self.ignored(path))
+
+    def test_the_integration_tests_and_the_cli_are_ignored_either_way(self):
+        for root in (PLAIN_WORKTREE, TESTS_WORKTREE):
+            for path in (
+                f"{root}/crates/hivemind-net/tests/delivery.rs",
+                f"{root}/crates/hivemind-cli/tests/end_to_end.rs",
+                f"{root}/crates/hivemind-cli/src/commands.rs",
+            ):
+                with self.subTest(path=path):
+                    self.assertTrue(self.ignored(path))
 
 
 if __name__ == "__main__":
