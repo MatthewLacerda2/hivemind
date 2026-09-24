@@ -41,7 +41,7 @@ clap = { version = "4", features = ["derive", "env"] }
 data-encoding = "2"
 directories = "6"
 owo-colors = "4"
-getrandom = "0.3"
+getrandom = "0.4"
 ed25519-dalek = { version = "3", features = ["alloc", "pkcs8", "rand_core"] }
 # Already compiled for rustls; `hivemind-core` uses its HMAC for the group
 # proof (ADR 0013) rather than adding `hmac` beside it.
