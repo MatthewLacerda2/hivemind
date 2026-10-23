@@ -14,6 +14,11 @@ updates:
 
   - package-ecosystem: github-actions
     directory: /
+    # `dist` generates release.yml and pins its own action versions, so
+    # `just dist-check` fails any hand edit, Dependabot's included (#125).
+    # Upgrading dist is what moves those.
+    exclude-paths:
+      - .github/workflows/release.yml
     schedule:
       interval: weekly
     groups:
