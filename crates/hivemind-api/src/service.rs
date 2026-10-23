@@ -244,6 +244,13 @@ pub struct MailService {
     /// Read receipts this node owes other nodes (ADR 0016). A queue of files
     /// beside `mail/`, retried until the node each is for takes it.
     receipts: ReceiptBook,
+    /// Held to read, change and write back an outgoing envelope.
+    ///
+    /// Two writers change one: the delivery worker, which holds its copy for
+    /// as long as a delivery takes, and an arriving read receipt. Without
+    /// this, a receipt landing between the worker's read and its write was
+    /// overwritten by a copy that predated it.
+    envelopes: Mutex<()>,
     index: Mutex<Index>,
     peers: Mutex<PeerBook>,
     /// The group key, if this node is in a group (ADR 0013).
@@ -376,6 +383,7 @@ impl MailService {
             seen: Mutex::new(std::collections::BTreeMap::new()),
             presence: Mutex::new(std::collections::HashMap::new()),
             woken: Mutex::new(std::collections::HashSet::new()),
+            envelopes: Mutex::new(()),
             candidates: Mutex::new(std::collections::BTreeSet::new()),
             rediscover: std::sync::atomic::AtomicBool::new(false),
             sessions: Mutex::new(sessions::Sessions::new()),
@@ -422,6 +430,10 @@ impl MailService {
     #[must_use]
     pub fn certificate(&self) -> &[u8] {
         &self.certificate
+    }
+
+    fn envelopes(&self) -> Result<std::sync::MutexGuard<'_, ()>, ServiceError> {
+        self.envelopes.lock().map_err(|_| ServiceError::Unavailable)
     }
 
     fn peers(&self) -> Result<std::sync::MutexGuard<'_, PeerBook>, ServiceError> {
