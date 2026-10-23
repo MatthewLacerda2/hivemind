@@ -34,7 +34,6 @@
         "operationId": "status",
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -44,7 +43,6 @@
             }
           },
           "500": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -74,7 +72,6 @@
         },
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -84,7 +81,6 @@
             }
           },
           "409": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -94,7 +90,6 @@
             }
           },
           "500": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -124,7 +119,6 @@
         },
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -134,7 +128,6 @@
             }
           },
           "409": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -144,7 +137,6 @@
             }
           },
           "422": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -164,7 +156,6 @@
         "operationId": "me",
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -174,7 +165,6 @@
             }
           },
           "500": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -281,7 +271,6 @@
         ],
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -294,7 +283,6 @@
             }
           },
           "500": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -322,7 +310,6 @@
         },
         "responses": {
           "202": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -332,7 +319,6 @@
             }
           },
           "422": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -363,7 +349,6 @@
         ],
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -373,7 +358,6 @@
             }
           },
           "404": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -419,7 +403,6 @@
             }
           },
           "404": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -429,7 +412,6 @@
             }
           },
           "502": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -463,7 +445,6 @@
             "description": "Marked read"
           },
           "404": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -504,7 +485,6 @@
         },
         "responses": {
           "202": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -514,7 +494,6 @@
             }
           },
           "404": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -534,7 +513,6 @@
         "operationId": "list_peers",
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -547,7 +525,6 @@
             }
           },
           "500": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -577,7 +554,6 @@
         },
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -587,7 +563,6 @@
             }
           },
           "400": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -597,7 +572,6 @@
             }
           },
           "502": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -617,7 +591,6 @@
         "operationId": "refresh_peers",
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -627,7 +600,6 @@
             }
           },
           "500": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -661,7 +633,6 @@
             "description": "Forgotten"
           },
           "403": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -702,7 +673,6 @@
         },
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -712,7 +682,6 @@
             }
           },
           "403": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -722,7 +691,6 @@
             }
           },
           "404": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -742,7 +710,6 @@
         "operationId": "list_sessions",
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -788,7 +755,6 @@
         },
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -798,7 +764,6 @@
             }
           },
           "422": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -869,7 +834,6 @@
         ],
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -882,7 +846,6 @@
             }
           },
           "400": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -913,7 +876,6 @@
         ],
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -926,7 +888,6 @@
             }
           },
           "404": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -1400,11 +1361,11 @@
           "delivery": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/DeliverySummary",
                 "description": "How its recipients are getting on, for a message this node sent\n(SPEC §8). Absent for received mail, and for one whose only recipient\nwas this machine."
+              },
+              {
+                "type": "null"
               }
             ]
           },

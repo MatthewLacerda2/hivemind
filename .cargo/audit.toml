@@ -1,0 +1,4 @@
+# `just audit` reads this; `deny.toml` carries the reason for every id here,
+# and the two lists are kept in step by hand.
+[advisories]
+ignore = ["RUSTSEC-2026-0374"]

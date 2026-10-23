@@ -17,7 +17,15 @@ targets = [
 version = 2
 # An advisory against anything we ship fails the build. Accepting one means
 # adding it here with a comment saying why and what the exit plan is.
-ignore = []
+# `.cargo/audit.toml` repeats the ids for `just audit`; the reasons live here.
+ignore = [
+    # `basic-toml` is unmaintained: archived, no vulnerability. It reaches us
+    # only through `askama_derive`, which parses `askama.toml` with it inside a
+    # proc-macro at build time, so nothing at runtime touches it. No askama
+    # release has moved off it yet, 0.16.1 included. Exit: drop this the day
+    # askama does, which `cargo tree -i basic-toml` will show as empty.
+    { id = "RUSTSEC-2026-0374", reason = "build-time only, via askama_derive; no askama release avoids it yet" },
+]
 
 [licenses]
 version = 2
