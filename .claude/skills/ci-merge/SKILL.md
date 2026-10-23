@@ -5,7 +5,7 @@ description: Take a finished branch through to merged — the gates, proving CI 
 
 # Getting a branch merged
 
-`CLAUDE.md` carries why these exist; this is how. Every trap below has cost
+`CLAUDE.md` carries the rules; this is how. Every trap below has cost
 something in this repo, and each says what.
 
 ## Before marking a pull request ready
@@ -124,6 +124,15 @@ is asserting its mechanism.** That is what it is uniquely good at, and the
 case that earned it here: `outbox.rs` at 85–90% coverage with 19 survivors,
 every method replaceable by a no-op. A module, deliberately — not a diff, out
 of habit.
+
+**Coverage and mutation measure different things, and the gap between them is
+where bugs live.** `outbox.rs`'s lines all executed during the integration
+tests and nothing asserted on them. The sharpest survivor was `due_a_greeting`,
+which survived `true`, `false` and both sides of its comparison: the limit that
+stops an mDNS browse result becoming a TLS handshake every minute was entirely
+unasserted. A whole module like that is **one finding about the tests**, not a
+list of survivors. Stop and fix that; a scattered survivor in code this branch
+did not write can wait.
 
 When it does run, read the report for survivors in code **this branch wrote**.
 Sort by cost: fix what is cheap while the code is in hand; file a real bug and
