@@ -89,6 +89,10 @@ jobs:
       - name: File sizes
         run: just size
 
+      # Fixed caps on what an agent reads and on the scripts. See limits.py.
+      - name: Agent docs and script sizes
+        run: just limits
+
       - name: Architectural boundaries
         run: just boundaries
 

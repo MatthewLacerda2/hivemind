@@ -188,6 +188,12 @@ fuzz target="" seconds="60":
 size *ARGS:
     python3 .github/scripts/size.py {{ARGS}}
 
+# Fixed, not a ratchet, and prose counts: CLAUDE.md is read by every session.
+
+# [gate] CLAUDE.md, the skills and the scripts within their fixed caps
+limits:
+    python3 .github/scripts/limits.py
+
 # [gate] The layering SPEC §3.1 and §10 describe, held to rather than hoped for.
 boundaries:
     python3 .github/scripts/boundaries.py
@@ -286,7 +292,7 @@ web-build:
 #
 # `workspace` is first and deliberately so: it is the one gate whose failure
 # makes every other gate's answer meaningless, and it costs milliseconds.
-CI_GATES := "workspace fmt-check lint size boundaries markers doc test scripts deny openapi-check web-build dist-check cov-gate"
+CI_GATES := "workspace fmt-check lint size limits boundaries markers doc test scripts deny openapi-check web-build dist-check cov-gate"
 
 # The gates that already wrap their own work in quiet.py, because they are worth
 # running on their own too. They are streamed rather than summarised again: their

@@ -74,6 +74,18 @@ skip = [
     { crate = "getrandom@0.4", reason = "build-only, via cc/cmake for bundled SQLite" },
 ]
 skip-tree = []
+deny = [
+    # A second cryptography backend beside the `ring` this workspace chose.
+    # Cargo unifies features, so whatever asks rustls for it turns it on for
+    # `hivemind-net` too, and rustls then cannot pick a default provider: that
+    # was the M3 panic. It arrived through reqwest's hyper-rustls.
+    { crate = "aws-lc-rs", reason = "a second crypto backend; rustls panicked over it in M3" },
+    { crate = "aws-lc-sys", reason = "a second crypto backend; rustls panicked over it in M3" },
+    # HTTP clients here are written against hyper, and each says why in its
+    # module doc: reqwest brought 107 crates to talk to 127.0.0.1. The one
+    # exception is rmcp's MCP client, which only hivemind-cli's tests use.
+    { crate = "reqwest", wrappers = ["rmcp"], reason = "clients here are written against hyper" },
+]
 
 [sources]
 unknown-registry = "deny"

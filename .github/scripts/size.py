@@ -269,7 +269,9 @@ def main(argv: list[str]) -> int:
     print(
         "\nSplit it by concern — group into a subfolder rather than adding a"
         " filename prefix. The limits are a ratchet: they come down as files"
-        " are split and are never raised.",
+        " are split and are never raised. The branch that hits the limit pays"
+        " for the split, as an issue of its own rather than a refactor inside"
+        " a feature diff (#100).",
         file=sys.stderr,
     )
     return 1
