@@ -80,6 +80,35 @@ impl PeerAddr {
         self.port == own_peer_port && host_is_this_machine(&self.host)
     }
 
+    /// Is this a link-local address, `fe80::/10` or `169.254.0.0/16`?
+    ///
+    /// One of those means something only together with the zone of an
+    /// interface on the machine dialling it, and the zone does not travel —
+    /// not in mDNS, not in a hello, not in `peers.toml`. So it is not an
+    /// address that fails today; it is one that cannot succeed (#124). mDNS
+    /// on a Mac reports one per interface, and a book that held seventeen of
+    /// them spent seventeen failed connections on every attempt.
+    #[must_use]
+    pub fn is_link_local(&self) -> bool {
+        match ip_literal(&self.host) {
+            Some(std::net::IpAddr::V4(ip)) => ip.is_link_local(),
+            Some(std::net::IpAddr::V6(ip)) => ip.is_unicast_link_local(),
+            None => false,
+        }
+    }
+
+    /// Why this node will not use this address, if it will not.
+    #[must_use]
+    pub fn unusable(&self, own_peer_port: u16) -> Option<Unusable> {
+        if self.points_at_this_node(own_peer_port) {
+            Some(Unusable::ThisNode)
+        } else if self.is_link_local() {
+            Some(Unusable::LinkLocal)
+        } else {
+            None
+        }
+    }
+
     /// `host:port`, for a connection attempt.
     #[must_use]
     pub fn authority(&self) -> String {
@@ -97,14 +126,33 @@ impl PeerAddr {
 /// `localhost`, because a hostname is not resolved here and a `MagicDNS` name
 /// outlives the address behind it (#23).
 fn host_is_this_machine(host: &str) -> bool {
+    match ip_literal(host) {
+        Some(ip) => ip.is_loopback() || ip.is_unspecified(),
+        None => host.eq_ignore_ascii_case("localhost"),
+    }
+}
+
+/// `host` as an IP address, if it is a literal one.
+///
+/// Brackets and a `%zone` are taken off first: neither is part of the address,
+/// and `std` parses neither.
+fn ip_literal(host: &str) -> Option<std::net::IpAddr> {
     let bare = host
         .strip_prefix('[')
         .and_then(|h| h.strip_suffix(']'))
         .unwrap_or(host);
-    match bare.parse::<std::net::IpAddr>() {
-        Ok(ip) => ip.is_loopback() || ip.is_unspecified(),
-        Err(_) => bare.eq_ignore_ascii_case("localhost"),
-    }
+    let bare = bare.split_once('%').map_or(bare, |(ip, _zone)| ip);
+    bare.parse().ok()
+}
+
+/// Why an address in the book is one this node will not use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unusable {
+    /// It is this node's own peer listener (#23, #29).
+    ThisNode,
+    /// It is link-local, and cannot be dialled without a zone it never
+    /// carries (#124).
+    LinkLocal,
 }
 
 /// An address the address book refused to read back, and whose peer it was
@@ -118,6 +166,8 @@ pub struct DiscardedAddr {
     pub peer: NodeId,
     /// `host:port`, as it reads in the file.
     pub authority: String,
+    /// Why it was refused.
+    pub reason: Unusable,
 }
 
 /// A machine we have paired with (SPEC §4.2).
@@ -185,7 +235,14 @@ impl Peer {
     }
 
     /// Add an address we did not already know, or refresh how we learned it.
+    ///
+    /// A link-local address is not learned at all: it can never be dialled
+    /// from here (#124), and every one kept is a failed connection on every
+    /// delivery attempt.
     pub fn learn_addr(&mut self, addr: PeerAddr) {
+        if addr.is_link_local() {
+            return;
+        }
         match self
             .addrs
             .iter_mut()
@@ -346,7 +403,7 @@ impl PeerBook {
             own_peer_port,
             discarded: Vec::new(),
         };
-        book.discard_addrs_that_point_here();
+        book.discard_unusable_addrs();
         Ok(book)
     }
 
@@ -408,7 +465,8 @@ impl PeerBook {
         Ok(())
     }
 
-    /// Take out every address that is this node's own listener.
+    /// Take out every address this node cannot use: its own listener, and
+    /// anything link-local.
     ///
     /// In memory, and not written back here: `load` is a read, and a read that
     /// rewrites its input would fail on a read-only home and would eat the
@@ -416,20 +474,21 @@ impl PeerBook {
     /// source of truth (ADR 0002), so it is edited when something asks — the
     /// next save for any reason writes the corrected book, and
     /// `hivemind peers forget-addr` asks for it now.
-    fn discard_addrs_that_point_here(&mut self) {
+    fn discard_unusable_addrs(&mut self) {
         let own_port = self.own_peer_port;
         let mut discarded = Vec::new();
         for peer in self.file.peers.values_mut() {
             let id = peer.id;
             peer.addrs.retain(|addr| {
-                if addr.points_at_this_node(own_port) {
-                    discarded.push(DiscardedAddr {
-                        peer: id,
-                        authority: addr.authority(),
-                    });
-                    return false;
-                }
-                true
+                let Some(reason) = addr.unusable(own_port) else {
+                    return true;
+                };
+                discarded.push(DiscardedAddr {
+                    peer: id,
+                    authority: addr.authority(),
+                    reason,
+                });
+                false
             });
         }
         self.discarded = discarded;
@@ -901,6 +960,79 @@ source = "manual"
                 .expect("read")
                 .contains("127.0.0.1")
         );
+    }
+
+    #[test]
+    fn a_link_local_address_does_not_survive_the_read() {
+        // #124: seventeen of these, and the one address that worked from the
+        // office was not among them. Read through the same door as #29's
+        // loopback, so `doctor` names them and the next save drops them.
+        let id = "hm1:nidx-mhdl-c4gx-u3a4-ymm5-jzsx-tcep-baeg-pjdr-vqb2-od2s-6dn6-ig2q";
+        let flooded = POISONED.replace("127.0.0.1", "fe80::9836:41ff:feb7:a006")
+            + &format!(
+                "\n[[peers.\"{id}\".addrs]]\nhost = \"169.254.7.7\"\nport = 8400\nsource = \"mdns\"\n"
+            );
+        let (dir, _) = book_holding(&flooded);
+        let book = PeerBook::load(dir.path(), OWN_PORT).expect("load");
+
+        let peer = book.peers().next().expect("the peer itself must survive");
+        let kept: Vec<String> = peer.addrs.iter().map(PeerAddr::authority).collect();
+        assert_eq!(kept, ["100.102.24.1:8400"]);
+
+        let discarded: Vec<(&str, Unusable)> = book
+            .discarded()
+            .iter()
+            .map(|d| (d.authority.as_str(), d.reason))
+            .collect();
+        assert_eq!(
+            discarded,
+            [
+                ("[fe80::9836:41ff:feb7:a006]:8400", Unusable::LinkLocal),
+                ("169.254.7.7:8400", Unusable::LinkLocal),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_link_local_address_is_never_learned() {
+        let mut peer = peer(b"on the LAN", None);
+        peer.learn_addr(PeerAddr::manual("fe80::1", 8400));
+        peer.learn_addr(PeerAddr::manual("169.254.1.2", 8400));
+        let kept: Vec<String> = peer.addrs.iter().map(PeerAddr::authority).collect();
+        assert_eq!(kept, ["10.0.0.1:8400"], "only the address it started with");
+    }
+
+    #[test]
+    fn only_a_link_local_literal_is_link_local() {
+        for host in [
+            "fe80::1",
+            "[fe80::1]",
+            "fe80::1%en0",
+            "FE80::A09A:8EFF:FEA8:5965",
+            "febf::1",
+            "169.254.0.1",
+            "169.254.255.254",
+        ] {
+            assert!(
+                PeerAddr::manual(host, OWN_PORT).is_link_local(),
+                "{host} is link-local"
+            );
+        }
+        for host in [
+            "fec0::1",
+            "fe7f::1",
+            "169.253.0.1",
+            "169.255.0.1",
+            "192.168.1.8",
+            "100.116.89.94",
+            "fe80.example",
+            "archlinux.tail6cefda.ts.net",
+        ] {
+            assert!(
+                !PeerAddr::manual(host, OWN_PORT).is_link_local(),
+                "{host} can be dialled from another machine"
+            );
+        }
     }
 
     #[test]

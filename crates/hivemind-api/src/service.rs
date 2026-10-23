@@ -25,7 +25,7 @@ use hivemind_core::message::{
 };
 use hivemind_core::peer::NodeId;
 use hivemind_core::peerbook::{
-    AddrSource, CertificateDer, Peer, PeerAddr, PeerBook, PeerBookError,
+    AddrSource, CertificateDer, Peer, PeerAddr, PeerBook, PeerBookError, Unusable,
 };
 use hivemind_core::receipts::ReceiptBook;
 use hivemind_core::store::{MailStore, Mailbox, Outbound, RecipientState, StoreError};
@@ -359,14 +359,19 @@ impl MailService {
         index.rebuild_from(&store)?;
         let peers = PeerBook::load(root, node.peer_port)?;
         // Said out loud, once, at start: a peers.toml written before #23 holds
-        // this node's own loopback as the way to reach somebody else, and an
-        // address quietly vanishing is worse than the address.
+        // this node's own loopback as the way to reach somebody else, one
+        // written before #124 holds link-local addresses nobody can dial, and
+        // an address quietly vanishing is worse than the address.
         for discarded in peers.discarded() {
             tracing::warn!(
                 peer = %discarded.peer.short(),
                 addr = %discarded.authority,
-                "ignoring an address in peers.toml that points at this node; \
-                 `hivemind peers forget-addr` takes it out of the file"
+                "ignoring an address in peers.toml that {}; \
+                 `hivemind peers forget-addr` takes it out of the file",
+                match discarded.reason {
+                    Unusable::ThisNode => "points at this node",
+                    Unusable::LinkLocal => "is link-local",
+                }
             );
         }
         let group = hivemind_core::group::Group::load(root)?;

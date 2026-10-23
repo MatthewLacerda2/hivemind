@@ -160,6 +160,7 @@ impl MailService {
             addr,
             last_seen: Utc::now(),
             was_a_member: false,
+            former_addrs: Vec::new(),
         })))
     }
 
@@ -180,6 +181,14 @@ impl MailService {
         certificate: Vec<u8>,
         addr: PeerAddr,
     ) -> Result<Peer, ServiceError> {
+        // Read before the book is locked, so the two locks are never held
+        // together. Empty unless this is a member dropped for the key and
+        // proving it again (#124).
+        let former_addrs = self
+            .seen_node(id)
+            .map(|node| node.former_addrs)
+            .unwrap_or_default();
+
         let mut peers = self.peers()?;
         if let Some(peer) = peers.peer_mut(id) {
             revise(peer, name, owner);
@@ -190,15 +199,18 @@ impl MailService {
             return Ok(peer);
         }
 
-        let peer = Peer {
+        let mut peer = Peer {
             id,
             name: name.to_owned(),
             owner: owner.map(str::to_owned),
             certificate: CertificateDer::new(certificate),
-            addrs: vec![addr],
+            // Starting from the old addresses rather than adding them keeps
+            // when each last worked, which is what orders the attempts.
+            addrs: former_addrs,
             paired_at: Utc::now(),
             last_seen: Some(Utc::now()),
         };
+        peer.learn_addr(addr);
         peers.insert_peer(peer.clone());
         peers.save()?;
         drop(peers);
