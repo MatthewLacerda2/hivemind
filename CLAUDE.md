@@ -13,6 +13,9 @@ Much of what follows was learned by getting it wrong once. Where that is true it
 says so, because a rule with its incident attached can be re-judged, and one
 without can only be obeyed or ignored.
 
+**Capped at 300 lines** (`just limits`): every session reads all of it. A rule
+a tool enforces belongs in that tool's failure message, not here.
+
 ## North star
 
 A small, always-on daemon that lets developers on the same LAN or Tailscale
@@ -202,6 +205,9 @@ the branch that split something. **`just size --report` lists what to split
 next.** The branch that hits the cap pays for the split, as an issue of its
 own (#100). Split by concern into a subfolder rather than adding a filename
 prefix.
+
+`just limits` holds the rest at fixed caps, prose included: `CLAUDE.md`, the
+skills' Markdown and headers, and the Python and TypeScript.
 
 ## Documentation that cannot drift
 

@@ -26,6 +26,14 @@ repos:
 
   - repo: local
     hooks:
+      # Milliseconds, so it runs on every commit rather than waiting for CI.
+      - id: limits
+        name: just limits
+        entry: python3 .github/scripts/limits.py
+        language: system
+        pass_filenames: false
+        always_run: true
+
       - id: fmt
         name: cargo fmt
         entry: cargo fmt --all -- --check
