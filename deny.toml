@@ -71,6 +71,12 @@ skip = [
     # Way out: drop each entry when ring and tempfile move to getrandom 0.4.
     { crate = "getrandom@0.2", reason = "ring has not moved to getrandom 0.4 yet" },
     { crate = "getrandom@0.3", reason = "tempfile has not moved to getrandom 0.4 yet" },
+
+    # reqwest still asks for 0.6, and reaches us only as rmcp's MCP client in
+    # hivemind-cli's tests, so the cost is test compile time and nothing in
+    # the shipped binary.
+    # Way out: drop this when reqwest moves to tower-http 0.7.
+    { crate = "tower-http@0.6", reason = "reqwest, dev-only via rmcp's client, is on 0.6" },
 ]
 skip-tree = []
 deny = [
