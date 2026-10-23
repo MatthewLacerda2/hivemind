@@ -256,6 +256,9 @@ fn home_check(home: &Path) -> Check {
 
 /// Does the address book hold an address that cannot reach anybody?
 ///
+/// Two kinds: this machine's own listener (#29), and a link-local address,
+/// which needs a zone it never carries (#124).
+///
 /// Read from the file rather than asked of the daemon, because the daemon
 /// discards these as it loads the book and so would never report one (#29). The
 /// line is still in `peers.toml`, and stays there until something writes the
@@ -278,13 +281,22 @@ fn addresses_check(home: &Path, peer_port: u16) -> Check {
     };
 
     match book.discarded() {
-        [] => Check::good("addresses", "none point back at this machine"),
+        [] => Check::good(
+            "addresses",
+            "none point back at this machine or are link-local",
+        ),
         [first, rest @ ..] => Check::bad(
             "addresses",
             format!(
-                "peers.toml gives {} as the way to reach {}, which is this machine{}",
+                "peers.toml gives {} as the way to reach {}, which {}{}",
                 first.authority,
                 first.peer.short(),
+                match first.reason {
+                    hivemind_core::peerbook::Unusable::ThisNode => "is this machine",
+                    hivemind_core::peerbook::Unusable::LinkLocal => {
+                        "is link-local and cannot be dialled from another machine"
+                    }
+                },
                 if rest.is_empty() {
                     String::new()
                 } else {
@@ -585,6 +597,11 @@ mod tests {
     /// `PeerBook` with a different own-port, which is how such a file came to
     /// exist — the daemon that wrote it did not know the rule.
     fn book_with_our_own_loopback(dir: &Path) -> String {
+        book_with_beside_the_real_one(dir, "127.0.0.1")
+    }
+
+    /// An address book holding the peer's real address and `host` beside it.
+    fn book_with_beside_the_real_one(dir: &Path, host: &str) -> String {
         use hivemind_core::peerbook::{CertificateDer, Peer, PeerAddr, PeerBook};
 
         let certificate = CertificateDer::new(b"their certificate".to_vec());
@@ -597,7 +614,7 @@ mod tests {
             certificate,
             addrs: vec![
                 PeerAddr::manual("100.102.24.1", 8400),
-                PeerAddr::manual("127.0.0.1", 8400),
+                PeerAddr::manual(host, 8400),
             ],
             paired_at: chrono::Utc::now(),
             last_seen: None,
@@ -624,6 +641,28 @@ mod tests {
         assert!(
             fix.contains(&format!("peers forget-addr {short} 127.0.0.1:8400")),
             "and the command that removes it, ready to paste: {fix}"
+        );
+    }
+
+    #[test]
+    fn a_link_local_address_is_named_as_one_rather_than_as_this_machine() {
+        // #124. The same door as #29's loopback, and a different fault: a
+        // person told "which is this machine" about `fe80::…` would go looking
+        // for the wrong thing.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let short = book_with_beside_the_real_one(dir.path(), "fe80::1");
+
+        let check = addresses_check(dir.path(), 8400);
+        assert_eq!(check.health, Health::Bad);
+        assert!(
+            check.detail.contains("[fe80::1]:8400") && check.detail.contains("link-local"),
+            "it has to say what kind of address it is: {check:?}"
+        );
+        assert!(!check.detail.contains("this machine"), "{check:?}");
+        let fix = check.fix.as_deref().unwrap_or_default();
+        assert!(
+            fix.contains(&format!("peers forget-addr {short} [fe80::1]:8400")),
+            "{fix}"
         );
     }
 

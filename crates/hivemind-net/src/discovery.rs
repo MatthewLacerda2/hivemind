@@ -301,6 +301,13 @@ pub async fn run_mdns<S, F>(
             if found.id == id {
                 continue;
             }
+            // A Mac answers on a link-local address per interface, and none
+            // can be dialled without a zone we do not have (#124). Passed on,
+            // each would be greeted and fail, and stand in for the node's
+            // real address on the seen list.
+            if found.addr.is_link_local() {
+                continue;
+            }
             sink.seen(found);
         }
     }
