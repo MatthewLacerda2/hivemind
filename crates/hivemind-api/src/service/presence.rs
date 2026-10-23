@@ -124,18 +124,7 @@ impl MailService {
         let greetings = peers.iter().map(|peer| self.say_hello_to(peer));
         futures_util::future::join_all(greetings).await;
 
-        // Nodes that were members until a rotation took them out. They are
-        // one pasted code away from being members again, and nothing else
-        // would ever greet them: a round greets peers, and these are not.
-        // Bounded by the seen list, which holds at most `MAX_SEEN`.
-        let returning: Vec<String> = self
-            .seen_nodes()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|node| node.was_a_member)
-            .map(|node| node.addr.authority())
-            .collect();
-        self.note_candidates(returning);
+        self.note_candidates(self.returning_members());
 
         // Gossip about a node we do not peer with, another member's "X is
         // up", and the ex-members above. All are claims, and this is the
@@ -482,12 +471,40 @@ impl MailService {
         }
     }
 
+    /// Where to greet the nodes that were members until a rotation took them
+    /// out.
+    ///
+    /// They are one pasted code away from being members again, and nothing
+    /// else would ever greet them: a round greets peers, and these are not.
+    /// Every address each had as a member, not only the one it was last seen
+    /// at — on a tailnet the address it answered from may be the one that
+    /// stops working first (#124). Bounded by the seen list, which holds at
+    /// most `MAX_SEEN`.
+    fn returning_members(&self) -> Vec<String> {
+        let mut authorities: Vec<String> = Vec::new();
+        for node in self.seen_nodes().unwrap_or_default() {
+            if !node.was_a_member {
+                continue;
+            }
+            for addr in node.former_addrs.iter().chain([&node.addr]) {
+                let authority = addr.authority();
+                if !authorities.contains(&authority) {
+                    authorities.push(authority);
+                }
+            }
+        }
+        authorities
+    }
+
     /// Drop a node that can no longer prove the key (SPEC §6.2.4).
     fn retire(&self, id: NodeId, name: Option<String>, owner: Option<String>, addr: PeerAddr) {
-        let was_a_peer = self
-            .peers()
-            .ok()
-            .is_some_and(|mut peers| peers.remove_peer(id) && peers.save().is_ok());
+        // Its addresses go with its entry, so they are taken out first: they
+        // are how it is found again, and what it comes back with (#124).
+        let former_addrs = self.peers().ok().and_then(|mut peers| {
+            let addrs = peers.peer(id)?.addrs.clone();
+            (peers.remove_peer(id) && peers.save().is_ok()).then_some(addrs)
+        });
+        let was_a_peer = former_addrs.is_some();
         if was_a_peer {
             tracing::info!(
                 peer = %id.short(),
@@ -503,7 +520,7 @@ impl MailService {
             // either of them, because a round greets peers and this is no
             // longer one. On a tailnet, with no mDNS to find anybody again,
             // that partition is permanent.
-            self.mark_was_a_member(id);
+            self.mark_was_a_member(id, former_addrs.unwrap_or_default());
         }
     }
 }
@@ -606,5 +623,80 @@ mod tests {
         // Nobody configures this, but `checked_mul` has two answers and the
         // wrong one would make every peer permanently offline.
         assert!(still_here(Duration::from_secs(1), Duration::MAX));
+    }
+
+    /// A member pinned at a `MagicDNS` name and a LAN address, then dropped
+    /// because the hello it sent carried no proof — which is what a rotation
+    /// looks like from the side holding the new key.
+    fn dropped_member(service: &MailService) -> (NodeId, Vec<u8>) {
+        let friend = hivemind_core::identity::Identity::from_seed([124; 32]).expect("identity");
+        let id = friend.node_id();
+        let certificate = friend.certificate_der().to_vec();
+        for host in ["archlinux.tail6cefda.ts.net", "192.168.1.8"] {
+            service
+                .admit(
+                    id,
+                    "archlinux",
+                    None,
+                    certificate.clone(),
+                    PeerAddr::manual(host, 8400),
+                )
+                .expect("admit");
+        }
+
+        let refused = service.answer_hello(
+            id,
+            &hello(id, "archlinux", None),
+            &certificate,
+            PeerAddr::manual("192.168.1.8", 8400),
+        );
+        assert!(refused.is_err(), "a hello with no proof is refused");
+        assert!(
+            !service.is_paired(id).expect("is_paired"),
+            "and it is dropped"
+        );
+        (id, certificate)
+    }
+
+    #[test]
+    fn a_dropped_member_comes_back_with_every_address_it_had() {
+        // #124. Re-admitted over the home LAN, it came back with the LAN
+        // address alone, and the MagicDNS name a human had typed was gone: a
+        // laptop at the office had no way left to reach a machine that was up.
+        let (_dir, service) = crate::service::tests::service();
+        let (id, certificate) = dropped_member(&service);
+
+        let back = service
+            .admit(
+                id,
+                "archlinux",
+                None,
+                certificate,
+                PeerAddr::manual("192.168.1.8", 8400),
+            )
+            .expect("it proves the key again");
+        let mut addrs: Vec<String> = back.addrs.iter().map(PeerAddr::authority).collect();
+        addrs.sort();
+        assert_eq!(
+            addrs,
+            ["192.168.1.8:8400", "archlinux.tail6cefda.ts.net:8400"]
+        );
+    }
+
+    #[test]
+    fn a_dropped_member_is_greeted_at_every_address_it_had() {
+        // The address it was last seen at is the LAN one; from anywhere else
+        // that is the one that cannot work, and a greeting only there would
+        // leave the partition `retire` was written to avoid.
+        let (_dir, service) = crate::service::tests::service();
+        dropped_member(&service);
+
+        let mut greeted = service.returning_members();
+        greeted.sort();
+        assert_eq!(
+            greeted,
+            ["192.168.1.8:8400", "archlinux.tail6cefda.ts.net:8400"],
+            "each once, though the LAN address is both former and last seen"
+        );
     }
 }

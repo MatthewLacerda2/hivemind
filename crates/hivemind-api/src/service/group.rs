@@ -52,6 +52,17 @@ pub struct SeenNode {
     /// yet pasted the new code — including the ones about to — and without
     /// this nothing ever greets them again.
     pub was_a_member: bool,
+    /// Everywhere it could be reached while it was a member. Empty for a
+    /// node that never was.
+    ///
+    /// Dropping a member takes its entry out of `peers.toml`, and with it
+    /// every address the book had gathered — a typed `hivemind join`, a
+    /// `MagicDNS` name, what gossip brought. Coming back through whichever
+    /// address happened to answer, it used to come back with that one alone:
+    /// a laptop re-admitted over the home LAN had nothing left to reach it
+    /// from the office (#124). These are what it is greeted at, and what its
+    /// entry starts from when it proves the key again.
+    pub former_addrs: Vec<PeerAddr>,
 }
 
 impl MailService {
@@ -227,6 +238,7 @@ impl MailService {
             addr: addr.clone(),
             last_seen: Utc::now(),
             was_a_member: false,
+            former_addrs: Vec::new(),
         });
         // A refusal says nothing but the certificate. Keep what mDNS said
         // earlier rather than forgetting the node's name because of it.
@@ -261,16 +273,18 @@ impl MailService {
         Ok(nodes)
     }
 
-    /// Note that a node on the seen list used to be a member.
+    /// Note that a node on the seen list used to be a member, and where it
+    /// could be reached while it was.
     ///
     /// Separate from [`Self::record_seen`] because every other caller is
-    /// describing a node that was never in the group, and a boolean argument
-    /// at five call sites reads as noise at four of them.
-    pub(crate) fn mark_was_a_member(&self, id: NodeId) {
+    /// describing a node that was never in the group, and arguments that only
+    /// one of five call sites has anything to say in read as noise at four.
+    pub(crate) fn mark_was_a_member(&self, id: NodeId, addrs: Vec<PeerAddr>) {
         if let Ok(mut seen) = self.seen.lock()
             && let Some(node) = seen.get_mut(&id)
         {
             node.was_a_member = true;
+            node.former_addrs = addrs;
         }
     }
 
