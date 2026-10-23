@@ -188,6 +188,33 @@ impl MailService {
     pub fn pending_outbound(&self) -> Result<Vec<Outbound>, ServiceError> {
         Ok(self.store.list_outbound()?)
     }
+    /// Write back what one delivery pass found, without undoing what
+    /// happened while it was out.
+    ///
+    /// The pass's copy was read before it sent anything, and a read receipt
+    /// may have been recorded since — one that can also have finished the
+    /// message and moved it to `sent/`. So the copy on disk is read again
+    /// under the lock and the two are merged rather than the older one
+    /// written over the newer.
+    ///
+    /// An envelope gone from `out/` is left alone: either a receipt finished
+    /// it, and `sent/` already holds everything the pass learned, or it was
+    /// removed, and writing it back would bring it back.
+    ///
+    /// # Errors
+    /// [`ServiceError::Store`] or [`ServiceError::Index`].
+    pub fn save_delivery_progress(&self, progress: &Outbound) -> Result<(), ServiceError> {
+        let _envelopes = self.envelopes()?;
+        let on_disk = match self.store.get_outbound(Mailbox::Out, progress.message.id) {
+            Ok(on_disk) => on_disk,
+            Err(StoreError::NotFound { .. }) => return Ok(()),
+            Err(other) => return Err(other.into()),
+        };
+        let mut merged = progress.clone();
+        merged.take_progress_from(&on_disk);
+        self.save_outbound(&merged)
+    }
+
     /// Write delivery progress back, finishing the message if it is complete.
     ///
     /// # Errors

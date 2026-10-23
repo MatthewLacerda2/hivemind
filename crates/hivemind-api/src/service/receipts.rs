@@ -90,6 +90,9 @@ impl MailService {
         reader: NodeId,
         notes: &[ReadNote],
     ) -> Result<usize, ServiceError> {
+        // For the whole batch: each envelope is read, changed and written
+        // back, and the delivery worker may be holding a copy of it.
+        let _envelopes = self.envelopes()?;
         let mut recorded = 0;
         for note in notes {
             let Some(mailbox) = self.outgoing_mailbox_of(note.id)? else {
@@ -410,6 +413,129 @@ mod tests {
             service.delivery_of(sent.id).expect("ours").expect("sent")[0].read_at,
             Some(read_at)
         );
+    }
+
+    #[test]
+    fn a_receipt_that_overtakes_the_delivery_is_not_undone_by_it() {
+        // The far end stores the message, its human reads it at once, and the
+        // receipt arrives while our delivery worker is still waiting on the
+        // `202` for the message itself. The worker's copy was read before the
+        // receipt existed; written back whole, it said "delivered, unread"
+        // over "read", and moved the stale copy over the finished one in
+        // `sent/`. The read was lost for good, about one run in four of the
+        // integration test that found it.
+        let (_dir, service, ana) = pair_with_receipts(true);
+        let sent = service
+            .send(
+                Draft {
+                    to: vec![Recipient::Node(ana)],
+                    subject: "read at once".to_owned(),
+                    body: "body".to_owned(),
+                    kind: Kind::Message,
+                    in_reply_to: None,
+                    attachments: Vec::new(),
+                },
+                SenderKind::Human,
+            )
+            .expect("send")
+            .message;
+
+        // The worker takes its copy and sends.
+        let mut progress = service
+            .pending_outbound()
+            .expect("pending")
+            .into_iter()
+            .find(|o| o.message.id == sent.id)
+            .expect("ours");
+
+        // Meanwhile, the receipt.
+        let mut events = service.subscribe();
+        let read_at = Utc::now().trunc_subsecs(3);
+        service
+            .record_read_receipts(
+                ana,
+                &[ReadNote {
+                    id: sent.id,
+                    read_at,
+                }],
+            )
+            .expect("record");
+
+        // Then the `202`.
+        assert!(progress.mark_delivered(ana, Utc::now()));
+        service.save_delivery_progress(&progress).expect("save");
+
+        assert_eq!(
+            service.delivery_of(sent.id).expect("ours").expect("sent")[0].read_at,
+            Some(read_at),
+            "the read stands"
+        );
+        assert_eq!(service.get(sent.id).expect("get").0, Mailbox::Sent);
+        let mut delivered = 0;
+        while let Ok(event) = events.try_recv() {
+            if matches!(event, Event::MessageDelivered { .. }) {
+                delivered += 1;
+            }
+        }
+        assert_eq!(delivered, 1, "and it was delivered once, not twice");
+    }
+
+    #[test]
+    fn a_read_recorded_mid_delivery_survives_the_worker_writing_back() {
+        // The other shape of the same race: two recipients, so the receipt
+        // from one does not finish the message, and the envelope the worker
+        // writes back is still in `out/` with the read in it.
+        let (_dir, service, ana) = pair_with_receipts(true);
+        let bob = hivemind_core::identity::Identity::from_seed([42u8; 32]).expect("identity");
+        service
+            .admit(
+                bob.node_id(),
+                "bob-mbp",
+                Some("bob"),
+                bob.certificate_der().to_vec(),
+                PeerAddr::manual("10.0.0.3", 8400),
+            )
+            .expect("admit");
+        let sent = service
+            .send(
+                Draft {
+                    to: vec![Recipient::Node(ana), Recipient::Node(bob.node_id())],
+                    subject: "two of them".to_owned(),
+                    body: "body".to_owned(),
+                    kind: Kind::Message,
+                    in_reply_to: None,
+                    attachments: Vec::new(),
+                },
+                SenderKind::Human,
+            )
+            .expect("send")
+            .message;
+        let mut progress = service
+            .pending_outbound()
+            .expect("pending")
+            .into_iter()
+            .find(|o| o.message.id == sent.id)
+            .expect("ours");
+
+        let read_at = Utc::now().trunc_subsecs(3);
+        service
+            .record_read_receipts(
+                ana,
+                &[ReadNote {
+                    id: sent.id,
+                    read_at,
+                }],
+            )
+            .expect("record");
+        assert_eq!(service.get(sent.id).expect("get").0, Mailbox::Out);
+
+        assert!(progress.mark_delivered(bob.node_id(), Utc::now()));
+        service.save_delivery_progress(&progress).expect("save");
+
+        let states = service.delivery_of(sent.id).expect("ours").expect("sent");
+        let hers = states.iter().find(|s| s.node == ana).expect("ana");
+        assert_eq!(hers.read_at, Some(read_at));
+        assert_eq!(service.get(sent.id).expect("get").0, Mailbox::Sent);
     }
 
     #[test]

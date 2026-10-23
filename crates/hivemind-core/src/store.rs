@@ -230,6 +230,27 @@ impl Outbound {
         true
     }
 
+    /// Take in what another copy of this envelope has recorded and this one
+    /// has not.
+    ///
+    /// Two writers hold copies: the delivery worker, for as long as a
+    /// delivery takes, and an arriving read receipt. Progress only moves
+    /// forward, so a delivery or a read recorded in either copy stands, and
+    /// the earlier time is the true one. Attempts and errors stay this copy's:
+    /// they are the worker's own bookkeeping, and nobody else writes them.
+    pub fn take_progress_from(&mut self, other: &Outbound) {
+        let earlier = |a: Option<chrono::DateTime<chrono::Utc>>, b| match (a, b) {
+            (Some(a), Some(b)) => Some(std::cmp::min(a, b)),
+            (a, b) => a.or(b),
+        };
+        for mine in &mut self.recipients {
+            if let Some(theirs) = other.recipients.iter().find(|r| r.node == mine.node) {
+                mine.delivered_at = earlier(mine.delivered_at, theirs.delivered_at);
+                mine.read_at = earlier(mine.read_at, theirs.read_at);
+            }
+        }
+    }
+
     /// Record a failed attempt, so backoff can be computed from it.
     pub fn mark_attempted(&mut self, to: NodeId, at: chrono::DateTime<chrono::Utc>, why: &str) {
         if let Some(state) = self.recipients.iter_mut().find(|r| r.node == to) {
@@ -852,6 +873,34 @@ mod tests {
         assert_eq!(outbound.recipients[0].read_at, Some(at(2_000)));
         assert_eq!(outbound.recipients[1].read_at, None);
         assert_eq!(outbound.state_of(fixture().from), None, "not a recipient");
+    }
+
+    #[test]
+    fn progress_from_another_copy_only_ever_moves_forward() {
+        // The worker's copy knows of the delivery, the copy on disk of the
+        // read that overtook it; neither may undo the other.
+        let one = NodeId::from_certificate_der(b"one");
+        let two = NodeId::from_certificate_der(b"two");
+        let fresh = Outbound {
+            recipients: vec![RecipientState::pending(one), RecipientState::pending(two)],
+            message: fixture(),
+        };
+        let mut worker = fresh.clone();
+        worker.mark_delivered(one, at(1_500));
+        worker.mark_attempted(two, at(1_500), "unreachable");
+        let mut on_disk = fresh;
+        on_disk.mark_read(one, at(1_000));
+
+        worker.take_progress_from(&on_disk);
+
+        assert_eq!(worker.recipients[0].read_at, Some(at(1_000)));
+        assert_eq!(
+            worker.recipients[0].delivered_at,
+            Some(at(1_000)),
+            "the earlier of the two: it cannot have been read before it arrived"
+        );
+        assert_eq!(worker.recipients[1].delivered_at, None);
+        assert_eq!(worker.recipients[1].attempts, 1, "the worker's own count");
     }
 
     #[test]

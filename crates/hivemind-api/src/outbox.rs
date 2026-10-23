@@ -64,7 +64,7 @@ impl Outbox for ServiceOutbox {
     }
 
     fn store(&self, outbound: &Outbound) {
-        if let Err(error) = self.service.save_outbound(outbound) {
+        if let Err(error) = self.service.save_delivery_progress(outbound) {
             tracing::warn!(%error, id = %outbound.message.id, "could not save delivery progress");
         }
     }
