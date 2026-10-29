@@ -47,7 +47,7 @@ ed25519-dalek = { version = "3", features = ["alloc", "pkcs8", "rand_core"] }
 # proof (ADR 0013) rather than adding `hmac` beside it.
 ring = "0.17"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 rmcp = { version = "3", features = ["server", "macros", "transport-streamable-http-server", "schemars"] }
 rmcp-client = { package = "rmcp", version = "3", features = ["client", "transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }
 schemars = "1"
